@@ -184,7 +184,7 @@ docker compose up --build
 
 | Переменная | По умолчанию | Назначение |
 |---|---|---|
-| `OPENROUTER_MODEL` | `deepseek/deepseek-v4-flash` | Основная модель OpenRouter |
+| `OPENROUTER_MODEL` | `deepseek/deepseek-v4-pro` | Основная модель OpenRouter |
 | `OPENROUTER_FALLBACK_MODEL` | — | Резервная модель (если основная упала) |
 | `DEEPSEEK_API_KEY` | — | Опц. прямой DeepSeek как основной провайдер (OpenRouter становится fallback) |
 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | |

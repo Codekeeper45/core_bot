@@ -8,7 +8,7 @@ module.exports = {
   // OpenRouter — остаётся для STT (голос) и Vision (картинки), которых нет у
   // DeepSeek, а также как fallback для текстового агента, если DeepSeek недоступен.
   OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY || '',
-  OPENROUTER_MODEL: process.env.OPENROUTER_MODEL || 'deepseek/deepseek-v4-flash',
+  OPENROUTER_MODEL: process.env.OPENROUTER_MODEL || 'deepseek/deepseek-v4-pro',
   // Backup model used only when the primary fails after all retries (provider
   // outage / no response). Set to '' or same as primary to disable.
   OPENROUTER_FALLBACK_MODEL: process.env.OPENROUTER_FALLBACK_MODEL || 'qwen/qwen3.6-plus',
