@@ -1,0 +1,20 @@
+# Cloudflare Worker config. Заполни ОБА плейсхолдера ниже, дальше:
+#   npm install -g wrangler
+#   cd cloudflare-worker
+#   wrangler login           # один раз — откроет браузер, авторизация в твой Cloudflare аккаунт
+#   wrangler kv namespace create WAZZUP_QUEUE   # создаст KV и выдаст id — впиши в kv_namespaces.id ниже
+#   wrangler secret put WEBHOOK_SECRET          # вставит секрет (тот же что WAZZUP_WEBHOOK_SECRET у бота)
+#   wrangler deploy
+
+name = "wazzup-proxy"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# Worker будет доступен по https://wazzup-proxy.<твой-subdomain>.workers.dev
+# subdomain выбирается один раз в дашборде Cloudflare → Workers & Pages.
+
+[[kv_namespaces]]
+binding = "WAZZUP_QUEUE"
+id = "<YOUR_KV_NAMESPACE_ID>"
+
+# WEBHOOK_SECRET задаётся через `wrangler secret put WEBHOOK_SECRET`, не в файле.

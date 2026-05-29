@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Secrets & credentials
+.env
+.env.*
+!.env.example
+auth_info_baileys/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+
+# Tooling / local agent state (must never be published)
+.claude/
+.antigravitycli/
+.gemini/
+
+# Local databases / vector stores
+ruvector.db
+*.rvf
+*.rvf.lock
+
+# Cloudflare Worker local state
+cloudflare-worker/.wrangler/
