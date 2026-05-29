@@ -87,7 +87,7 @@ test('tool round straddling the cut stays API-valid (no orphan tool result kept)
   // Build: 8 plain msgs, then a tool round near the boundary, then 3 recent.
   const messages = [
     ...bigMsgs(8),
-    { role: 'assistant', tool_calls: [{ id: 'tA', function: { name: 'save_qualification_data' } }] },
+    { role: 'assistant', tool_calls: [{ id: 'tA', function: { name: 'notify_manager' } }] },
     { role: 'tool', tool_call_id: 'tA', content: 'x'.repeat(80) },
     { role: 'assistant', content: 'recent-1' },
     { role: 'user', content: 'recent-2' },
