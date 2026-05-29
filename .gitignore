@@ -14,7 +14,7 @@ auth_info_baileys/
 .DS_Store
 
 # Tooling / local agent state (must never be published)
-.claude/
+.claude/settings.local.json
 .antigravitycli/
 .gemini/
 

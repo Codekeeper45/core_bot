@@ -1,7 +1,61 @@
 'use strict';
 const { setHandoff } = require('../services/mysql');
 const config = require('../config');
-const { maskPhone, maskName } = require('../utils/piiMask');
+const { pickRealPhone } = require('../utils/helpers');
+
+// ─── Tool definition (OpenAI function-calling schema) ───────────────────────
+const definition = {
+  type: 'function',
+  function: {
+    name: 'notify_manager',
+    description: `Передаёт диалог живому менеджеру и ставит бота на паузу (handoff). Это инструмент, меняющий состояние — вызывай ТОЛЬКО в ответ на явный сигнал пользователя или ситуацию вне компетенции бота.
+
+Когда вызывать:
+- пользователь явно просит связать с человеком / менеджером / оператором;
+- жалоба или конфликт, требующий участия человека;
+- конкретное требование/запрос, который бот не может выполнить сам;
+- вопрос вне зоны ответственности бота, требующий ручной обработки.
+
+Чего делать НЕ надо:
+- НЕ эскалируй на простое «да» / «окей» / «спасибо» вне явного запроса о человеке.
+- НЕ эскалируй на эмоцию или лёгкое недовольство без конкретного требования — сначала уточни, что нужно пользователю.
+
+После вызова верни пользователю ТОЛЬКО поле client_message из результата — ничего не добавляй от себя.`,
+    parameters: {
+      type: 'object',
+      properties: {
+        event_type: {
+          type: 'string',
+          enum: ['human_request', 'complaint', 'escalation'],
+          description: 'Тип события: human_request=просьба о человеке, complaint=жалоба, escalation=иная эскалация',
+        },
+        summary: {
+          type: 'string',
+          description: 'Краткое описание запроса для менеджера: суть вопроса и контекст',
+        },
+        phone: {
+          type: 'string',
+          description: 'Номер телефона пользователя для связи (только цифры, без +). Если номер неизвестен — передай пустую строку.',
+        },
+      },
+      required: ['event_type', 'summary'],
+    },
+  },
+};
+
+// ─── Tool handler (вызывается registry'ем) ──────────────────────────────────
+// context = { channel, chatId, phone, clientName }
+async function handler(args, context) {
+  const { channel, chatId, phone, clientName } = context;
+  const notifyPhone = pickRealPhone(args.phone, phone);
+  return runNotifyManager({
+    ...args,
+    channel,
+    client_name: clientName,
+    phone: notifyPhone,
+    chat_id: chatId,
+  });
+}
 
 async function runNotifyManager(input) {
   try {
@@ -106,4 +160,4 @@ async function runNotifyManager(input) {
   }
 }
 
-module.exports = { runNotifyManager };
+module.exports = { runNotifyManager, definition, handler };

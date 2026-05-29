@@ -3,10 +3,9 @@ const OpenAI = require('openai');
 const config = require('../config');
 const { getSystemPrompt } = require('./systemPrompt');
 const { loadChatHistory, saveChatHistory } = require('./memory');
-const { tools } = require('./toolDefinitions');
+const { tools, executeToolCall } = require('../tools');
 const { runNotifyManager } = require('../tools/notifyManager');
 const { withRetry } = require('../utils/retry');
-const { pickRealPhone } = require('../utils/helpers');
 
 const FALLBACK_AI = 'Произошла ошибка при обработке сообщения. Пожалуйста, повторите запрос чуть позже.';
 const LLM_MAX_RETRIES = 3; // 3 retries = 4 total attempts (first retry after 20s for 429)
@@ -103,28 +102,6 @@ async function llmCreateWithFallback(makeParams, retryOpts, client) {
     }
   }
   throw lastErr;
-}
-
-async function executeToolCall(name, args, context) {
-  const { channel, chatId, phone, clientName } = context;
-
-  switch (name) {
-    case 'notify_manager': {
-      // Phone for the manager alert: a real number the model passed, else the
-      // channel-context number (real on WhatsApp).
-      const notifyPhone = pickRealPhone(args.phone, phone);
-      return runNotifyManager({
-        ...args,
-        channel,
-        client_name: clientName,
-        phone: notifyPhone,
-        chat_id: chatId,
-      });
-    }
-
-    default:
-      return { success: false, message: `Unknown tool: ${name}` };
-  }
 }
 
 // Assemble the message list sent to the LLM: main system prompt, then the

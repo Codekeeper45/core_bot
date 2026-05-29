@@ -1,0 +1,16 @@
+node_modules
+npm-debug.log
+.env
+.env.*
+auth_info_baileys
+.git
+.gitignore
+.claude
+.antigravitycli
+.gemini
+*.log
+*.rvf
+*.rvf.lock
+ruvector.db
+cloudflare-worker/.wrangler
+tests

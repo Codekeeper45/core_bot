@@ -57,8 +57,10 @@ node --test tests/normalize.test.js   # один файл
 |---|---|---|
 | `notify_manager` | `tools/notifyManager.js` | Передать диалог менеджеру (WA-группа/личка + Telegram + ссылка на IG-профиль), поставить бота на паузу (handoff). |
 
-Схемы инструментов — в `agent/toolDefinitions.js`, диспетчеризация — в `executeToolCall()`
-внутри `agent/agent.js`.
+Инструменты подключаются через **tool registry** (`src/tools/index.js`): один файл в `src/tools/` =
+один инструмент, экспортирующий `{ definition, handler }`, автозагрузка. Чтобы добавить инструмент —
+создайте новый файл (эталон: `tools/exampleEcho.js`); `agent.js` править не нужно. См. `AGENTS.md`
+и slash-команду `/add-tool`.
 
 ### Channels (`src/channels/` + `src/services/`)
 
@@ -113,8 +115,8 @@ DAILY_IMAGE_LIMIT / DAILY_DOC_LIMIT: 10
 ## Extension points — как собрать своего бота
 
 1. **Поведение/личность** → отредактируй `src/agent/prompts/system_prompt.txt`.
-2. **Новый инструмент** → добавь схему в `agent/toolDefinitions.js`, обработай `case` в
-   `executeToolCall()` (`agent/agent.js`), при необходимости создай файл в `src/tools/`.
+2. **Новый инструмент** → создай один файл в `src/tools/` с `{ definition, handler }` (registry
+   подхватит автоматически; `agent.js` не трогать). Подробно — в `AGENTS.md` / `EXTENDING.md`.
 3. **Новый канал** → адаптер в `src/channels/` + ветка в `normalize.js` и `sendReply()`.
 4. **Модель/провайдер** → через env (`OPENROUTER_MODEL`, `DEEPSEEK_*`); код менять не нужно.
 
