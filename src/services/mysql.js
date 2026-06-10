@@ -31,6 +31,9 @@ function getPool() {
       waitForConnections: true,
       connectionLimit: 10,
       decimalNumbers: true,
+      // Все DATETIME трактуем как UTC независимо от TZ сервера БД — на этом
+      // построены планировщики (scheduledRunner/reportScheduler) и daily-counts.
+      timezone: 'Z',
     });
     pool.on('error', (err) => console.error('[MySQL] Pool error:', err.message));
   }
@@ -183,11 +186,12 @@ async function initTables() {
       interval_min  INT          NULL,
       enabled       TINYINT(1)   NOT NULL DEFAULT 1,
       fail_count    INT          NOT NULL DEFAULT 0,
+      next_run_at   DATETIME     NULL,
       last_run_at   DATETIME     NULL,
       last_status   VARCHAR(255) NULL,
       created_at    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
       updated_at    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      INDEX idx_sched_due (enabled, kind),
+      INDEX idx_sched_due (enabled, next_run_at),
       INDEX idx_sched_owner (owner_channel, owner_chat_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
@@ -217,6 +221,15 @@ async function initTables() {
     }
   }
 
+  // Миграция: предвычисленный момент следующего запуска расписания (модель next_run_at).
+  // Backfill старых строк делает scheduledRunner на первом tick (rearmSchedule).
+  try {
+    await dbQuery('ALTER TABLE orch_schedules ADD COLUMN next_run_at DATETIME NULL AFTER fail_count');
+    console.log('[MySQL] Migrated: orch_schedules.next_run_at added');
+  } catch (err) {
+    if (err && err.errno !== 1060) console.error('[MySQL] orch_schedules migration:', err.message);
+  }
+
   // Проверка миграций: если ALTER выше упал не по 1060 (нет колонки) — падаем
   // ГРОМКО на старте, а не делаем вид, что схема готова (иначе ошибки всплывут
   // позже как невнятные сбои запросов).
@@ -232,6 +245,7 @@ async function initTables() {
 async function verifyCriticalSchema() {
   const probes = [
     'SELECT deadline, dispatched_at, completed_at FROM orch_tasks LIMIT 0',
+    'SELECT next_run_at FROM orch_schedules LIMIT 0',
   ];
   for (const sql of probes) {
     try {
@@ -549,6 +563,7 @@ async function setSetting(k, v) {
 const SCHEDULE_FIELDS = [
   'title', 'instruction', 'kind', 'run_at', 'at_hour', 'at_minute',
   'weekdays', 'month_days', 'interval_min', 'enabled',
+  'next_run_at', 'last_run_at', 'fail_count',
 ];
 
 async function createSchedule(s) {
@@ -556,13 +571,14 @@ async function createSchedule(s) {
     const rows = await dbQuery(
       `INSERT INTO orch_schedules
         (owner_channel, owner_chat_id, owner_phone, title, instruction, kind,
-         run_at, at_hour, at_minute, weekdays, month_days, interval_min)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+         run_at, at_hour, at_minute, weekdays, month_days, interval_min, next_run_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         s.owner_channel, String(s.owner_chat_id), s.owner_phone || null,
         s.title, s.instruction, s.kind,
         s.run_at || null, s.at_hour ?? null, s.at_minute ?? 0,
         s.weekdays || null, s.month_days || null, s.interval_min ?? null,
+        s.next_run_at || null,
       ]
     );
     return rows.insertId;
@@ -643,16 +659,26 @@ async function deleteSchedule(id) {
   }
 }
 
-// Успешный (или штатно-завершённый) запуск: фиксируем момент + статус, сбрасываем счётчик ошибок.
-async function markScheduleRun(id, when, status) {
+// Успешный (или штатно-завершённый) запуск: фиксируем момент + статус, сбрасываем счётчик
+// ошибок и записываем предвычисленный момент следующего запуска (null = больше не планируется).
+async function markScheduleRun(id, when, status, nextRunAt = null) {
   try {
     const dt = (when instanceof Date ? when : new Date()).toISOString().slice(0, 19).replace('T', ' ');
     await dbQuery(
-      'UPDATE orch_schedules SET last_run_at = ?, last_status = ?, fail_count = 0 WHERE id = ?',
-      [dt, String(status || 'ok').slice(0, 250), id]
+      'UPDATE orch_schedules SET last_run_at = ?, last_status = ?, fail_count = 0, next_run_at = ? WHERE id = ?',
+      [dt, String(status || 'ok').slice(0, 250), nextRunAt, id]
     );
   } catch (err) {
     console.error('[MySQL] markScheduleRun:', err.message);
+  }
+}
+
+// Только перевзвести момент следующего запуска (backfill строк без next_run_at).
+async function setScheduleNextRun(id, nextRunAt) {
+  try {
+    await dbQuery('UPDATE orch_schedules SET next_run_at = ? WHERE id = ?', [nextRunAt, id]);
+  } catch (err) {
+    console.error('[MySQL] setScheduleNextRun:', err.message);
   }
 }
 
@@ -1012,7 +1038,7 @@ module.exports = {
   getSettings, setSetting,
   createSchedule, listEnabledSchedules, listSchedulesByOwner, getSchedule,
   updateSchedule, setScheduleEnabled, deleteSchedule,
-  markScheduleRun, touchScheduleStatus, bumpScheduleFail, countSchedules,
+  markScheduleRun, setScheduleNextRun, touchScheduleStatus, bumpScheduleFail, countSchedules,
   // Оркестратор: задачи
   createTasksBulk, getTask, listTasksForProject, assignTask, markDispatched, updateTaskStatus,
   updateTaskFields,

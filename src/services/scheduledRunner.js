@@ -3,63 +3,36 @@
 // Раз в минуту проверяет orch_schedules и для каждого «созревшего» расписания запускает
 // инструкцию через обычный агентный цикл (инъектированный deliver из index.js).
 //
-// Время — локальное (UTC+5) для recurring; once.run_at — абсолютный UTC.
-// Состояние (last_run_at) — в БД, переживает рестарт. Дедуп — по локальной минуте.
+// Модель next_run_at: момент следующего запуска предвычислен и лежит в БД (UTC).
+// Due = next_run_at <= now → опоздавший tick (долгий агентный прогон, рестарт, деплой)
+// всё равно увидит созревшую задачу — пропусков «мимо минуты» нет. После запуска
+// next_run_at пересчитывается (utils/scheduleTime). lock_busy не двигает next_run_at,
+// поэтому ретраится каждый tick до успеха. Для daily/weekly/monthly есть окно catch-up
+// (SCHEDULE_CATCHUP_WINDOW_MIN): сильно протухший запуск помечается missed и переносится,
+// once досылается всегда.
 const {
   listEnabledSchedules, markScheduleRun, touchScheduleStatus, bumpScheduleFail,
+  setScheduleNextRun, setScheduleEnabled,
 } = require('./mysql');
-const { localNow, isoWeekday } = require('../utils/localTime');
+const { computeNextRunAt, toUtc, fmtUtc } = require('../utils/scheduleTime');
+const config = require('../config');
 
-function csvHas(csv, value) {
-  if (!csv) return false;
-  return String(csv).split(',').map((s) => s.trim()).filter(Boolean).includes(String(value));
-}
-
-// DATETIME из БД → UTC Date. mysql2 отдаёт DATETIME как Date (сервер в UTC — как уже
-// предполагает остальной код: daily-counts/reportScheduler через toISOString). «Голую»
-// строку 'YYYY-MM-DD HH:MM:SS' трактуем как UTC (так мы её и храним).
-function toUtc(v) {
-  if (v instanceof Date) return v;
-  const s = String(v);
-  return new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(s) ? s : s.replace(' ', 'T') + 'Z');
-}
-
-// Совпадает ли last_run_at с текущей локальной минутой (дедуп — не стрелять дважды в минуту).
-function sameLocalMinute(lastRunAt, now) {
-  if (!lastRunAt) return false;
-  const a = localNow(toUtc(lastRunAt));
-  const b = localNow(now);
-  return a.toISOString().slice(0, 16) === b.toISOString().slice(0, 16);
-}
+const RECURRING_FIXED = ['daily', 'weekly', 'monthly'];
 
 // Пора ли запускать расписание прямо сейчас. Чистая функция.
 function isDue(row, now = new Date()) {
-  if (!row || !row.enabled) return false;
-  switch (row.kind) {
-    case 'once':
-      return !row.last_run_at && !!row.run_at && toUtc(row.run_at) <= now;
-    case 'interval': {
-      const ms = (Number(row.interval_min) || 0) * 60000;
-      if (ms <= 0) return false;
-      return !row.last_run_at || (now.getTime() - toUtc(row.last_run_at).getTime()) >= ms;
-    }
-    case 'daily':
-    case 'weekly':
-    case 'monthly': {
-      const loc = localNow(now);
-      if (loc.getUTCHours() !== Number(row.at_hour)) return false;
-      if (loc.getUTCMinutes() !== (Number(row.at_minute) || 0)) return false;
-      if (row.kind === 'weekly' && !csvHas(row.weekdays, isoWeekday(now))) return false;
-      if (row.kind === 'monthly' && !csvHas(row.month_days, loc.getUTCDate())) return false;
-      return !sameLocalMinute(row.last_run_at, now);
-    }
-    default:
-      return false;
-  }
+  if (!row || !row.enabled || !row.next_run_at) return false;
+  return toUtc(row.next_run_at).getTime() <= now.getTime();
 }
 
 function wrapInstruction(title, instruction) {
   return `[АВТО-ЗАДАЧА ПО РАСПИСАНИЮ «${title}»]\n${instruction}`;
+}
+
+// Следующий next_run_at строкой для БД (или null, если планировать нечего).
+function nextFor(row, now) {
+  const d = computeNextRunAt(row, now);
+  return d ? fmtUtc(d) : null;
 }
 
 let deliverFn = null;   // инъекция из index.js (deliverInstruction)
@@ -77,21 +50,32 @@ async function runSchedule(row, now) {
     title: row.title,
   });
 
+  const isOnce = row.kind === 'once';
   if (res && res.ok) {
-    await markScheduleRun(row.id, now, 'ok');
+    await markScheduleRun(row.id, now, 'ok', isOnce ? null : nextFor(row, now));
+    if (isOnce) await setScheduleEnabled(row.id, false); // завершено — больше не опрашиваем
     return 'ok';
   }
   if (res && res.reason === 'lock_busy') {
-    // Чат владельца занят (босс пишет прямо сейчас) — не теряем, повторим на следующем tick.
+    // Чат владельца занят (босс пишет прямо сейчас). next_run_at не трогаем —
+    // расписание остаётся due и повторится на следующем tick (в т.ч. daily).
     await touchScheduleStatus(row.id, 'lock_busy');
     return 'lock_busy';
   }
-  // Ошибка агентного цикла. Для once — копим fail_count (досыл, но не вечно);
-  // для recurring — отмечаем выполненным, чтобы не спамить ретраями каждую минуту.
+  // Ошибка агентного цикла. Для once — копим fail_count (ретрай каждый tick, cutoff в БД);
+  // для recurring — переносим на следующий раз, чтобы не спамить ретраями каждую минуту.
   const status = (res && res.reason) || 'agent_error';
-  if (row.kind === 'once') await bumpScheduleFail(row.id, status);
-  else await markScheduleRun(row.id, now, status);
+  if (isOnce) await bumpScheduleFail(row.id, status);
+  else await markScheduleRun(row.id, now, status, nextFor(row, now));
   return status;
+}
+
+// Строка без next_run_at (legacy до миграции или ручная правка в БД): дозаполнить.
+// Завершённое once реанимировать нечем — выключаем, чтобы не опрашивать вечно.
+async function rearmSchedule(row, now) {
+  const next = nextFor(row, now);
+  if (next) await setScheduleNextRun(row.id, next);
+  else await setScheduleEnabled(row.id, false);
 }
 
 async function tick(now = new Date()) {
@@ -100,8 +84,18 @@ async function tick(now = new Date()) {
   try {
     const rows = await listEnabledSchedules();
     for (const row of rows) {
-      if (!isDue(row, now)) continue;
       try {
+        if (!row.next_run_at) { await rearmSchedule(row, now); continue; }
+        if (!isDue(row, now)) continue;
+        // Сильно протухший фиксированный recurring (простой дольше окна) — missed,
+        // переносим: дневная сводка в 18:00 уже не нужна. once досылаем всегда.
+        if (RECURRING_FIXED.includes(row.kind)) {
+          const lateMs = now.getTime() - toUtc(row.next_run_at).getTime();
+          if (lateMs > config.SCHEDULE_CATCHUP_WINDOW_MIN * 60000) {
+            await markScheduleRun(row.id, now, 'missed', nextFor(row, now));
+            continue;
+          }
+        }
         await runSchedule(row, now);
       } catch (e) {
         console.error(`[SchedRunner] schedule #${row.id}:`, e.message);
@@ -123,11 +117,11 @@ function start({ deliver } = {}) {
   if (timer) return;
   timer = setInterval(tick, 60 * 1000);
   if (timer.unref) timer.unref();
-  console.log('[SchedRunner] Включён: проверка расписаний раз в минуту');
+  console.log('[SchedRunner] Включён: проверка расписаний раз в минуту (модель next_run_at)');
 }
 
 module.exports = {
   start,
   // для тестов
-  _internals: { isDue, sameLocalMinute, csvHas, wrapInstruction, tick, runSchedule, setDeliver: (f) => { deliverFn = f; } },
+  _internals: { isDue, wrapInstruction, tick, runSchedule, setDeliver: (f) => { deliverFn = f; } },
 };

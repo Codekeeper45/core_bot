@@ -131,4 +131,13 @@ module.exports = {
   EVENING_REPORT_HOUR: parseInt(process.env.EVENING_REPORT_HOUR || '18', 10),
   // Кому слать утреннюю сводку: цифры WhatsApp через запятую. Пусто = все BOSS_CONTACTS.
   SCHEDULER_BOSS_WA: (process.env.SCHEDULER_BOSS_WA || '').split(',').map((s) => s.trim().replace(/\D/g, '')).filter(Boolean),
+
+  // ── Планировщик действий ИИ (manage_schedule / scheduledRunner) ───────────
+  // Окно catch-up для daily/weekly/monthly: если запуск протух сильнее (простой,
+  // долгий агентный прогон) — помечаем missed и переносим, не шлём устаревшее.
+  SCHEDULE_CATCHUP_WINDOW_MIN: parseInt(process.env.SCHEDULE_CATCHUP_WINDOW_MIN || '120', 10),
+  // Защита от расходов на LLM: минимальный период interval-расписаний и потолок
+  // одновременно активных расписаний (каждый запуск — полный агентный цикл).
+  SCHEDULE_MIN_INTERVAL_MIN: parseInt(process.env.SCHEDULE_MIN_INTERVAL_MIN || '5', 10),
+  SCHEDULE_MAX_ACTIVE: parseInt(process.env.SCHEDULE_MAX_ACTIVE || '30', 10),
 };
