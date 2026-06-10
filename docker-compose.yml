@@ -1,0 +1,38 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Внутри compose-сети MySQL доступен по имени сервиса `mysql`.
+      # Переопределяет MYSQL_HOST из .env.
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+    ports:
+      - "${PORT:-3000}:3000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    volumes:
+      # WhatsApp-сессия переживает рестарт контейнера.
+      - wa_auth:/app/auth_info_baileys
+
+  mysql:
+    image: mysql:8
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: "${MYSQL_DATABASE:-botdb}"
+      MYSQL_USER: "${MYSQL_USER:-botuser}"
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD:-botpass}"
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:-rootpass}"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p$$MYSQL_ROOT_PASSWORD"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  wa_auth:
+  mysql_data:
