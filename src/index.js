@@ -239,10 +239,7 @@ async function processMessage(rawPayload) {
 
     // Шаг 9: AI Agent (tool-calling loop)
     // Добавляем системный timestamp к сообщению
-    const now = new Date();
-    const pad = (n) => String(n).padStart(2, '0');
-    const systemTimestamp = `[СИСТЕМА: дата и время сообщения (UTC) — ${now.getUTCFullYear()}-${pad(now.getUTCMonth()+1)}-${pad(now.getUTCDate())} ${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}]`;
-    const combinedWithTime = `${systemTimestamp}\n${combined_message}`;
+    const combinedWithTime = `${systemTimestamp()}\n${combined_message}`;
 
     let replyText;
     try {
@@ -272,6 +269,13 @@ async function processMessage(rawPayload) {
   }
 }
 
+// Системный штамп с текущим UTC — добавляется к каждому сообщению агента, чтобы он
+// знал «сейчас». Используется и в processMessage, и в deliverInstruction (планировщик).
+function systemTimestamp(now = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `[СИСТЕМА: дата и время сообщения (UTC) — ${now.getUTCFullYear()}-${pad(now.getUTCMonth() + 1)}-${pad(now.getUTCDate())} ${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}]`;
+}
+
 // =====================================================================
 // Отправка ответа по каналу
 // =====================================================================
@@ -286,6 +290,41 @@ async function sendReply(channel, chatId, text) {
     }
   } catch (err) {
     console.error('[SendReply] Error:', err.message);
+  }
+}
+
+// Выполнить инструкцию ботом от имени владельца (для scheduledRunner): захватить лок чата,
+// прогнать обычный агентный цикл (role=boss), ответ отправить владельцу. Единый с processMessage
+// путь ответа в канал. Возвращает {ok, reason?, reply?}.
+async function deliverInstruction({ channel, chatId, phone, clientName, instruction }) {
+  const locked = await acquireLock(channel, chatId);
+  if (!locked) return { ok: false, reason: 'lock_busy' }; // босс сейчас пишет — повторим на след. tick
+
+  try {
+    const combinedMessage = `${systemTimestamp()}\n${instruction}`;
+    let reply;
+    try {
+      reply = await runAgent({
+        combinedMessage,
+        channel,
+        chatId,
+        phone,
+        clientName: clientName || 'boss',
+        role: 'boss',
+        emit: (text) => sendReply(channel, chatId, text),
+      });
+    } catch (err) {
+      console.error('[Deliver] Agent error:', err.message);
+      return { ok: false, reason: 'agent_error' };
+    }
+    // ИИ сам решает, есть ли что сообщить (промпт). Пустой ответ — молчим.
+    if (reply) {
+      const clean = sanitizeReply(reply);
+      if (clean) await sendReply(channel, chatId, clean);
+    }
+    return { ok: true, reply };
+  } finally {
+    await releaseLockAndProcessQueue(channel, chatId, processMessage);
   }
 }
 
@@ -326,6 +365,14 @@ app.get('/health', async (req, res) => {
     if (m.total > 0 && failures / m.total > 0.1) health.status = 'degraded';
   } catch (err) {
     health.agent = `error: ${err.message}`;
+  }
+
+  // Активные расписания действий (manage_schedule).
+  try {
+    const { countSchedules } = require('./services/mysql');
+    health.schedules = { enabled: await countSchedules() };
+  } catch (err) {
+    health.schedules = `error: ${err.message}`;
   }
 
   health.response_time_ms = Date.now() - start;
@@ -380,6 +427,10 @@ async function startServer() {
 
   // Планировщик отчётов: вечерний сбор статусов с исполнителей, утренняя сводка боссу.
   require('./services/reportScheduler').start();
+
+  // Планировщик произвольных действий ИИ (manage_schedule). deliverInstruction
+  // инъектируем, чтобы не создавать цикл require index↔scheduledRunner.
+  require('./services/scheduledRunner').start({ deliver: deliverInstruction });
 
   // HTTP server (health check + TG webhook if configured)
   const server = app.listen(config.PORT, () => {

@@ -164,6 +164,34 @@ async function initTables() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
+  // Расписания действий, которые ИИ планирует сам (manage_schedule). В момент
+  // срабатывания scheduledRunner выполняет instruction через обычный агентный цикл.
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS orch_schedules (
+      id            INT AUTO_INCREMENT PRIMARY KEY,
+      owner_channel VARCHAR(20)  NOT NULL,
+      owner_chat_id VARCHAR(255) NOT NULL,
+      owner_phone   VARCHAR(32)  NULL,
+      title         VARCHAR(255) NOT NULL,
+      instruction   TEXT         NOT NULL,
+      kind          VARCHAR(16)  NOT NULL,
+      run_at        DATETIME     NULL,
+      at_hour       TINYINT      NULL,
+      at_minute     TINYINT      NULL DEFAULT 0,
+      weekdays      VARCHAR(20)  NULL,
+      month_days    VARCHAR(64)  NULL,
+      interval_min  INT          NULL,
+      enabled       TINYINT(1)   NOT NULL DEFAULT 1,
+      fail_count    INT          NOT NULL DEFAULT 0,
+      last_run_at   DATETIME     NULL,
+      last_status   VARCHAR(255) NULL,
+      created_at    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+      updated_at    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_sched_due (enabled, kind),
+      INDEX idx_sched_owner (owner_channel, owner_chat_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
   // Миграция: добавить колонку сводки в уже существующие таблицы истории
   // (CREATE TABLE IF NOT EXISTS не добавит колонку к созданной ранее таблице).
   try {
@@ -517,6 +545,152 @@ async function setSetting(k, v) {
   }
 }
 
+// ── Расписания действий (orch_schedules) ────────────────────────────────────
+const SCHEDULE_FIELDS = [
+  'title', 'instruction', 'kind', 'run_at', 'at_hour', 'at_minute',
+  'weekdays', 'month_days', 'interval_min', 'enabled',
+];
+
+async function createSchedule(s) {
+  try {
+    const rows = await dbQuery(
+      `INSERT INTO orch_schedules
+        (owner_channel, owner_chat_id, owner_phone, title, instruction, kind,
+         run_at, at_hour, at_minute, weekdays, month_days, interval_min)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        s.owner_channel, String(s.owner_chat_id), s.owner_phone || null,
+        s.title, s.instruction, s.kind,
+        s.run_at || null, s.at_hour ?? null, s.at_minute ?? 0,
+        s.weekdays || null, s.month_days || null, s.interval_min ?? null,
+      ]
+    );
+    return rows.insertId;
+  } catch (err) {
+    console.error('[MySQL] createSchedule:', err.message);
+    throw dbError(err, 'createSchedule');
+  }
+}
+
+// Все активные расписания (для tick движка).
+async function listEnabledSchedules() {
+  try {
+    return await dbQuery('SELECT * FROM orch_schedules WHERE enabled = 1 ORDER BY id ASC');
+  } catch (err) {
+    console.error('[MySQL] listEnabledSchedules:', err.message);
+    return [];
+  }
+}
+
+// Расписания конкретного владельца (для list в инструменте).
+async function listSchedulesByOwner(channel, chatId, includeDisabled = false) {
+  try {
+    const where = includeDisabled ? '' : ' AND enabled = 1';
+    return await dbQuery(
+      `SELECT * FROM orch_schedules WHERE owner_channel = ? AND owner_chat_id = ?${where} ORDER BY id DESC`,
+      [String(channel), String(chatId)]
+    );
+  } catch (err) {
+    console.error('[MySQL] listSchedulesByOwner:', err.message);
+    return [];
+  }
+}
+
+async function getSchedule(id) {
+  try {
+    const rows = await dbQuery('SELECT * FROM orch_schedules WHERE id = ? LIMIT 1', [id]);
+    return rows.length ? rows[0] : null;
+  } catch (err) {
+    throw dbError(err, 'getSchedule');
+  }
+}
+
+// Точечная правка (whitelist полей). Возвращает число обновлённых полей.
+async function updateSchedule(id, fields = {}) {
+  const sets = [];
+  const vals = [];
+  for (const col of SCHEDULE_FIELDS) {
+    if (fields[col] !== undefined) { sets.push(`${col} = ?`); vals.push(fields[col]); }
+  }
+  if (!sets.length) return 0;
+  try {
+    vals.push(id);
+    await dbQuery(`UPDATE orch_schedules SET ${sets.join(', ')} WHERE id = ?`, vals);
+    return sets.length;
+  } catch (err) {
+    console.error('[MySQL] updateSchedule:', err.message);
+    return 0;
+  }
+}
+
+async function setScheduleEnabled(id, on) {
+  try {
+    await dbQuery('UPDATE orch_schedules SET enabled = ? WHERE id = ?', [on ? 1 : 0, id]);
+    return true;
+  } catch (err) {
+    console.error('[MySQL] setScheduleEnabled:', err.message);
+    return false;
+  }
+}
+
+async function deleteSchedule(id) {
+  try {
+    const res = await dbQuery('DELETE FROM orch_schedules WHERE id = ?', [id]);
+    return (res.affectedRows || 0) > 0;
+  } catch (err) {
+    console.error('[MySQL] deleteSchedule:', err.message);
+    return false;
+  }
+}
+
+// Успешный (или штатно-завершённый) запуск: фиксируем момент + статус, сбрасываем счётчик ошибок.
+async function markScheduleRun(id, when, status) {
+  try {
+    const dt = (when instanceof Date ? when : new Date()).toISOString().slice(0, 19).replace('T', ' ');
+    await dbQuery(
+      'UPDATE orch_schedules SET last_run_at = ?, last_status = ?, fail_count = 0 WHERE id = ?',
+      [dt, String(status || 'ok').slice(0, 250), id]
+    );
+  } catch (err) {
+    console.error('[MySQL] markScheduleRun:', err.message);
+  }
+}
+
+// Записать только статус (lock_busy) — last_run_at НЕ трогаем, чтобы повторить на следующем tick.
+async function touchScheduleStatus(id, status) {
+  try {
+    await dbQuery('UPDATE orch_schedules SET last_status = ? WHERE id = ?', [String(status).slice(0, 250), id]);
+  } catch (err) {
+    console.error('[MySQL] touchScheduleStatus:', err.message);
+  }
+}
+
+// Неудача once: +1 к счётчику; после 3 подряд — выключаем (чтобы не досылать вечно битую).
+async function bumpScheduleFail(id, status) {
+  try {
+    await dbQuery(
+      `UPDATE orch_schedules
+         SET fail_count = fail_count + 1,
+             last_status = ?,
+             enabled = CASE WHEN fail_count + 1 >= 3 THEN 0 ELSE enabled END
+       WHERE id = ?`,
+      [String(status || 'error').slice(0, 250), id]
+    );
+  } catch (err) {
+    console.error('[MySQL] bumpScheduleFail:', err.message);
+  }
+}
+
+async function countSchedules() {
+  try {
+    const rows = await dbQuery('SELECT COUNT(*) AS enabled FROM orch_schedules WHERE enabled = 1');
+    return Number(rows[0] && rows[0].enabled) || 0;
+  } catch (err) {
+    console.error('[MySQL] countSchedules:', err.message);
+    return 0;
+  }
+}
+
 // ВСЕ открытые задачи одним запросом (для сводки нагрузки в list_employees, без N+1).
 async function listOpenTasksBrief() {
   try {
@@ -836,6 +1010,9 @@ module.exports = {
   createProject, getProject, updateProjectPlan, setProjectStatus, recomputeProjectStatus,
   listProjectsForOwner, listAllProjects, listOpenTasksBrief,
   getSettings, setSetting,
+  createSchedule, listEnabledSchedules, listSchedulesByOwner, getSchedule,
+  updateSchedule, setScheduleEnabled, deleteSchedule,
+  markScheduleRun, touchScheduleStatus, bumpScheduleFail, countSchedules,
   // Оркестратор: задачи
   createTasksBulk, getTask, listTasksForProject, assignTask, markDispatched, updateTaskStatus,
   updateTaskFields,

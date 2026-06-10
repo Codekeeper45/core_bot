@@ -68,6 +68,7 @@ loadTools();
 const BOSS_ONLY = new Set([
   'create_project', 'revise_project', 'dispatch_task', 'assign_task',
   'manage_employees', 'message_employee', 'project_status', 'manage_scheduler',
+  'manage_schedule',
 ]);
 
 // Выполнить инструмент по имени. context = { channel, chatId, phone, clientName, role }.
