@@ -680,6 +680,26 @@ async function assignTask(taskId, employeeId) {
   }
 }
 
+// Точечная правка полей задачи (revise_project edit_tasks). Только whitelist-
+// колонки; переназначение исполнителя делает assignTask (со сбросом диспатча).
+async function updateTaskFields(taskId, fields = {}) {
+  const ALLOWED = ['title', 'description', 'expected', 'priority', 'deadline'];
+  const sets = [];
+  const vals = [];
+  for (const col of ALLOWED) {
+    if (fields[col] !== undefined) { sets.push(`${col} = ?`); vals.push(fields[col]); }
+  }
+  if (!sets.length) return false;
+  try {
+    vals.push(taskId);
+    await dbQuery(`UPDATE orch_tasks SET ${sets.join(', ')} WHERE id = ?`, vals);
+    return true;
+  } catch (err) {
+    console.error('[MySQL] updateTaskFields:', err.message);
+    return false;
+  }
+}
+
 async function markDispatched(taskId, sent) {
   try {
     // dispatched_at ставим один раз (COALESCE), чтобы метрика времени была корректной.
@@ -818,5 +838,6 @@ module.exports = {
   getSettings, setSetting,
   // Оркестратор: задачи
   createTasksBulk, getTask, listTasksForProject, assignTask, markDispatched, updateTaskStatus,
+  updateTaskFields,
   setTaskDeadline,
 };

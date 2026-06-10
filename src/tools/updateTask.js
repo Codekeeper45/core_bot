@@ -61,6 +61,20 @@ async function handler(args, context = {}) {
     // Статус проекта — один агрегат (без гонки read-modify-write).
     const projectStatus = await recomputeProjectStatus(task.project_id);
 
+    // Авто-продвижение DAG: задача завершена → сами рассылаем готовых преемников
+    // (assignee есть, зависимости сняты, ещё не диспатчены). Гейт: завершённая
+    // задача была диспатчена (task.dispatched=1) → план живой/утверждён, каскад
+    // не разошлёт неутверждённый план.
+    let autoDispatched = [];
+    if (args.status === 'done' && task.dispatched) {
+      try {
+        const { dispatchReadySuccessors } = require('../services/dispatcher');
+        autoDispatched = await dispatchReadySuccessors(task.project_id);
+      } catch (e) {
+        console.error('[updateTask] auto-dispatch:', e.message);
+      }
+    }
+
     // Проактивно уведомляем босса (владельца проекта) о прогрессе сотрудника.
     // Не дублируем, если действие инициировал сам босс в своём же чате.
     try {
@@ -74,6 +88,10 @@ async function handler(args, context = {}) {
       if (args.result) msg += `\nРезультат: ${String(args.result).slice(0, 400)}`;
       if (projectStatus === 'done') msg += `\n✅ План выполнен.`;
       if (projectStatus === 'blocked') msg += `\n⚠️ По плану есть блокер — нужно решение.`;
+      if (autoDispatched.length) {
+        msg += `\n➡️ Авто-запущены следующие шаги: `
+          + autoDispatched.map((t) => `#${t.task_id} «${t.title}» → ${t.employee}`).join('; ');
+      }
       notifier.notifyOwner(task.project_id, msg, context.chatId).catch(() => {});
     } catch (_) { /* уведомление некритично */ }
 
@@ -83,6 +101,7 @@ async function handler(args, context = {}) {
       status: args.status,
       project_id: task.project_id,
       project_status: projectStatus,
+      auto_dispatched: autoDispatched,
     };
   } catch (err) {
     return handleToolDbError(err);
