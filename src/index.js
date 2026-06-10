@@ -269,12 +269,9 @@ async function processMessage(rawPayload) {
   }
 }
 
-// Системный штамп с текущим UTC — добавляется к каждому сообщению агента, чтобы он
-// знал «сейчас». Используется и в processMessage, и в deliverInstruction (планировщик).
-function systemTimestamp(now = new Date()) {
-  const pad = (n) => String(n).padStart(2, '0');
-  return `[СИСТЕМА: дата и время сообщения (UTC) — ${now.getUTCFullYear()}-${pad(now.getUTCMonth() + 1)}-${pad(now.getUTCDate())} ${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}]`;
-}
+// Системный штамп «сейчас» (локальное время компании + UTC) — общий хелпер,
+// используется и в processMessage, и в deliverInstruction (планировщик).
+const { systemTimestamp } = require('./utils/localTime');
 
 // =====================================================================
 // Отправка ответа по каналу

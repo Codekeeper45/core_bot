@@ -8,7 +8,7 @@
 // next_run_at (UTC) предвычисляется при create/update/enable — раннер просто сравнивает с now.
 const {
   createSchedule, listSchedulesByOwner, getSchedule, updateSchedule,
-  setScheduleEnabled, deleteSchedule, countSchedules,
+  setScheduleEnabled, deleteSchedule, countSchedules, listScheduleRuns,
 } = require('../services/mysql');
 const { computeNextRunAt, toUtc, fmtUtc } = require('../utils/scheduleTime');
 const { localNow } = require('../utils/localTime');
@@ -21,23 +21,24 @@ const definition = {
     name: 'manage_schedule',
     description:
       'Планировать СОБСТВЕННЫЕ действия на будущее (режим босса). Отложенные и регулярные задачи: '
-      + '«завтра в 15:00 проверь план X и напиши Курбану», «каждый день в 9:00 — сводка мне», '
-      + '«каждый понедельник напомни про планёрку». В момент срабатывания ты выполнишь instruction '
-      + 'своим обычным циклом (доступны все инструменты). Действия: create / list / update / cancel / '
-      + 'enable / run_now. ВСЁ ВРЕМЯ УКАЗЫВАЙ ЛОКАЛЬНОЕ (Казахстан, UTC+5) — как говорит босс, '
-      + 'без пересчёта в UTC: run_at (once) и at_hour/at_minute (daily/weekly/monthly). '
-      + 'weekdays: Пн=1..Вс=7. month_days: числа месяца. run_now вернёт инструкцию — выполни её '
-      + 'сразу в этом же ответе. Не путай с manage_scheduler (тот — про фиксированные '
-      + 'утреннюю/вечернюю рассылки).',
+      + '«напиши через час», «завтра в 15:00 проверь план X», «каждый день в 9:00 — сводка мне». '
+      + 'В момент срабатывания ты выполнишь instruction своим обычным циклом (доступны все '
+      + 'инструменты). Действия: create / list / update / cancel / enable / run_now / history. '
+      + 'ОТНОСИТЕЛЬНОЕ время («через N минут/часов») → ВСЕГДА delay_minutes (число минут), '
+      + 'НИКОГДА не вычисляй дату сам. АБСОЛЮТНОЕ («завтра в 15:00») → run_at в ЛОКАЛЬНОМ времени '
+      + '(Казахстан, UTC+5; текущее локальное есть в системном штампе). at_hour/at_minute — тоже '
+      + 'локальные. weekdays: Пн=1..Вс=7. month_days: числа месяца. run_now вернёт инструкцию — '
+      + 'выполни её сразу в этом же ответе. history — журнал запусков расписания («почему вчера '
+      + 'не пришло?»). Не путай с manage_scheduler (тот — про фиксированные рассылки).',
     parameters: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['create', 'list', 'update', 'cancel', 'enable', 'run_now'],
-          description: 'Что сделать. enable — включить обратно выключенное/отменённое расписание.',
+          enum: ['create', 'list', 'update', 'cancel', 'enable', 'run_now', 'history'],
+          description: 'Что сделать. enable — включить обратно выключенное; history — журнал запусков.',
         },
-        id: { type: 'integer', description: 'id расписания (для update/cancel/enable/run_now).' },
+        id: { type: 'integer', description: 'id расписания (для update/cancel/enable/run_now/history).' },
         title: { type: 'string', description: 'Короткое имя расписания (для create/update).' },
         instruction: { type: 'string', description: 'Что бот должен сделать в момент срабатывания (естественным языком).' },
         kind: {
@@ -45,7 +46,13 @@ const definition = {
           enum: ['once', 'daily', 'weekly', 'monthly', 'interval'],
           description: 'Тип расписания.',
         },
-        run_at: { type: 'string', description: 'kind=once: момент в ЛОКАЛЬНОМ времени (UTC+5), формат YYYY-MM-DD HH:MM:SS.' },
+        delay_minutes: {
+          type: 'integer',
+          description: 'kind=once, ОТНОСИТЕЛЬНОЕ время: через сколько МИНУТ сработать («через час»=60, '
+            + '«через 30 минут»=30, «через 2 часа»=120). Момент вычислит код — дату НЕ считай. '
+            + 'Альтернатива run_at: укажи ровно одно из двух.',
+        },
+        run_at: { type: 'string', description: 'kind=once, АБСОЛЮТНОЕ время: момент в ЛОКАЛЬНОМ времени (UTC+5), формат YYYY-MM-DD HH:MM:SS. Для «через N минут» используй delay_minutes.' },
         at_hour: { type: 'integer', description: 'daily/weekly/monthly: час 0–23 в локальном времени (UTC+5).' },
         at_minute: { type: 'integer', description: 'Минута 0–59 (по умолчанию 0).' },
         weekdays: { type: 'string', description: 'weekly: дни недели через запятую, Пн=1..Вс=7 (напр. «1,3,5»).' },
@@ -60,7 +67,7 @@ const definition = {
 };
 
 const KIND_REQUIRED = {
-  once: ['run_at'],
+  once: [],            // once: ровно одно из run_at | delay_minutes — отдельная проверка
   daily: ['at_hour'],
   weekly: ['at_hour', 'weekdays'],
   monthly: ['at_hour', 'month_days'],
@@ -68,6 +75,31 @@ const KIND_REQUIRED = {
 };
 // Поля, влияющие на время срабатывания: их правка перевзводит расписание.
 const TIMING_FIELDS = ['kind', 'run_at', 'at_hour', 'at_minute', 'weekdays', 'month_days', 'interval_min'];
+
+const MAX_DELAY_MIN = 43200; // 30 дней — дальше это уже не «через N минут», а дата
+
+// once: входные args → UTC Date момента срабатывания (из delay_minutes ИЛИ run_at).
+// Возвращает { runAtUtc } или { err }.
+function resolveOnceMoment(args) {
+  const hasDelay = args.delay_minutes !== undefined && args.delay_minutes !== null;
+  const hasRunAt = args.run_at !== undefined && args.run_at !== null && args.run_at !== '';
+  if (hasDelay && hasRunAt) {
+    return { err: 'Укажи РОВНО ОДНО: delay_minutes (через N минут) ИЛИ run_at (конкретный момент), не оба сразу.' };
+  }
+  if (!hasDelay && !hasRunAt) {
+    return { err: 'Для once укажи delay_minutes (через N минут — для «через час» и т.п.) или run_at (локальное время).' };
+  }
+  if (hasDelay) {
+    const d = Number(args.delay_minutes);
+    if (!Number.isInteger(d) || d < 1 || d > MAX_DELAY_MIN) {
+      return { err: `delay_minutes должен быть целым 1–${MAX_DELAY_MIN} (минут). Для дальних дат используй run_at.` };
+    }
+    return { runAtUtc: new Date(Date.now() + d * 60000) };
+  }
+  const t = localStrToUtc(args.run_at);
+  if (!t) return { err: 'run_at не распознан. Формат: YYYY-MM-DD HH:MM:SS (локальное время). Для «через N минут» используй delay_minutes.' };
+  return { runAtUtc: t };
+}
 
 // 'YYYY-MM-DD HH:MM[:SS]' в локальном поясе → UTC Date (null = не распознано).
 function localStrToUtc(s) {
@@ -92,6 +124,10 @@ function validateSpec(spec) {
     if (spec[f] === undefined || spec[f] === null || spec[f] === '') {
       return `Для kind=${spec.kind} нужно поле ${f}.`;
     }
+  }
+  // once: к моменту валидации run_at уже должен быть установлен (из run_at или delay_minutes).
+  if (spec.kind === 'once' && !spec.run_at) {
+    return 'Для once укажи delay_minutes (через N минут) или run_at (локальное время).';
   }
   if (['daily', 'weekly', 'monthly'].includes(spec.kind)) {
     const h = Number(spec.at_hour);
@@ -135,8 +171,6 @@ async function handler(args, context = {}) {
   try {
     switch (args.action) {
       case 'create': {
-        const err = validateSpec(args);
-        if (err) return { success: false, message: err };
         const active = await countSchedules();
         if (active >= config.SCHEDULE_MAX_ACTIVE) {
           return { success: false, message: `Достигнут лимит активных расписаний (${config.SCHEDULE_MAX_ACTIVE}). Отмени ненужные (cancel) и повтори.` };
@@ -144,8 +178,9 @@ async function handler(args, context = {}) {
         const warn = [];
         let runAtUtc = null;
         if (args.kind === 'once') {
-          runAtUtc = localStrToUtc(args.run_at);
-          if (!runAtUtc) return { success: false, message: 'run_at не распознан. Формат: YYYY-MM-DD HH:MM:SS (локальное время).' };
+          const m = resolveOnceMoment(args);
+          if (m.err) return { success: false, message: m.err };
+          runAtUtc = m.runAtUtc;
           if (runAtUtc.getTime() < Date.now() - 5 * 60000) {
             warn.push('run_at в прошлом — расписание сработает один раз сразу. Если это не задумано, проверь дату.');
           }
@@ -155,12 +190,14 @@ async function handler(args, context = {}) {
           instruction: args.instruction,
           kind: args.kind,
           run_at: runAtUtc ? fmtUtc(runAtUtc) : null,
-          at_hour: ['daily', 'weekly', 'monthly'].includes(args.kind) ? Number(args.at_hour) : null,
+          at_hour: ['daily', 'weekly', 'monthly'].includes(args.kind) && args.at_hour !== undefined ? Number(args.at_hour) : null,
           at_minute: ['daily', 'weekly', 'monthly'].includes(args.kind) ? (Number(args.at_minute) || 0) : null,
-          weekdays: args.kind === 'weekly' ? String(args.weekdays) : null,
-          month_days: args.kind === 'monthly' ? String(args.month_days) : null,
-          interval_min: args.kind === 'interval' ? Number(args.interval_min) : null,
+          weekdays: args.kind === 'weekly' && args.weekdays !== undefined ? String(args.weekdays) : null,
+          month_days: args.kind === 'monthly' && args.month_days !== undefined ? String(args.month_days) : null,
+          interval_min: args.kind === 'interval' && args.interval_min !== undefined ? Number(args.interval_min) : null,
         };
+        const err = validateSpec(spec);
+        if (err) return { success: false, message: err };
         const next = computeNextRunAt(spec, new Date());
         const id = await createSchedule({
           owner_channel: context.channel,
@@ -169,9 +206,18 @@ async function handler(args, context = {}) {
           ...spec,
           next_run_at: next ? fmtUtc(next) : null,
         });
+        const runAtLocal = runAtUtc ? utcToLocalStr(runAtUtc) : null;
+        console.log(`[Schedule] create #${id} «${args.title}» ${args.kind}`
+          + (args.delay_minutes ? ` delay=${args.delay_minutes}м` : '')
+          + ` → next ${next ? fmtUtc(next) : '-'} UTC (owner ${context.channel}:${String(context.chatId).slice(0, 6)}…)`);
         return {
           success: true, id, title: args.title, when: describeWhen(spec),
-          next_run_local: next ? utcToLocalStr(next) : null, warnings: warn,
+          run_at_local: runAtLocal,
+          next_run_local: next ? utcToLocalStr(next) : null,
+          confirm_to_boss: runAtLocal
+            ? `Сработает ${runAtLocal} (локальное)${args.delay_minutes ? ` — через ${args.delay_minutes} мин` : ''}`
+            : null,
+          warnings: warn,
         };
       }
 
@@ -183,7 +229,7 @@ async function handler(args, context = {}) {
           schedules: rows.map((r) => ({
             id: r.id, title: r.title, when: describeWhen(r), enabled: !!r.enabled,
             next_run_local: utcToLocalStr(r.next_run_at),
-            last_run_at: r.last_run_at, last_status: r.last_status,
+            last_run_local: utcToLocalStr(r.last_run_at), last_status: r.last_status,
           })),
         };
       }
@@ -195,10 +241,16 @@ async function handler(args, context = {}) {
         for (const f of ['title', 'instruction', 'kind', 'at_hour', 'at_minute', 'weekdays', 'month_days', 'interval_min']) {
           if (args[f] !== undefined) fields[f] = args[f];
         }
-        if (args.run_at !== undefined && args.run_at !== null && args.run_at !== '') {
-          const t = localStrToUtc(args.run_at);
-          if (!t) return { success: false, message: 'run_at не распознан. Формат: YYYY-MM-DD HH:MM:SS (локальное время).' };
-          fields.run_at = fmtUtc(t);
+        const wantsDelay = args.delay_minutes !== undefined && args.delay_minutes !== null;
+        const wantsRunAt = args.run_at !== undefined && args.run_at !== null && args.run_at !== '';
+        if (wantsDelay || wantsRunAt) {
+          const targetKind = args.kind !== undefined ? args.kind : row.kind;
+          if (targetKind !== 'once') {
+            return { success: false, message: 'delay_minutes/run_at применимы только к kind=once.' };
+          }
+          const m = resolveOnceMoment(args);
+          if (m.err) return { success: false, message: m.err };
+          fields.run_at = fmtUtc(m.runAtUtc);
         }
         if (!Object.keys(fields).length) return { success: false, message: 'Нет полей для обновления.' };
         // Валидируем ИТОГОВОЕ состояние (строка + правки), чтобы смена kind не оставила
@@ -217,6 +269,8 @@ async function handler(args, context = {}) {
           fields.enabled = 1;
         }
         const n = await updateSchedule(args.id, fields);
+        console.log(`[Schedule] update #${args.id} «${row.title}» поля: ${Object.keys(fields).join(',')}`
+          + (fields.next_run_at ? ` → next ${fields.next_run_at} UTC` : ''));
         return {
           success: n > 0, id: args.id, updated_fields: n,
           next_run_local: fields.next_run_at ? utcToLocalStr(fields.next_run_at) : utcToLocalStr(row.next_run_at),
@@ -226,6 +280,7 @@ async function handler(args, context = {}) {
       case 'cancel': {
         const { row, err } = await getOwned(args.id, context);
         if (err) return { success: false, message: err };
+        console.log(`[Schedule] cancel #${row.id} «${row.title}»${args.delete ? ' (delete)' : ''}`);
         if (args.delete) { await deleteSchedule(row.id); return { success: true, id: row.id, deleted: true }; }
         await setScheduleEnabled(row.id, false);
         return { success: true, id: row.id, disabled: true, note: 'Можно вернуть действием enable.' };
@@ -245,6 +300,7 @@ async function handler(args, context = {}) {
       case 'run_now': {
         const { row, err } = await getOwned(args.id, context);
         if (err) return { success: false, message: err };
+        console.log(`[Schedule] run_now #${row.id} «${row.title}» (owner ${context.channel})`);
         // Мы уже ВНУТРИ агентного цикла (лок чата у нас) — запускать через scheduledRunner
         // нельзя (вечный lock_busy). Возвращаем инструкцию: выполни её прямо сейчас.
         return {
@@ -254,6 +310,23 @@ async function handler(args, context = {}) {
           title: row.title,
           instruction: row.instruction,
           note: 'Выполни эту инструкцию ПРЯМО СЕЙЧАС в текущем ответе (все инструменты доступны). Само расписание не изменилось и сработает по плану.',
+        };
+      }
+
+      case 'history': {
+        const { row, err } = await getOwned(args.id, context);
+        if (err) return { success: false, message: err };
+        const runs = await listScheduleRuns(row.id, 10);
+        return {
+          success: true,
+          id: row.id,
+          title: row.title,
+          runs: runs.map((r) => ({
+            ran_at_local: utcToLocalStr(r.ran_at),
+            status: r.status,
+            detail: r.detail || undefined,
+          })),
+          note: runs.length ? undefined : 'Запусков ещё не было (журнал ведётся с момента включения функции).',
         };
       }
 

@@ -21,4 +21,12 @@ function isoWeekday(now = new Date(), tzOffsetMin) {
   return d === 0 ? 7 : d;
 }
 
-module.exports = { localNow, localDateKey, isoWeekday };
+// Системный штамп «сейчас» для каждого сообщения агенту: ЛОКАЛЬНОЕ время компании
+// первым (LLM использует его для сроков/расписаний без арифметики поясов), UTC — справочно.
+function systemTimestamp(now = new Date(), tzOffsetMin) {
+  const off = (tzOffsetMin === undefined) ? config.SCHEDULER_TZ_OFFSET_MIN : tzOffsetMin;
+  const fmt = (d) => d.toISOString().slice(0, 16).replace('T', ' ');
+  return `[СИСТЕМА: сейчас ${fmt(localNow(now, off))} по времени компании (UTC+${off / 60}); ${fmt(now)} UTC]`;
+}
+
+module.exports = { localNow, localDateKey, isoWeekday, systemTimestamp };

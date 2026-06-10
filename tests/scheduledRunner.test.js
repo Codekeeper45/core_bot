@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 
 // Мок mysql через подмену require (как в tests/dispatcher.test.js).
 const calls = [];
+const journal = [];
 const mysqlMock = {
   listEnabledSchedules: async () => mysqlMock._rows,
   markScheduleRun: async (id, when, status, next) => calls.push(['markRun', id, status, next]),
@@ -11,6 +12,8 @@ const mysqlMock = {
   bumpScheduleFail: async (id, status) => calls.push(['bumpFail', id, status]),
   setScheduleNextRun: async (id, next) => calls.push(['setNext', id, next]),
   setScheduleEnabled: async (id, on) => calls.push(['setEnabled', id, on]),
+  logScheduleRun: async (id, title, status, detail) => journal.push({ id, status, detail }),
+  cleanupScheduleRuns: async () => 0,
   _rows: [],
 };
 
@@ -133,6 +136,29 @@ describe('tick', () => {
     await tick(utc(2026, 6, 8, 3, 0));
     assert.deepEqual(calls.find((c) => c[0] === 'setEnabled'), ['setEnabled', 9, false]);
     assert.equal(calls.find((c) => c[0] === 'markRun'), undefined);
+  });
+
+  test('журнал: ok / lock_busy / missed пишутся в orch_schedule_runs', async () => {
+    // ok
+    mysqlMock._rows = [row({ id: 11, kind: 'daily', at_hour: 9, at_minute: 0, next_run_at: '2026-06-08 04:00:00' })];
+    journal.length = 0;
+    setDeliver(async () => ({ ok: true }));
+    await tick(utc(2026, 6, 8, 4, 0));
+    assert.equal(journal.find((j) => j.id === 11).status, 'ok');
+    // lock_busy
+    mysqlMock._rows = [row({ id: 12, kind: 'daily', at_hour: 9, at_minute: 0, next_run_at: '2026-06-08 04:00:00' })];
+    journal.length = 0;
+    setDeliver(async () => ({ ok: false, reason: 'lock_busy' }));
+    await tick(utc(2026, 6, 8, 4, 0));
+    assert.equal(journal.find((j) => j.id === 12).status, 'lock_busy');
+    // missed (просрочка за окном catch-up)
+    mysqlMock._rows = [row({ id: 13, kind: 'daily', at_hour: 9, at_minute: 0, next_run_at: '2026-06-08 04:00:00' })];
+    journal.length = 0;
+    setDeliver(async () => ({ ok: true }));
+    await tick(utc(2026, 6, 8, 6, 30));
+    const m = journal.find((j) => j.id === 13);
+    assert.equal(m.status, 'missed');
+    assert.match(m.detail, /опоздание/);
   });
 
   test('running-гард: повторный tick во время незавершённого deliver не дублирует', async () => {

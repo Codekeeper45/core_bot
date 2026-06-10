@@ -196,6 +196,20 @@ async function initTables() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
+  // Журнал запусков расписаний (паттерн job_executions): отвечает на «почему вчера
+  // не пришло?» фактами. Автоочистка старше 90 дней — в scheduledRunner.
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS orch_schedule_runs (
+      id          INT AUTO_INCREMENT PRIMARY KEY,
+      schedule_id INT          NOT NULL,
+      title       VARCHAR(255) NULL,
+      status      VARCHAR(32)  NOT NULL,
+      detail      VARCHAR(255) NULL,
+      ran_at      TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_runs_sched (schedule_id, ran_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
   // Миграция: добавить колонку сводки в уже существующие таблицы истории
   // (CREATE TABLE IF NOT EXISTS не добавит колонку к созданной ранее таблице).
   try {
@@ -717,6 +731,45 @@ async function countSchedules() {
   }
 }
 
+// ── Журнал запусков расписаний (orch_schedule_runs) ─────────────────────────
+async function logScheduleRun(scheduleId, title, status, detail) {
+  try {
+    await dbQuery(
+      'INSERT INTO orch_schedule_runs (schedule_id, title, status, detail) VALUES (?,?,?,?)',
+      [scheduleId, title ? String(title).slice(0, 250) : null,
+        String(status).slice(0, 30), detail ? String(detail).slice(0, 250) : null]
+    );
+  } catch (err) {
+    console.error('[MySQL] logScheduleRun:', err.message);
+  }
+}
+
+async function listScheduleRuns(scheduleId, limit = 10) {
+  try {
+    return await dbQuery(
+      `SELECT status, detail, ran_at FROM orch_schedule_runs
+       WHERE schedule_id = ? ORDER BY id DESC LIMIT ?`,
+      [scheduleId, Number(limit) || 10]
+    );
+  } catch (err) {
+    console.error('[MySQL] listScheduleRuns:', err.message);
+    return [];
+  }
+}
+
+async function cleanupScheduleRuns(days = 90) {
+  try {
+    const res = await dbQuery(
+      'DELETE FROM orch_schedule_runs WHERE ran_at < NOW() - INTERVAL ? DAY',
+      [Number(days) || 90]
+    );
+    return res.affectedRows || 0;
+  } catch (err) {
+    console.error('[MySQL] cleanupScheduleRuns:', err.message);
+    return 0;
+  }
+}
+
 // ВСЕ открытые задачи одним запросом (для сводки нагрузки в list_employees, без N+1).
 async function listOpenTasksBrief() {
   try {
@@ -1039,6 +1092,7 @@ module.exports = {
   createSchedule, listEnabledSchedules, listSchedulesByOwner, getSchedule,
   updateSchedule, setScheduleEnabled, deleteSchedule,
   markScheduleRun, setScheduleNextRun, touchScheduleStatus, bumpScheduleFail, countSchedules,
+  logScheduleRun, listScheduleRuns, cleanupScheduleRuns,
   // Оркестратор: задачи
   createTasksBulk, getTask, listTasksForProject, assignTask, markDispatched, updateTaskStatus,
   updateTaskFields,

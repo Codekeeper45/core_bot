@@ -12,7 +12,7 @@
 // once досылается всегда.
 const {
   listEnabledSchedules, markScheduleRun, touchScheduleStatus, bumpScheduleFail,
-  setScheduleNextRun, setScheduleEnabled,
+  setScheduleNextRun, setScheduleEnabled, logScheduleRun, cleanupScheduleRuns,
 } = require('./mysql');
 const { computeNextRunAt, toUtc, fmtUtc } = require('../utils/scheduleTime');
 const config = require('../config');
@@ -38,6 +38,7 @@ function nextFor(row, now) {
 let deliverFn = null;   // инъекция из index.js (deliverInstruction)
 let timer = null;
 let running = false;     // гард: одно исполнение tick за раз (агентный цикл долгий)
+let lastCleanupDay = ''; // журнал чистим раз в сутки (старше 90 дней)
 
 // Выполнить одно расписание. Возвращает строку-статус для записи.
 async function runSchedule(row, now) {
@@ -54,12 +55,14 @@ async function runSchedule(row, now) {
   if (res && res.ok) {
     await markScheduleRun(row.id, now, 'ok', isOnce ? null : nextFor(row, now));
     if (isOnce) await setScheduleEnabled(row.id, false); // завершено — больше не опрашиваем
+    await logScheduleRun(row.id, row.title, 'ok', null);
     return 'ok';
   }
   if (res && res.reason === 'lock_busy') {
     // Чат владельца занят (босс пишет прямо сейчас). next_run_at не трогаем —
     // расписание остаётся due и повторится на следующем tick (в т.ч. daily).
     await touchScheduleStatus(row.id, 'lock_busy');
+    await logScheduleRun(row.id, row.title, 'lock_busy', 'чат занят, повтор на следующем tick');
     return 'lock_busy';
   }
   // Ошибка агентного цикла. Для once — копим fail_count (ретрай каждый tick, cutoff в БД);
@@ -67,6 +70,7 @@ async function runSchedule(row, now) {
   const status = (res && res.reason) || 'agent_error';
   if (isOnce) await bumpScheduleFail(row.id, status);
   else await markScheduleRun(row.id, now, status, nextFor(row, now));
+  await logScheduleRun(row.id, row.title, status, isOnce ? 'once: ретрай, после 3 неудач отключится' : 'перенесено на следующий раз');
   return status;
 }
 
@@ -82,6 +86,13 @@ async function tick(now = new Date()) {
   if (running) return;
   running = true;
   try {
+    // Автоочистка журнала запусков — раз в сутки, не на каждом tick.
+    const day = now.toISOString().slice(0, 10);
+    if (day !== lastCleanupDay) {
+      lastCleanupDay = day;
+      cleanupScheduleRuns(90).catch(() => {});
+    }
+
     const rows = await listEnabledSchedules();
     for (const row of rows) {
       try {
@@ -93,6 +104,8 @@ async function tick(now = new Date()) {
           const lateMs = now.getTime() - toUtc(row.next_run_at).getTime();
           if (lateMs > config.SCHEDULE_CATCHUP_WINDOW_MIN * 60000) {
             await markScheduleRun(row.id, now, 'missed', nextFor(row, now));
+            await logScheduleRun(row.id, row.title, 'missed',
+              `опоздание ${Math.round(lateMs / 60000)} мин > окна ${config.SCHEDULE_CATCHUP_WINDOW_MIN} мин`);
             continue;
           }
         }
