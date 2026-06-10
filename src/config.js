@@ -119,4 +119,15 @@ module.exports = {
   TYPING_TTL: 120,
   TYPING_INTERVAL: 4000,
   BUFFER_WAIT: 1000,
+
+  // ── Планировщик отчётов ────────────────────────────────────────────
+  // Ежедневные ритуалы компании: вечером — сбор статусов с исполнителей по их
+  // открытым задачам, утром — сводка боссу (блокеры, задачи без движения).
+  // Воскресенье — выходной. Выключить: REPORT_SCHEDULER=0.
+  SCHEDULER_ENABLED: process.env.REPORT_SCHEDULER !== '0' && process.env.REPORT_SCHEDULER !== 'false',
+  SCHEDULER_TZ_OFFSET_MIN: parseInt(process.env.SCHEDULER_TZ_OFFSET_MIN || '300', 10), // Казахстан = UTC+5
+  MORNING_SUMMARY_HOUR: parseInt(process.env.MORNING_SUMMARY_HOUR || '9', 10),
+  EVENING_REPORT_HOUR: parseInt(process.env.EVENING_REPORT_HOUR || '18', 10),
+  // Кому слать утреннюю сводку: цифры WhatsApp через запятую. Пусто = все BOSS_CONTACTS.
+  SCHEDULER_BOSS_WA: (process.env.SCHEDULER_BOSS_WA || '').split(',').map((s) => s.trim().replace(/\D/g, '')).filter(Boolean),
 };

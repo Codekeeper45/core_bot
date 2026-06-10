@@ -369,6 +369,9 @@ async function startServer() {
   });
   await baileysService.connect();
 
+  // Планировщик отчётов: вечерний сбор статусов с исполнителей, утренняя сводка боссу.
+  require('./services/reportScheduler').start();
+
   // HTTP server (health check + TG webhook if configured)
   const server = app.listen(config.PORT, () => {
     console.log(`[Server] ${config.BOT_NAME} running on port ${config.PORT}`);

@@ -483,7 +483,7 @@ async function listAllProjects(limit = 50) {
 async function listOpenTasksBrief() {
   try {
     return await dbQuery(
-      `SELECT id, title, project_id, status, assignee_id
+      `SELECT id, title, project_id, status, assignee_id, updated_at
        FROM orch_tasks WHERE status NOT IN ('done')
        ORDER BY assignee_id, id`
     );
