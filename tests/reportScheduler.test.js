@@ -8,21 +8,23 @@ const { shouldFire, buildEveningReminders, buildMorningSummary, firstName } = _i
 // SCHEDULER_TZ_OFFSET_MIN по умолчанию 300 (UTC+5): локальные 18:00 = 13:00 UTC.
 const utc = (y, mo, d, h, mi = 0) => new Date(Date.UTC(y, mo - 1, d, h, mi));
 
-test('shouldFire: стреляет один раз в нужный час', () => {
-  const state = { evening: '', morning: '' };
+test('shouldFire: пора, если час наступил и сегодня ещё не слали', () => {
+  // shouldFire без side-effect; «выполнено» помечает markDone (в коде — после успеха).
   // Пн 08.06.2026, 18:03 локально (13:03 UTC)
-  assert.strictEqual(shouldFire('evening', 18, utc(2026, 6, 8, 13, 3), state), true);
-  // повторный тик в тот же час/день — не стреляет
-  assert.strictEqual(shouldFire('evening', 18, utc(2026, 6, 8, 13, 4), state), false);
-  // следующий день — снова стреляет
-  assert.strictEqual(shouldFire('evening', 18, utc(2026, 6, 9, 13, 0), state), true);
+  assert.strictEqual(shouldFire('evening', 18, utc(2026, 6, 8, 13, 3), { evening: '' }), true);
+  // уже слали сегодня (отметка стоит) — не стреляет
+  assert.strictEqual(shouldFire('evening', 18, utc(2026, 6, 8, 13, 4), { evening: '2026-06-08' }), false);
+  // следующий день — снова пора
+  assert.strictEqual(shouldFire('evening', 18, utc(2026, 6, 9, 13, 0), { evening: '2026-06-08' }), true);
 });
 
-test('shouldFire: не тот час и воскресенье — не стреляет', () => {
-  const state = { evening: '', morning: '' };
-  assert.strictEqual(shouldFire('evening', 18, utc(2026, 6, 8, 12, 59), state), false);
-  // Вс 07.06.2026, 18:00 локально
-  assert.strictEqual(shouldFire('evening', 18, utc(2026, 6, 7, 13, 0), state), false);
+test('shouldFire: досыл при позднем старте, но не раньше часа и не в воскресенье', () => {
+  // 20:00 локально, утреннюю в 9 ещё не слали → досылаем (час уже прошёл)
+  assert.strictEqual(shouldFire('morning', 9, utc(2026, 6, 8, 15, 0), { morning: '' }), true);
+  // 17:59 локально, вечерняя в 18 — рано
+  assert.strictEqual(shouldFire('evening', 18, utc(2026, 6, 8, 12, 59), { evening: '' }), false);
+  // Вс 07.06.2026, 18:00 локально — выходной
+  assert.strictEqual(shouldFire('evening', 18, utc(2026, 6, 7, 13, 0), { evening: '' }), false);
 });
 
 test('firstName: «Фамилия Имя» → имя, одиночное имя — как есть', () => {

@@ -112,4 +112,21 @@ async function summarizeIfNeeded({ messages, summary, openai, model }) {
   }
 }
 
-module.exports = { summarizeIfNeeded, totalChars, findCleanCut, SUMMARY_SYSTEM };
+// Backstop-обрезка истории до window последних сообщений, но СТРОГО по чистой
+// границе хода: результат всегда начинается с user / plain-assistant, чтобы не
+// осталось осиротевшего role:'tool' (иначе API отвергнет запрос и чат «залипнет»
+// до /new). Конец массива не трогаем — агент-цикл завершается финальным
+// assistant без tool_calls.
+function safeTrimHistory(messages, window) {
+  const msgs = Array.isArray(messages) ? messages : [];
+  if (msgs.length <= window) {
+    // Даже без переполнения возможен осиротевший префикс — выровняем по границе.
+    if (!msgs.length || msgs[0].role === 'user' || (msgs[0].role === 'assistant' && !msgs[0].tool_calls)) {
+      return msgs;
+    }
+    return msgs.slice(findCleanCut(msgs, 0));
+  }
+  return msgs.slice(findCleanCut(msgs, msgs.length - window));
+}
+
+module.exports = { summarizeIfNeeded, totalChars, findCleanCut, safeTrimHistory, SUMMARY_SYSTEM };

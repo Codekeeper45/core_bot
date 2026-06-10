@@ -60,13 +60,27 @@ function loadTools() {
 
 loadTools();
 
-// Выполнить инструмент по имени. context = { channel, chatId, phone, clientName }.
-async function executeToolCall(name, args, context) {
+// Инструменты режима БОССА: планирование, делегирование, управление штатом и
+// процессами, рассылки, чтение всех планов. Code-level гейт — НЕ полагаемся на
+// промпт: сотрудник (или посторонний) prompt-инъекцией не должен их вызвать.
+// update_task намеренно НЕ здесь: он доступен и сотруднику (для своей задачи —
+// внутренняя проверка владельца), и боссу (форс-режим над любой задачей).
+const BOSS_ONLY = new Set([
+  'create_project', 'revise_project', 'dispatch_task', 'assign_task',
+  'manage_employees', 'message_employee', 'project_status', 'manage_scheduler',
+]);
+
+// Выполнить инструмент по имени. context = { channel, chatId, phone, clientName, role }.
+async function executeToolCall(name, args, context = {}) {
   const handler = handlers.get(name);
   if (!handler) {
     return { success: false, message: `Unknown tool: ${name}` };
   }
+  if (BOSS_ONLY.has(name) && context.role && context.role !== 'boss') {
+    console.warn(`[Tools] Отказ: '${name}' доступен только боссу, роль='${context.role}' (${context.channel}:${context.chatId})`);
+    return { success: false, message: 'Доступно только руководителю (роль босса).' };
+  }
   return handler(args, context);
 }
 
-module.exports = { tools, executeToolCall, handlers };
+module.exports = { tools, executeToolCall, handlers, BOSS_ONLY };

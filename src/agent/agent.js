@@ -118,8 +118,8 @@ function buildLLMMessages(systemPrompt, convoSummary, messages) {
   return [...head, ...messages];
 }
 
-async function runAgent({ combinedMessage, channel, chatId, phone, clientName, emit }) {
-  const context = { channel, chatId, phone, clientName };
+async function runAgent({ combinedMessage, channel, chatId, phone, clientName, role, emit }) {
+  const context = { channel, chatId, phone, clientName, role: role || 'employee' };
   // emit(text) — отправка промежуточного сообщения в чат (авто-эхо тулов).
   const echo = (config.ECHO_TOOL_CALLS && typeof emit === 'function') ? emit : null;
 

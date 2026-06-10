@@ -1,18 +1,23 @@
 'use strict';
 // Планировщик отчётов — ежедневные ритуалы компании (см. orchestrator_learning_patterns.md):
-//  - ВЕЧЕРОМ (EVENING_REPORT_HOUR) каждому сотруднику с открытыми задачами уходит
+//  - ВЕЧЕРОМ (eveningHour) каждому сотруднику с открытыми задачами уходит
 //    персональное напоминание отписаться по задачам (ответ обработает обычный
 //    пайплайн в режиме EMPLOYEE CONTEXT → update_task).
-//  - УТРОМ (MORNING_SUMMARY_HOUR) боссу уходит сводка: нагрузка, блокеры,
+//  - УТРОМ (morningHour) боссу уходит сводка: нагрузка, блокеры,
 //    задачи без движения 2+ дня.
 // Воскресенье — выходной. Время локальное (SCHEDULER_TZ_OFFSET_MIN, Казахстан UTC+5).
 // Дедупликация — по дате последнего запуска каждой джобы (в памяти процесса).
+//
+// УПРАВЛЕНИЕ: ИИ управляет планировщиком через инструмент manage_scheduler
+// (вкл/выкл, смена часов, запуск вручную). Изменения сохраняются в orch_settings
+// и переживают рестарт: env-значения — только дефолт при первом старте.
 const config = require('../config');
-const { listEmployees, listOpenTasksBrief } = require('./mysql');
+const { listEmployees, listOpenTasksBrief, getSettings, setSetting } = require('./mysql');
 const notifier = require('./notifier');
 
 const STATUS_RU = {
   new: 'не взята',
+  todo: 'не взята',
   dispatched: 'ожидает',
   in_progress: 'в работе',
   blocked: 'блокер',
@@ -20,6 +25,13 @@ const STATUS_RU = {
 
 const STALE_DAYS = 2;       // «без движения» = updated_at старше этого
 const MAX_LINES = 10;       // не раздувать сообщение сотруднику
+
+// Рантайм-состояние (дефолты из env, переопределения из orch_settings).
+const state = {
+  enabled: config.SCHEDULER_ENABLED,
+  morningHour: config.MORNING_SUMMARY_HOUR,
+  eveningHour: config.EVENING_REPORT_HOUR,
+};
 
 // «Юрин Владимир» → «Владимир»; «Али» → «Али» (в реестре формат «Фамилия Имя»).
 function firstName(name) {
@@ -32,18 +44,29 @@ function localNow(now, tzOffsetMin) {
   return new Date(now.getTime() + off * 60000);
 }
 
-// Состояние «когда джоба стреляла в последний раз» (ключ = дата YYYY-MM-DD).
+// Состояние «когда джоба успешно отстрелялась» (ключ = локальная дата YYYY-MM-DD).
+// Персистится в orch_settings, чтобы рестарт не дублировал и не терял рассылку.
 const lastRun = { morning: '', evening: '' };
 
-// true ровно один раз в день, в заданный локальный час, кроме воскресенья.
-function shouldFire(job, hour, now = new Date(), state = lastRun) {
+function localDateKey(now = new Date()) {
+  return localNow(now).toISOString().slice(0, 10);
+}
+
+// true, если джобу пора запускать: будний день, локальное время уже >= часа,
+// и сегодня она ещё НЕ выполнялась успешно. Без side-effect — отметку ставит
+// markDone ПОСЛЕ успешной отправки (поэтому сбой/ранний рестарт не теряет день).
+function shouldFire(job, hour, now = new Date(), st = lastRun) {
   const loc = localNow(now);
-  if (loc.getUTCDay() === 0) return false; // воскресенье — выходной
-  if (loc.getUTCHours() !== hour) return false;
-  const dateKey = loc.toISOString().slice(0, 10);
-  if (state[job] === dateKey) return false;
-  state[job] = dateKey;
+  if (loc.getUTCDay() === 0) return false;          // воскресенье — выходной
+  if (loc.getUTCHours() < hour) return false;       // ещё не наступил час (с досылом при позднем старте)
+  if (st[job] === localDateKey(now)) return false;  // уже сделано сегодня
   return true;
+}
+
+async function markDone(job, now = new Date()) {
+  const key = localDateKey(now);
+  lastRun[job] = key;
+  await setSetting(`scheduler.last_${job}`, key);
 }
 
 // ── Вечер: персональные напоминания исполнителям ──────────────────────────
@@ -80,7 +103,7 @@ async function runEveningReminders() {
     if (ok) sent += 1;
   }
   console.log(`[Scheduler] Вечерний сбор статусов: ${sent}/${reminders.length} отправлено`);
-  return sent;
+  return { sent, total: reminders.length };
 }
 
 // ── Утро: сводка боссу ─────────────────────────────────────────────────────
@@ -123,7 +146,7 @@ async function runMorningSummary() {
   const targets = config.SCHEDULER_BOSS_WA.length ? config.SCHEDULER_BOSS_WA : config.BOSS_CONTACTS;
   if (!targets.length) {
     console.warn('[Scheduler] Утренняя сводка: нет получателей (BOSS_CONTACTS/SCHEDULER_BOSS_WA пусты)');
-    return 0;
+    return { sent: 0, total: 0 };
   }
   const [employees, tasks] = await Promise.all([listEmployees(), listOpenTasksBrief()]);
   const text = buildMorningSummary(tasks, employees);
@@ -133,35 +156,96 @@ async function runMorningSummary() {
     if (ok) sent += 1;
   }
   console.log(`[Scheduler] Утренняя сводка боссу: ${sent}/${targets.length} отправлено`);
-  return sent;
+  return { sent, total: targets.length };
+}
+
+// ── Управление (инструмент manage_scheduler) ───────────────────────────────
+function getState() {
+  return {
+    enabled: state.enabled,
+    morning_hour: state.morningHour,
+    evening_hour: state.eveningHour,
+    tz: `UTC+${config.SCHEDULER_TZ_OFFSET_MIN / 60}`,
+    last_morning: lastRun.morning || null,
+    last_evening: lastRun.evening || null,
+    note: 'вс — выходной',
+  };
+}
+
+async function setEnabled(on) {
+  state.enabled = Boolean(on);
+  await setSetting('scheduler.enabled', state.enabled ? '1' : '0');
+  console.log(`[Scheduler] ${state.enabled ? 'Включен' : 'Выключен'} (через manage_scheduler)`);
+  return getState();
+}
+
+async function setHours({ morning, evening }) {
+  const valid = (h) => Number.isInteger(h) && h >= 0 && h <= 23;
+  if (morning !== undefined) {
+    if (!valid(morning)) throw new Error(`morning_hour должен быть 0–23, получено: ${morning}`);
+    state.morningHour = morning;
+    await setSetting('scheduler.morning_hour', String(morning));
+  }
+  if (evening !== undefined) {
+    if (!valid(evening)) throw new Error(`evening_hour должен быть 0–23, получено: ${evening}`);
+    state.eveningHour = evening;
+    await setSetting('scheduler.evening_hour', String(evening));
+  }
+  console.log(`[Scheduler] Часы обновлены: утро ${state.morningHour}:00, вечер ${state.eveningHour}:00`);
+  return getState();
+}
+
+// Переопределения из БД (то, что ИИ настроил ранее) поверх env-дефолтов +
+// восстановление отметок «уже слали сегодня» (чтобы рестарт не дублировал).
+async function loadOverrides() {
+  const s = await getSettings('scheduler.');
+  if (s['scheduler.enabled'] !== undefined) state.enabled = s['scheduler.enabled'] === '1';
+  const mh = parseInt(s['scheduler.morning_hour'], 10);
+  const eh = parseInt(s['scheduler.evening_hour'], 10);
+  if (Number.isInteger(mh) && mh >= 0 && mh <= 23) state.morningHour = mh;
+  if (Number.isInteger(eh) && eh >= 0 && eh <= 23) state.eveningHour = eh;
+  if (s['scheduler.last_morning']) lastRun.morning = s['scheduler.last_morning'];
+  if (s['scheduler.last_evening']) lastRun.evening = s['scheduler.last_evening'];
 }
 
 // ── Цикл ───────────────────────────────────────────────────────────────────
 async function tick(now = new Date()) {
   try {
-    if (shouldFire('morning', config.MORNING_SUMMARY_HOUR, now)) await runMorningSummary();
-    if (shouldFire('evening', config.EVENING_REPORT_HOUR, now)) await runEveningReminders();
+    if (!state.enabled) return;
+    if (shouldFire('morning', state.morningHour, now)) {
+      const r = await runMorningSummary();
+      // Отмечаем выполненным только при реальной отправке (или когда слать некому/нечего).
+      if (r.sent > 0 || r.total === 0) await markDone('morning', now);
+    }
+    if (shouldFire('evening', state.eveningHour, now)) {
+      const r = await runEveningReminders();
+      if (r.sent > 0 || r.total === 0) await markDone('evening', now);
+    }
   } catch (err) {
     console.error('[Scheduler] tick:', err.message);
   }
 }
 
 let timer = null;
-function start() {
-  if (!config.SCHEDULER_ENABLED) {
-    console.log('[Scheduler] Выключен (REPORT_SCHEDULER=0)');
-    return;
-  }
+async function start() {
   if (timer) return;
+  try {
+    await loadOverrides();
+  } catch (err) {
+    console.error('[Scheduler] loadOverrides:', err.message);
+  }
+  // Таймер крутится всегда (даже при enabled=false) — ИИ может включить на лету.
   timer = setInterval(tick, 60 * 1000);
   if (timer.unref) timer.unref();
   const tz = config.SCHEDULER_TZ_OFFSET_MIN / 60;
-  console.log(`[Scheduler] Включен: сводка боссу в ${config.MORNING_SUMMARY_HOUR}:00, `
-    + `сбор статусов в ${config.EVENING_REPORT_HOUR}:00 (UTC+${tz}), вс — выходной`);
+  console.log(`[Scheduler] ${state.enabled ? 'Включен' : 'Выключен (включается через manage_scheduler)'}: `
+    + `сводка боссу в ${state.morningHour}:00, сбор статусов в ${state.eveningHour}:00 (UTC+${tz}), вс — выходной`);
 }
 
 module.exports = {
   start,
+  getState, setEnabled, setHours,
+  runMorningSummary, runEveningReminders,
   // для тестов
-  _internals: { shouldFire, buildEveningReminders, buildMorningSummary, firstName },
+  _internals: { shouldFire, buildEveningReminders, buildMorningSummary, firstName, state },
 };

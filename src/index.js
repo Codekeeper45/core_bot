@@ -136,13 +136,15 @@ async function processMessage(rawPayload) {
   const { channel, chat_id, phone, client_name, message_type } = n;
 
   // Шаг 1.4: Фильтр доступа — обслуживаем только сотрудников и боссов, прочих молча игнорируем.
-  if (config.RESTRICT_TO_KNOWN_SENDERS) {
-    const access = await isAllowedSender(channel, chat_id, phone);
-    if (!access.allowed) {
-      console.log(`[Access] Игнор постороннего отправителя (${channel})`);
-      return;
-    }
+  // Роль (boss/employee) вычисляем ВСЕГДА — она нужна для code-level гейта инструментов
+  // (а не только промпта), иначе сотрудник prompt-инъекцией дёрнет админ-инструменты.
+  const access = await isAllowedSender(channel, chat_id, phone);
+  if (config.RESTRICT_TO_KNOWN_SENDERS && !access.allowed) {
+    console.log(`[Access] Игнор постороннего отправителя (${channel})`);
+    return;
   }
+  // Неизвестный при выключенном фильтре = наименьшие права (не босс).
+  const senderRole = access.role || 'employee';
 
   // Шаг 1.5: Команды управления
   const rawCmd = (n.message || '').trim().toLowerCase();
@@ -250,6 +252,7 @@ async function processMessage(rawPayload) {
         chatId: chat_id,
         phone,
         clientName: client_name,
+        role: senderRole,
         // Авто-эхо: бот шлёт в чат короткие строки о вызываемых тулах в реальном времени.
         emit: (text) => sendReply(channel, chat_id, text),
       });
@@ -348,12 +351,18 @@ async function startServer() {
 
   if (config.TELEGRAM_WEBHOOK_URL) {
     const webhookPath = '/webhook/telegram';
+    // secret_token: Telegram присылает его в заголовке X-Telegram-Bot-Api-Secret-Token.
+    // Без проверки любой может POST'ом подделать апдейт от босса и обойти фильтр доступа.
+    const tgSecret = config.TELEGRAM_WEBHOOK_SECRET || require('crypto').randomBytes(24).toString('hex');
     app.post(webhookPath, (req, res) => {
+      if (req.get('X-Telegram-Bot-Api-Secret-Token') !== tgSecret) {
+        return res.sendStatus(403);
+      }
       res.sendStatus(200);
       bot.handleUpdate(req.body).catch(err => console.error('[TG Webhook] Error:', err.message));
     });
-    await bot.telegram.setWebhook(`${config.TELEGRAM_WEBHOOK_URL}${webhookPath}`);
-    console.log(`[TG] Webhook set to ${config.TELEGRAM_WEBHOOK_URL}${webhookPath}`);
+    await bot.telegram.setWebhook(`${config.TELEGRAM_WEBHOOK_URL}${webhookPath}`, { secret_token: tgSecret });
+    console.log(`[TG] Webhook set to ${config.TELEGRAM_WEBHOOK_URL}${webhookPath} (secret enabled)`);
   } else {
     bot.on('message', (ctx) => {
       processMessage(ctx.update).catch(err => console.error('[TG Polling] Error:', err.message));

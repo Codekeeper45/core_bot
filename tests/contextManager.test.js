@@ -2,7 +2,36 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const config = require('../src/config');
-const { summarizeIfNeeded, totalChars, findCleanCut, SUMMARY_SYSTEM } = require('../src/agent/contextManager');
+const { summarizeIfNeeded, totalChars, findCleanCut, safeTrimHistory, SUMMARY_SYSTEM } = require('../src/agent/contextManager');
+
+test('safeTrimHistory: обрезка начинается с чистой границы (нет осиротевшего tool)', () => {
+  const msgs = [
+    { role: 'user', content: 'a' },
+    { role: 'assistant', tool_calls: [{ id: '1', function: { name: 'x' } }] },
+    { role: 'tool', tool_call_id: '1', content: 'r1' },
+    { role: 'assistant', tool_calls: [{ id: '2', function: { name: 'y' } }] },
+    { role: 'tool', tool_call_id: '2', content: 'r2' },
+    { role: 'assistant', content: 'итог' },
+  ];
+  const out = safeTrimHistory(msgs, 3);
+  assert.ok(out[0].role === 'user' || (out[0].role === 'assistant' && !out[0].tool_calls));
+  assert.strictEqual(out[out.length - 1].content, 'итог');
+});
+
+test('safeTrimHistory: выравнивает короткий массив с осиротевшим префиксом', () => {
+  const msgs = [
+    { role: 'tool', tool_call_id: '9', content: 'orphan' },
+    { role: 'assistant', content: 'ответ' },
+  ];
+  const out = safeTrimHistory(msgs, 100);
+  assert.strictEqual(out.length, 1);
+  assert.strictEqual(out[0].content, 'ответ');
+});
+
+test('safeTrimHistory: чистый массив не меняется', () => {
+  const msgs = [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'yo' }];
+  assert.deepStrictEqual(safeTrimHistory(msgs, 100), msgs);
+});
 
 // Shrink thresholds for deterministic tests (config is a shared object).
 config.CONTEXT_SUMMARY_CHAR_LIMIT = 200;

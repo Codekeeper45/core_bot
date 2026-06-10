@@ -154,6 +154,16 @@ async function initTables() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
+  // Настройки рантайма, управляемые ботом (планировщик и т.п.). key-value,
+  // чтобы решения ИИ переживали рестарт контейнера.
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS orch_settings (
+      k          VARCHAR(64)  PRIMARY KEY,
+      v          VARCHAR(255) NOT NULL,
+      updated_at TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
   // Миграция: добавить колонку сводки в уже существующие таблицы истории
   // (CREATE TABLE IF NOT EXISTS не добавит колонку к созданной ранее таблице).
   try {
@@ -479,6 +489,34 @@ async function listAllProjects(limit = 50) {
   }
 }
 
+// ── Настройки рантайма (orch_settings) ──────────────────────────────────────
+async function getSettings(prefix) {
+  try {
+    const rows = prefix
+      ? await dbQuery('SELECT k, v FROM orch_settings WHERE k LIKE ?', [`${prefix}%`])
+      : await dbQuery('SELECT k, v FROM orch_settings');
+    const out = {};
+    for (const r of rows) out[r.k] = r.v;
+    return out;
+  } catch (err) {
+    console.error('[MySQL] getSettings:', err.message);
+    return {};
+  }
+}
+
+async function setSetting(k, v) {
+  try {
+    await dbQuery(
+      'INSERT INTO orch_settings (k, v) VALUES (?, ?) ON DUPLICATE KEY UPDATE v = VALUES(v)',
+      [String(k), String(v)]
+    );
+    return true;
+  } catch (err) {
+    console.error('[MySQL] setSetting:', err.message);
+    return false;
+  }
+}
+
 // ВСЕ открытые задачи одним запросом (для сводки нагрузки в list_employees, без N+1).
 async function listOpenTasksBrief() {
   try {
@@ -706,7 +744,10 @@ async function loadHistory(channel, chatId) {
 async function saveHistory(channel, chatId, messages, summary = '') {
   try {
     // Backstop only — contextManager keeps the array well under this via summarization.
-    const trimmed = messages.slice(-config.CHAT_MEMORY_WINDOW);
+    // Режем по ЧИСТОЙ границе хода: иначе обрезанный массив может начаться с
+    // осиротевшего role:'tool' → API 400 на каждом следующем сообщении (чат залипает).
+    const { safeTrimHistory } = require('../agent/contextManager');
+    const trimmed = safeTrimHistory(messages, config.CHAT_MEMORY_WINDOW);
     await dbQuery(
       `INSERT INTO bot_chat_history (channel, chat_id, messages, summary)
        VALUES (?, ?, ?, ?)
@@ -774,6 +815,7 @@ module.exports = {
   // Оркестратор: проекты
   createProject, getProject, updateProjectPlan, setProjectStatus, recomputeProjectStatus,
   listProjectsForOwner, listAllProjects, listOpenTasksBrief,
+  getSettings, setSetting,
   // Оркестратор: задачи
   createTasksBulk, getTask, listTasksForProject, assignTask, markDispatched, updateTaskStatus,
   setTaskDeadline,

@@ -82,6 +82,7 @@ module.exports = {
   // Telegram
   TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || '',
   TELEGRAM_WEBHOOK_URL: process.env.TELEGRAM_WEBHOOK_URL || '',
+  TELEGRAM_WEBHOOK_SECRET: process.env.TELEGRAM_WEBHOOK_SECRET || '',
 
   // Bot identity (shown in manager notifications)
   BOT_NAME: process.env.BOT_NAME || 'AI-бот',
