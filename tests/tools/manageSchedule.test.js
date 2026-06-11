@@ -15,7 +15,9 @@ const mysqlMock = {
   deleteSchedule: async () => true,
   countSchedules: async () => activeCount,
   listScheduleRuns: async () => mysqlMock._runs,
+  logScheduleRun: async (id, title, status, detail) => mysqlMock._journal.push({ id, status, detail }),
   _runs: [],
+  _journal: [],
 };
 
 const Module = require('module');
@@ -32,7 +34,7 @@ const ctx = { channel: 'whatsapp', chatId: '77770000001', phone: '77770000001', 
 function owned(extra) {
   return { owner_channel: 'whatsapp', owner_chat_id: '77770000001', enabled: 1, last_run_at: null, ...extra };
 }
-function reset() { created.length = 0; updates.length = 0; ownerRows = []; activeCount = 0; }
+function reset() { created.length = 0; updates.length = 0; ownerRows = []; activeCount = 0; mysqlMock._journal.length = 0; }
 
 describe('manage_schedule: create', () => {
   test('definition валиден', () => {
@@ -242,6 +244,186 @@ describe('manage_schedule: run_now', () => {
     assert.equal(r.execute_now, true);
     assert.match(r.instruction, /проверь план X/);
     assert.equal(updates.length, 0); // состояние расписания не изменилось
+  });
+});
+
+describe('manage_schedule: будильник/календарь (create с новыми полями)', () => {
+  test('once + nag + remind_before: создаётся с фазой pre, confirm описывает режим', async () => {
+    reset();
+    const r = await handler({
+      action: 'create', title: 'Звонок', instruction: 'напомни про звонок', kind: 'once',
+      run_at: '2030-01-01 10:00:00', nag_interval_min: 10, remind_before_min: 30,
+    }, ctx);
+    assert.equal(r.success, true);
+    assert.equal(created[0].fire_phase, 'pre');
+    assert.equal(created[0].next_run_at, '2030-01-01 04:30:00'); // 05:00 UTC − 30 мин
+    assert.equal(created[0].nag_interval_min, 10);
+    assert.match(r.confirm_to_boss, /предупрежу за 30 мин/);
+    assert.match(r.confirm_to_boss, /каждые 10 мин/);
+  });
+
+  test('yearly: создаётся по MM-DD; кривая дата → ошибка', async () => {
+    reset();
+    const r = await handler({ action: 'create', title: 'ДР мамы', instruction: 'поздравь', kind: 'yearly', at_hour: 9, yearly_date: '03-14' }, ctx);
+    assert.equal(r.success, true);
+    assert.equal(created[0].yearly_date, '03-14');
+    assert.match(r.when, /каждый год 14\.03/);
+    const bad = await handler({ action: 'create', title: 'X', instruction: 'y', kind: 'yearly', at_hour: 9, yearly_date: '02-30' }, ctx);
+    assert.equal(bad.success, false);
+    assert.match(bad.message, /не бывает/);
+  });
+
+  test('until_date: прошлое → ошибка; once + until → ошибка; max_runs для once → ошибка', async () => {
+    reset();
+    const past = await handler({ action: 'create', title: 'X', instruction: 'y', kind: 'daily', at_hour: 9, until_date: '2020-01-01' }, ctx);
+    assert.equal(past.success, false);
+    assert.match(past.message, /прошлом/);
+    const onceUntil = await handler({ action: 'create', title: 'X', instruction: 'y', kind: 'once', run_at: '2030-01-01 10:00:00', until_date: '2031-01-01' }, ctx);
+    assert.equal(onceUntil.success, false);
+    const onceMax = await handler({ action: 'create', title: 'X', instruction: 'y', kind: 'once', run_at: '2030-01-01 10:00:00', max_runs: 3 }, ctx);
+    assert.equal(onceMax.success, false);
+    // валидное until сохраняется как конец локального дня в UTC
+    const ok = await handler({ action: 'create', title: 'X', instruction: 'y', kind: 'daily', at_hour: 9, until_date: '2030-06-13' }, ctx);
+    assert.equal(ok.success, true);
+    assert.equal(created[0].until_at, '2030-06-13 18:59:59'); // 23:59:59 локально − 5ч
+  });
+
+  test('nag_interval_min меньше минимума → ошибка', async () => {
+    reset();
+    const r = await handler({ action: 'create', title: 'X', instruction: 'y', kind: 'once', delay_minutes: 30, nag_interval_min: 1 }, ctx);
+    assert.equal(r.success, false);
+    assert.match(r.message, /nag_interval_min/);
+  });
+});
+
+describe('manage_schedule: acknowledge', () => {
+  test('без id при одном ждущем → once выключается, журнал acked', async () => {
+    reset();
+    ownerRows = [owned({ id: 30, title: 'Звонок', instruction: 'y', kind: 'once', run_at: '2026-06-08 05:00:00', fire_phase: 'nag', nag_count: 2 })];
+    const r = await handler({ action: 'acknowledge' }, ctx);
+    assert.equal(r.success, true);
+    assert.equal(r.id, 30);
+    const [, fields] = updates[0];
+    assert.equal(fields.enabled, 0);
+    assert.equal(fields.next_run_at, null);
+    assert.equal(mysqlMock._journal[0].status, 'acked');
+  });
+
+  test('recurring → возврат к следующему вхождению (без выключения)', async () => {
+    reset();
+    ownerRows = [owned({ id: 31, title: 'Сводка', instruction: 'y', kind: 'daily', at_hour: 9, at_minute: 0, fire_phase: 'nag', nag_count: 1 })];
+    const r = await handler({ action: 'acknowledge', id: 31 }, ctx);
+    assert.equal(r.success, true);
+    const [, fields] = updates[0];
+    assert.equal(fields.fire_phase, 'main');
+    assert.equal(fields.nag_count, 0);
+    assert.match(String(fields.next_run_at), /^\d{4}-\d{2}-\d{2} /);
+    assert.ok(r.next_run_local);
+  });
+
+  test('нет ждущих → понятный отказ; несколько → список и просьба указать id', async () => {
+    reset();
+    ownerRows = [owned({ id: 32, title: 'X', instruction: 'y', kind: 'daily', at_hour: 9, fire_phase: 'main' })];
+    const none = await handler({ action: 'acknowledge' }, ctx);
+    assert.equal(none.success, false);
+    assert.match(none.message, /Нет напоминаний/);
+    ownerRows = [
+      owned({ id: 33, title: 'A', instruction: 'y', kind: 'once', run_at: '2026-06-08 05:00:00', fire_phase: 'nag' }),
+      owned({ id: 34, title: 'B', instruction: 'y', kind: 'once', run_at: '2026-06-08 06:00:00', fire_phase: 'nag' }),
+    ];
+    const many = await handler({ action: 'acknowledge' }, ctx);
+    assert.equal(many.success, false);
+    assert.equal(many.waiting.length, 2);
+  });
+
+  test('id не в фазе nag → отказ «не ждёт подтверждения»', async () => {
+    reset();
+    ownerRows = [owned({ id: 35, title: 'X', instruction: 'y', kind: 'daily', at_hour: 9, fire_phase: 'main' })];
+    const r = await handler({ action: 'acknowledge', id: 35 }, ctx);
+    assert.equal(r.success, false);
+    assert.match(r.message, /не ждёт подтверждения/);
+  });
+});
+
+describe('manage_schedule: snooze', () => {
+  test('двигает next_run_at на now+N, реанимирует выключенное, журнал snoozed', async () => {
+    reset();
+    // отгоревший once (enabled=0) — snooze возвращает к жизни
+    ownerRows = [owned({ id: 40, title: 'X', instruction: 'y', kind: 'once', run_at: '2026-06-08 05:00:00', enabled: 0, last_run_at: null, fire_phase: 'main' })];
+    const before = Date.now();
+    const r = await handler({ action: 'snooze', id: 40, snooze_minutes: 15 }, ctx);
+    assert.equal(r.success, true);
+    const [, fields] = updates[0];
+    assert.equal(fields.enabled, 1);
+    assert.equal(fields.fail_count, 0);
+    const next = new Date(String(fields.next_run_at).replace(' ', 'T') + 'Z').getTime();
+    assert.ok(Math.abs(next - (before + 15 * 60000)) < 5000);
+    assert.equal(mysqlMock._journal[0].status, 'snoozed');
+  });
+
+  test('без id: берёт ждущий подтверждения будильник; диапазон snooze_minutes', async () => {
+    reset();
+    ownerRows = [owned({ id: 41, title: 'X', instruction: 'y', kind: 'once', run_at: '2026-06-08 05:00:00', fire_phase: 'nag' })];
+    const r = await handler({ action: 'snooze', snooze_minutes: 10 }, ctx);
+    assert.equal(r.success, true);
+    assert.equal(r.id, 41);
+    assert.equal((await handler({ action: 'snooze', id: 41, snooze_minutes: 0 }, ctx)).success, false);
+    assert.equal((await handler({ action: 'snooze', id: 41, snooze_minutes: 5000 }, ctx)).success, false);
+  });
+});
+
+describe('manage_schedule: skip_next', () => {
+  test('recurring: next_run_at = вхождение ПОСЛЕ ближайшего', async () => {
+    reset();
+    ownerRows = [owned({ id: 50, title: 'Сводка', instruction: 'y', kind: 'daily', at_hour: 9, at_minute: 0,
+      fire_phase: 'main', next_run_at: '2030-06-10 04:00:00' })];
+    const r = await handler({ action: 'skip_next', id: 50 }, ctx);
+    assert.equal(r.success, true);
+    assert.match(r.skipped_local, /2030-06-10 09:00/);
+    const [, fields] = updates[0];
+    assert.equal(fields.next_run_at, '2030-06-11 04:00:00'); // послезавтра 9:00 локально
+  });
+
+  test('once → ошибка; фаза nag → «сначала acknowledge»', async () => {
+    reset();
+    ownerRows = [
+      owned({ id: 51, title: 'X', instruction: 'y', kind: 'once', run_at: '2030-01-01 05:00:00', next_run_at: '2030-01-01 05:00:00' }),
+      owned({ id: 52, title: 'Y', instruction: 'y', kind: 'daily', at_hour: 9, fire_phase: 'nag', next_run_at: '2030-01-01 05:00:00' }),
+    ];
+    assert.match((await handler({ action: 'skip_next', id: 51 }, ctx)).message, /once/);
+    assert.match((await handler({ action: 'skip_next', id: 52 }, ctx)).message, /acknowledge/);
+  });
+});
+
+describe('manage_schedule: agenda', () => {
+  test('сортировка по времени, горизонт today отсекает завтрашнее, time_left присутствует', async () => {
+    reset();
+    // «сейчас» в тесте — реальное время; берём далёкое будущее с заведомо разными датами
+    const now = Date.now();
+    const in2h = new Date(now + 2 * 3600000);
+    const in30m = new Date(now + 30 * 60000);
+    const fmt = (d) => d.toISOString().slice(0, 19).replace('T', ' ');
+    ownerRows = [
+      owned({ id: 60, title: 'Позже', instruction: 'y', kind: 'once', run_at: fmt(in2h), next_run_at: fmt(in2h), fire_phase: 'main' }),
+      owned({ id: 61, title: 'Скоро', instruction: 'y', kind: 'once', run_at: fmt(in30m), next_run_at: fmt(in30m), fire_phase: 'main' }),
+      owned({ id: 62, title: 'Через месяц', instruction: 'y', kind: 'once', run_at: '2099-01-01 05:00:00', next_run_at: '2099-01-01 05:00:00', fire_phase: 'main' }),
+    ];
+    const r = await handler({ action: 'agenda', horizon: 'week' }, ctx);
+    assert.equal(r.success, true);
+    assert.equal(r.count, 2, '2099 год не попадает в недельный горизонт');
+    assert.equal(r.items[0].id, 61, 'ближайшее — первым');
+    assert.match(r.items[0].time_left, /через/);
+    const all = await handler({ action: 'agenda', horizon: 'all' }, ctx);
+    assert.equal(all.count, 3);
+  });
+
+  test('пусто → понятная note', async () => {
+    reset();
+    ownerRows = [];
+    const r = await handler({ action: 'agenda' }, ctx);
+    assert.equal(r.success, true);
+    assert.equal(r.count, 0);
+    assert.match(r.note, /ничего не запланировано/);
   });
 });
 
