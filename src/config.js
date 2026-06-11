@@ -151,4 +151,8 @@ module.exports = {
   TTS_VOICE: process.env.TTS_VOICE || 'Kore',
   // Озвучивать ответ голосом, если входящее было голосом (и явная просьба). Выкл: TTS_ENABLED=0.
   TTS_ENABLED: process.env.TTS_ENABLED !== '0' && process.env.TTS_ENABLED !== 'false',
+  // Fallback-TTS через OpenRouter (если все Google-ключи не ответили). Использует
+  // OPENROUTER_API_KEY. Модель/голос можно переопределить (id зависит от каталога OpenRouter).
+  OPENROUTER_TTS_MODEL: process.env.OPENROUTER_TTS_MODEL || 'google/gemini-2.5-flash-preview-tts',
+  OPENROUTER_TTS_VOICE: process.env.OPENROUTER_TTS_VOICE || process.env.TTS_VOICE || 'Kore',
 };

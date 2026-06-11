@@ -87,7 +87,7 @@ describe('web_search service', () => {
   });
 });
 
-// ── tts: PCM→WAV заголовок корректен; ветка ключей ────────────────────────────
+// ── tts: PCM→WAV заголовок корректен; ротация ключей; ветка отказа ────────────
 describe('tts', () => {
   const { _internals } = require('../src/services/tts');
   test('pcmToWav пишет валидный RIFF/WAVE заголовок', () => {
@@ -98,11 +98,39 @@ describe('tts', () => {
     assert.equal(wav.length, 44 + 100);
     assert.equal(wav.readUInt32LE(24), 24000); // sample rate
   });
-  test('synthesizeSpeech без ключа → честный отказ', async () => {
+
+  test('googleKeysRotated: круговая ротация старта по запросам', () => {
+    const Module = require('module');
+    const orig = Module.prototype.require;
+    const cfg = { GOOGLE_GENAI_API_KEYS: ['k1', 'k2', 'k3'], GOOGLE_GENAI_API_KEY: '' };
+    Module.prototype.require = function (id) {
+      if (id === '../config') return cfg;
+      return orig.apply(this, arguments);
+    };
+    delete require.cache[require.resolve('../src/services/tts')];
+    const tts = require('../src/services/tts');
+    Module.prototype.require = orig;
+    // каждый вызов начинается со следующего ключа, но содержит ВСЕ ключи (для перебора при 429)
+    assert.deepEqual(tts._internals.googleKeysRotated(), ['k1', 'k2', 'k3']);
+    assert.deepEqual(tts._internals.googleKeysRotated(), ['k2', 'k3', 'k1']);
+    assert.deepEqual(tts._internals.googleKeysRotated(), ['k3', 'k1', 'k2']);
+    assert.deepEqual(tts._internals.googleKeysRotated(), ['k1', 'k2', 'k3']); // цикл
+    delete require.cache[require.resolve('../src/services/tts')]; // восстановить для других тестов
+  });
+
+  test('synthesizeSpeech без ключей → честный отказ (без сетевых вызовов)', async () => {
+    const Module = require('module');
+    const orig = Module.prototype.require;
+    Module.prototype.require = function (id) {
+      if (id === '../config') return { GOOGLE_GENAI_API_KEYS: [], GOOGLE_GENAI_API_KEY: '', OPENROUTER_API_KEY: '', TTS_VOICE: 'Kore' };
+      return orig.apply(this, arguments);
+    };
+    delete require.cache[require.resolve('../src/services/tts')];
     const { synthesizeSpeech } = require('../src/services/tts');
-    // config.GOOGLE_GENAI_API_KEY в тестах пуст → отказ
+    Module.prototype.require = orig;
     const r = await synthesizeSpeech('привет');
+    delete require.cache[require.resolve('../src/services/tts')];
     assert.equal(r.ok, false);
-    assert.match(r.error, /TTS не настроен|GOOGLE_GENAI/);
+    assert.match(r.error, /TTS не настроен/);
   });
 });
