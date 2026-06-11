@@ -12,7 +12,7 @@
 // once досылается всегда.
 const {
   listEnabledSchedules, markScheduleRun, touchScheduleStatus, bumpScheduleFail,
-  setScheduleNextRun, setScheduleEnabled, logScheduleRun, cleanupScheduleRuns,
+  claimSchedule, setScheduleNextRun, setScheduleEnabled, logScheduleRun, cleanupScheduleRuns,
 } = require('./mysql');
 const { computeNextRunAt, toUtc, fmtUtc } = require('../utils/scheduleTime');
 const config = require('../config');
@@ -40,8 +40,10 @@ let timer = null;
 let running = false;     // гард: одно исполнение tick за раз (агентный цикл долгий)
 let lastCleanupDay = ''; // журнал чистим раз в сутки (старше 90 дней)
 
-// Выполнить одно расписание. Возвращает строку-статус для записи.
-async function runSchedule(row, now) {
+// Выполнить одно расписание (строка уже захвачена claim'ом: next_run_at в БД = NULL).
+// prevNextRunAt — прежнее значение, чтобы восстановить его при lock_busy.
+// Возвращает строку-статус для записи.
+async function runSchedule(row, now, prevNextRunAt) {
   const res = await deliverFn({
     channel: row.owner_channel,
     chatId: row.owner_chat_id,
@@ -59,27 +61,47 @@ async function runSchedule(row, now) {
     return 'ok';
   }
   if (res && res.reason === 'lock_busy') {
-    // Чат владельца занят (босс пишет прямо сейчас). next_run_at не трогаем —
-    // расписание остаётся due и повторится на следующем tick (в т.ч. daily).
+    // Чат владельца занят (босс пишет прямо сейчас). Возвращаем прежний next_run_at
+    // (claim его занулил) — расписание остаётся due и повторится на следующем tick.
+    await setScheduleNextRun(row.id, prevNextRunAt);
     await touchScheduleStatus(row.id, 'lock_busy');
     await logScheduleRun(row.id, row.title, 'lock_busy', 'чат занят, повтор на следующем tick');
     return 'lock_busy';
   }
-  // Ошибка агентного цикла. Для once — копим fail_count (ретрай каждый tick, cutoff в БД);
-  // для recurring — переносим на следующий раз, чтобы не спамить ретраями каждую минуту.
+  // Ошибка агентного цикла. Для once — восстанавливаем due-момент и копим fail_count
+  // (ретрай каждый tick, cutoff в БД); для recurring — переносим на следующий раз,
+  // чтобы не спамить ретраями каждую минуту.
   const status = (res && res.reason) || 'agent_error';
-  if (isOnce) await bumpScheduleFail(row.id, status);
-  else await markScheduleRun(row.id, now, status, nextFor(row, now));
+  if (isOnce) {
+    await setScheduleNextRun(row.id, prevNextRunAt);
+    await bumpScheduleFail(row.id, status);
+  } else {
+    await markScheduleRun(row.id, now, status, nextFor(row, now));
+  }
   await logScheduleRun(row.id, row.title, status, isOnce ? 'once: ретрай, после 3 неудач отключится' : 'перенесено на следующий раз');
   return status;
 }
 
-// Строка без next_run_at (legacy до миграции или ручная правка в БД): дозаполнить.
-// Завершённое once реанимировать нечем — выключаем, чтобы не опрашивать вечно.
+// Свежий захват другим процессом (перекрытие на деплое) не трогаем; старше — считаем
+// прогон оборванным (рестарт посреди доставки) и перевзводим.
+const STUCK_RUN_MIN = 15;
+
+// Строка без next_run_at: legacy до миграции, ручная правка в БД или оборванный
+// claim (рестарт между захватом и фиксацией). Дозаполнить; завершённое once
+// реанимировать нечем — выключаем, чтобы не опрашивать вечно.
 async function rearmSchedule(row, now) {
+  if (row.last_status === 'running' && row.updated_at) {
+    const ageMs = Math.abs(now.getTime() - toUtc(row.updated_at).getTime());
+    if (ageMs < STUCK_RUN_MIN * 60000) return; // прогон идёт прямо сейчас
+  }
   const next = nextFor(row, now);
-  if (next) await setScheduleNextRun(row.id, next);
-  else await setScheduleEnabled(row.id, false);
+  if (next) {
+    await setScheduleNextRun(row.id, next);
+  } else {
+    await setScheduleEnabled(row.id, false);
+    await logScheduleRun(row.id, row.title, 'auto_disabled',
+      'не удалось вычислить следующий запуск — расписание выключено');
+  }
 }
 
 async function tick(now = new Date()) {
@@ -98,6 +120,11 @@ async function tick(now = new Date()) {
       try {
         if (!row.next_run_at) { await rearmSchedule(row, now); continue; }
         if (!isDue(row, now)) continue;
+        // Атомарный claim: между снимком rows и этим местом расписание могли отменить
+        // или перенести (manage_schedule из чата босса), а при перекрытии процессов на
+        // деплое — забрать другой инстанс. Запускаем, только если захват наш.
+        const prevNextRunAt = fmtUtc(toUtc(row.next_run_at));
+        if (!(await claimSchedule(row.id, prevNextRunAt))) continue;
         // Сильно протухший фиксированный recurring (простой дольше окна) — missed,
         // переносим: дневная сводка в 18:00 уже не нужна. once досылаем всегда.
         if (RECURRING_FIXED.includes(row.kind)) {
@@ -109,7 +136,7 @@ async function tick(now = new Date()) {
             continue;
           }
         }
-        await runSchedule(row, now);
+        await runSchedule(row, now, prevNextRunAt);
       } catch (e) {
         console.error(`[SchedRunner] schedule #${row.id}:`, e.message);
       }

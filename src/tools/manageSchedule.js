@@ -116,6 +116,20 @@ function utcToLocalStr(v) {
   return localNow(toUtc(v)).toISOString().slice(0, 16).replace('T', ' ');
 }
 
+// CSV-список целых чисел в [lo..hi]: вернуть текст ошибки или null.
+// Невалидный токен («0», «Mon», «32») без этой проверки давал бы расписание,
+// которое никогда не совпадает с днём → next_run_at=NULL → тихое самоотключение.
+function validateCsvInts(csv, lo, hi, label) {
+  const toks = String(csv).split(',').map((s) => s.trim()).filter(Boolean);
+  if (!toks.length) return `${label}: пустой список.`;
+  for (const t of toks) {
+    if (!/^\d{1,2}$/.test(t) || Number(t) < lo || Number(t) > hi) {
+      return `${label}: «${t}» не входит в ${lo}–${hi}.`;
+    }
+  }
+  return null;
+}
+
 function validateSpec(spec) {
   if (!spec.title) return 'Нужно title (короткое имя расписания).';
   if (!spec.instruction) return 'Нужно instruction (что сделать).';
@@ -124,6 +138,14 @@ function validateSpec(spec) {
     if (spec[f] === undefined || spec[f] === null || spec[f] === '') {
       return `Для kind=${spec.kind} нужно поле ${f}.`;
     }
+  }
+  if (spec.kind === 'weekly') {
+    const e = validateCsvInts(spec.weekdays, 1, 7, 'weekdays');
+    if (e) return `${e} Дни недели: Пн=1..Вс=7 (воскресенье — 7, НЕ 0).`;
+  }
+  if (spec.kind === 'monthly') {
+    const e = validateCsvInts(spec.month_days, 1, 31, 'month_days');
+    if (e) return `${e} Числа месяца: 1–31.`;
   }
   // once: к моменту валидации run_at уже должен быть установлен (из run_at или delay_minutes).
   if (spec.kind === 'once' && !spec.run_at) {
@@ -199,6 +221,9 @@ async function handler(args, context = {}) {
         const err = validateSpec(spec);
         if (err) return { success: false, message: err };
         const next = computeNextRunAt(spec, new Date());
+        if (!next) {
+          return { success: false, message: 'Не удалось вычислить следующий запуск по этим параметрам — расписание не создано. Проверь kind и поля времени.' };
+        }
         const id = await createSchedule({
           owner_channel: context.channel,
           owner_chat_id: context.chatId,
@@ -263,7 +288,10 @@ async function handler(args, context = {}) {
         if (TIMING_FIELDS.some((f) => fields[f] !== undefined)) {
           merged.last_run_at = null;
           const next = computeNextRunAt(merged, new Date());
-          fields.next_run_at = next ? fmtUtc(next) : null;
+          if (!next) {
+            return { success: false, message: 'С такими параметрами времени следующий запуск не вычисляется — правка отклонена, расписание не изменено.' };
+          }
+          fields.next_run_at = fmtUtc(next);
           fields.last_run_at = null;
           fields.fail_count = 0;
           fields.enabled = 1;

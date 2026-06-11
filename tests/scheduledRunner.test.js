@@ -10,11 +10,13 @@ const mysqlMock = {
   markScheduleRun: async (id, when, status, next) => calls.push(['markRun', id, status, next]),
   touchScheduleStatus: async (id, status) => calls.push(['touch', id, status]),
   bumpScheduleFail: async (id, status) => calls.push(['bumpFail', id, status]),
+  claimSchedule: async (id, expected) => { calls.push(['claim', id, expected]); return mysqlMock._claimResult; },
   setScheduleNextRun: async (id, next) => calls.push(['setNext', id, next]),
   setScheduleEnabled: async (id, on) => calls.push(['setEnabled', id, on]),
   logScheduleRun: async (id, title, status, detail) => journal.push({ id, status, detail }),
   cleanupScheduleRuns: async () => 0,
   _rows: [],
+  _claimResult: true,
 };
 
 const Module = require('module');
@@ -72,17 +74,62 @@ describe('tick', () => {
     assert.deepEqual(calls.find((c) => c[0] === 'setEnabled'), ['setEnabled', 2, false]);
   });
 
-  test('lock_busy → touch, next_run_at не трогаем → ретрай на следующем tick (фикс пропуска daily)', async () => {
+  test('lock_busy → restore next_run_at (claim занулил) + touch → ретрай на следующем tick', async () => {
     mysqlMock._rows = [row({ id: 3, kind: 'daily', at_hour: 9, at_minute: 0, next_run_at: '2026-06-08 04:00:00' })];
     calls.length = 0;
     setDeliver(async () => ({ ok: false, reason: 'lock_busy' }));
     await tick(utc(2026, 6, 8, 4, 0));
-    assert.deepEqual(calls, [['touch', 3, 'lock_busy']]);
+    assert.deepEqual(calls, [
+      ['claim', 3, '2026-06-08 04:00:00'],
+      ['setNext', 3, '2026-06-08 04:00:00'], // прежний момент восстановлен
+      ['touch', 3, 'lock_busy'],
+    ]);
     // следующий tick через минуту — расписание всё ещё due и доставляется
     calls.length = 0;
     setDeliver(async () => ({ ok: true }));
     await tick(utc(2026, 6, 8, 4, 1));
     assert.equal(calls.find((c) => c[0] === 'markRun')[2], 'ok');
+  });
+
+  test('claim отказан (отменили/перенесли между снимком и запуском) → доставки нет', async () => {
+    mysqlMock._rows = [row({ id: 21, kind: 'daily', at_hour: 9, at_minute: 0, next_run_at: '2026-06-08 04:00:00' })];
+    calls.length = 0;
+    mysqlMock._claimResult = false;
+    let delivered = false;
+    setDeliver(async () => { delivered = true; return { ok: true }; });
+    await tick(utc(2026, 6, 8, 4, 0));
+    mysqlMock._claimResult = true;
+    assert.equal(delivered, false);
+    assert.deepEqual(calls, [['claim', 21, '2026-06-08 04:00:00']]); // и никаких записей
+  });
+
+  test('agent_error у once → next_run_at восстановлен (остаётся due) + bumpFail', async () => {
+    mysqlMock._rows = [row({ id: 22, kind: 'once', run_at: '2026-06-08 04:00:00', next_run_at: '2026-06-08 04:00:00' })];
+    calls.length = 0;
+    setDeliver(async () => ({ ok: false, reason: 'agent_error' }));
+    await tick(utc(2026, 6, 8, 4, 0));
+    assert.deepEqual(calls.find((c) => c[0] === 'setNext'), ['setNext', 22, '2026-06-08 04:00:00']);
+    assert.deepEqual(calls.find((c) => c[0] === 'bumpFail'), ['bumpFail', 22, 'agent_error']);
+  });
+
+  test('оборванный claim (running, updated_at протух) → перевзвод; свежий running не трогаем', async () => {
+    // свежий running (другой процесс прямо сейчас) — пропускаем
+    mysqlMock._rows = [row({
+      id: 23, kind: 'daily', at_hour: 9, at_minute: 0, next_run_at: null,
+      last_status: 'running', updated_at: '2026-06-08 03:55:00',
+    })];
+    calls.length = 0;
+    setDeliver(async () => ({ ok: true }));
+    await tick(utc(2026, 6, 8, 4, 0)); // 5 мин < 15
+    assert.deepEqual(calls, []);
+    // протухший running (рестарт посреди прогона) — перевзводим
+    mysqlMock._rows = [row({
+      id: 24, kind: 'daily', at_hour: 9, at_minute: 0, next_run_at: null,
+      last_status: 'running', updated_at: '2026-06-08 03:00:00',
+    })];
+    calls.length = 0;
+    await tick(utc(2026, 6, 8, 4, 0)); // 60 мин > 15
+    assert.deepEqual(calls, [['setNext', 24, '2026-06-09 04:00:00']]);
   });
 
   test('просрочка больше окна catch-up → missed + перенос на следующий раз, без доставки', async () => {
@@ -129,13 +176,16 @@ describe('tick', () => {
     assert.deepEqual(calls, [['setNext', 8, '2026-06-08 04:00:00']]);
   });
 
-  test('backfill: завершённое legacy-once (есть last_run_at) → выключение', async () => {
+  test('backfill: завершённое legacy-once (есть last_run_at) → выключение + журнал auto_disabled', async () => {
     mysqlMock._rows = [row({ id: 9, kind: 'once', run_at: '2026-06-01 04:00:00', last_run_at: '2026-06-01 04:00:05', next_run_at: null })];
     calls.length = 0;
+    journal.length = 0;
     setDeliver(async () => ({ ok: true }));
     await tick(utc(2026, 6, 8, 3, 0));
     assert.deepEqual(calls.find((c) => c[0] === 'setEnabled'), ['setEnabled', 9, false]);
     assert.equal(calls.find((c) => c[0] === 'markRun'), undefined);
+    // автоотключение больше не молчит — history покажет причину
+    assert.equal(journal.find((j) => j.id === 9).status, 'auto_disabled');
   });
 
   test('журнал: ok / lock_busy / missed пишутся в orch_schedule_runs', async () => {
@@ -168,6 +218,8 @@ describe('tick', () => {
     setDeliver(() => new Promise((r) => { resolveDeliver = () => r({ ok: true }); }));
     const p1 = tick(utc(2026, 6, 8, 4, 0)); // зависнет на deliver
     await tick(utc(2026, 6, 8, 4, 0));      // должен выйти сразу (running=true)
+    // первый tick доходит до deliver асинхронно (перед ним await claim)
+    while (!resolveDeliver) await new Promise((r) => setImmediate(r));
     resolveDeliver();
     await p1;
     assert.equal(calls.filter((c) => c[0] === 'markRun').length, 1);

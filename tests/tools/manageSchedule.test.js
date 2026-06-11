@@ -117,6 +117,30 @@ describe('manage_schedule: create', () => {
     assert.match((await handler({ action: 'create', title: 'X', instruction: 'y', kind: 'weekly', at_hour: 9 }, ctx)).message, /weekdays/);
     assert.match((await handler({ action: 'create', title: 'X', instruction: 'y', kind: 'daily', at_hour: 25 }, ctx)).message, /at_hour/);
   });
+
+  test('weekdays «0,6» (Вс≠0) / «Mon» / month_days «32» → ошибка create, мёртвая строка не вставляется', async () => {
+    reset();
+    const sunday0 = await handler({ action: 'create', title: 'X', instruction: 'y', kind: 'weekly', at_hour: 9, weekdays: '0,6' }, ctx);
+    assert.equal(sunday0.success, false);
+    assert.match(sunday0.message, /Вс=7|НЕ 0/);
+    const named = await handler({ action: 'create', title: 'X', instruction: 'y', kind: 'weekly', at_hour: 9, weekdays: 'Mon,Wed' }, ctx);
+    assert.equal(named.success, false);
+    const day32 = await handler({ action: 'create', title: 'X', instruction: 'y', kind: 'monthly', at_hour: 9, month_days: '32' }, ctx);
+    assert.equal(day32.success, false);
+    assert.match(day32.message, /1–31/);
+    assert.equal(created.length, 0, 'ни одна невалидная строка не ушла в БД');
+    // валидные значения по-прежнему проходят
+    const ok = await handler({ action: 'create', title: 'X', instruction: 'y', kind: 'weekly', at_hour: 9, weekdays: '1,3,5' }, ctx);
+    assert.equal(ok.success, true);
+  });
+
+  test('update weekdays на невалидные → отклонено, расписание не изменено', async () => {
+    reset();
+    ownerRows = [owned({ id: 20, title: 'X', instruction: 'y', kind: 'weekly', at_hour: 9, at_minute: 0, weekdays: '1,3' })];
+    const r = await handler({ action: 'update', id: 20, weekdays: '0,6' }, ctx);
+    assert.equal(r.success, false);
+    assert.equal(updates.length, 0);
+  });
 });
 
 describe('manage_schedule: list', () => {

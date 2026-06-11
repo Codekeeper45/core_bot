@@ -716,6 +716,25 @@ async function markScheduleRun(id, when, status, nextRunAt = null) {
   }
 }
 
+// Атомарный «захват» расписания перед запуском: снимаем next_run_at, только если
+// строка всё ещё включена и её время не менялось. Закрывает гонку tick против
+// manage_schedule update/cancel (stale-снимок) и дубль при перекрытии двух
+// процессов на деплое. true = мы единственный исполнитель; false = расписание
+// отменили/перенесли/забрал другой процесс — запускать нельзя.
+async function claimSchedule(id, expectedNextRunAt) {
+  try {
+    const res = await dbQuery(
+      `UPDATE orch_schedules SET next_run_at = NULL, last_status = 'running'
+       WHERE id = ? AND enabled = 1 AND next_run_at = ?`,
+      [id, expectedNextRunAt]
+    );
+    return (res.affectedRows || 0) === 1;
+  } catch (err) {
+    console.error('[MySQL] claimSchedule:', err.message);
+    return false;
+  }
+}
+
 // Только перевзвести момент следующего запуска (backfill строк без next_run_at).
 async function setScheduleNextRun(id, nextRunAt) {
   try {
@@ -1230,7 +1249,7 @@ module.exports = {
   getSettings, setSetting,
   createSchedule, listEnabledSchedules, listSchedulesByOwner, getSchedule,
   updateSchedule, setScheduleEnabled, deleteSchedule,
-  markScheduleRun, setScheduleNextRun, touchScheduleStatus, bumpScheduleFail, countSchedules,
+  markScheduleRun, claimSchedule, setScheduleNextRun, touchScheduleStatus, bumpScheduleFail, countSchedules,
   logScheduleRun, listScheduleRuns, cleanupScheduleRuns,
   addFact, listFacts, deleteFact,
   addPersonalItem, listPersonalItems, setPersonalItemDone, deletePersonalItem,
