@@ -9,6 +9,7 @@ const { withRetry } = require('../utils/retry');
 const { formatToolEcho } = require('../utils/toolEcho');
 
 const FALLBACK_AI = 'Произошла ошибка при обработке сообщения. Пожалуйста, повторите запрос чуть позже.';
+const FALLBACK_BUSY = 'Наши системы немного загружены. Мы вернёмся к вам в ближайшее время. Спасибо за терпение!';
 const LLM_MAX_RETRIES = 3; // 3 retries = 4 total attempts (first retry after 20s for 429)
 
 // Observability: agent run outcomes. Every non-success outcome = a degraded
@@ -105,6 +106,38 @@ async function llmCreateWithFallback(makeParams, retryOpts, client) {
   throw lastErr;
 }
 
+// Хвост истории должен быть API-валидным: assistant с tool_calls обязан иметь
+// ВСЕ свои tool-результаты следом, иначе следующий запрос получит 400 и чат
+// «залипнет» до /new. Неполный последний блок срезаем целиком.
+function dropDanglingToolTail(messages) {
+  const msgs = Array.isArray(messages) ? [...messages] : [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m.role === 'tool') continue;
+    if (m.role === 'assistant' && Array.isArray(m.tool_calls)) {
+      const got = new Set(msgs.slice(i + 1).filter((x) => x.role === 'tool').map((x) => x.tool_call_id));
+      return m.tool_calls.every((tc) => got.has(tc.id)) ? msgs : msgs.slice(0, i);
+    }
+    return msgs;
+  }
+  return msgs;
+}
+
+// Сохранить историю на аварийном пути выхода из агентного цикла. Инструменты
+// предыдущих итераций могли УЖЕ выполниться (БД изменена, сообщения сотрудникам
+// отправлены) — потеря этого хода означает дубли действий в следующем ходе.
+// Дописываем assistant с фактически отправленным fallback-текстом, чтобы модель
+// видела, чем закончился ход.
+async function persistErrorHistory(channel, chatId, messages, convoSummary, sentText) {
+  try {
+    const msgs = dropDanglingToolTail(messages);
+    msgs.push({ role: 'assistant', content: sentText });
+    await saveChatHistory(channel, chatId, msgs, convoSummary);
+  } catch (err) {
+    console.error('[Agent] Save history (error path):', err.message);
+  }
+}
+
 // Assemble the message list sent to the LLM: main system prompt, then the
 // rolling long-term summary (if any) as a second system message, then history.
 function buildLLMMessages(systemPrompt, convoSummary, messages) {
@@ -161,7 +194,8 @@ async function runAgent({ combinedMessage, channel, chatId, phone, clientName, r
         } catch (notifyErr) {
           console.error('[Agent] alertManager error:', notifyErr.message);
         }
-        return 'Наши системы немного загружены. Мы вернёмся к вам в ближайшее время. Спасибо за терпение!';
+        await persistErrorHistory(channel, chatId, messages, convoSummary, FALLBACK_BUSY);
+        return FALLBACK_BUSY;
       }
 
       const choice = response.choices[0];
@@ -203,13 +237,15 @@ async function runAgent({ combinedMessage, channel, chatId, phone, clientName, r
         }
       } else {
         replyText = choice.message?.content || '';
-        messages.push({ role: 'assistant', content: replyText });
+        // Пустой ответ модели не пишем: fallback-вызов ниже добавит фактический.
+        if (replyText) messages.push({ role: 'assistant', content: replyText });
         break;
       }
     }
   } catch (err) {
     agentMetrics.unexpected_error++;
     console.error('[Agent] Unexpected error:', err.message);
+    await persistErrorHistory(channel, chatId, messages, convoSummary, FALLBACK_AI);
     return FALLBACK_AI;
   }
 
@@ -230,9 +266,13 @@ async function runAgent({ combinedMessage, channel, chatId, phone, clientName, r
     } catch (_) {}
     if (!replyText) {
       agentMetrics.empty_reply++;
+      await persistErrorHistory(channel, chatId, messages, convoSummary, FALLBACK_AI);
       return FALLBACK_AI;
     }
     agentMetrics.fallback_recovered++;
+    // Fallback-ответ должен попасть в историю: цикл его не push'ил (вышли без
+    // текстового assistant), а сохранение ниже пишет messages как есть.
+    messages.push({ role: 'assistant', content: replyText });
   }
 
   agentMetrics.success++;
@@ -264,4 +304,7 @@ async function runAgent({ combinedMessage, channel, chatId, phone, clientName, r
   return replyText;
 }
 
-module.exports = { runAgent, onToolCall, getAgentMetrics, llmCreateWithFallback };
+module.exports = {
+  runAgent, onToolCall, getAgentMetrics, llmCreateWithFallback,
+  _internals: { dropDanglingToolTail, persistErrorHistory, FALLBACK_AI, FALLBACK_BUSY },
+};
