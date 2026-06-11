@@ -29,6 +29,7 @@ const tgChannel = require('./channels/telegram');
 const igChannel = require('./channels/instagram');
 const baileysService = require('./services/baileys');
 const wazzup = require('./services/wazzup');
+const notifier = require('./services/notifier');
 
 const { bufferAndCollect } = require('./middleware/buffer');
 const { acquireLock, enqueue, releaseLockAndProcessQueue } = require('./middleware/concurrency');
@@ -263,6 +264,17 @@ async function processMessage(rawPayload) {
     if (replyText) {
       replyText = sanitizeReply(replyText);
       await sendReply(channel, chat_id, replyText);
+      // Авто-голос: если босс написал ГОЛОСОМ — отвечаем и голосом (текст уже отправлен).
+      // Instagram голос не поддерживает — пропускаем. Ошибка TTS некритична.
+      if (config.TTS_ENABLED && message_type === 'voice' && channel !== 'instagram') {
+        try {
+          const { synthesizeSpeech } = require('./services/tts');
+          const r = await synthesizeSpeech(replyText);
+          if (r.ok) await notifier.deliver(channel, chat_id, '', r.media);
+        } catch (err) {
+          console.error('[TTS] auto-voice:', err.message);
+        }
+      }
     }
   } finally {
     await releaseLockAndProcessQueue(channel, chat_id, processMessage);

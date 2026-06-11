@@ -5,18 +5,27 @@
 const { getProject } = require('./mysql');
 const config = require('../config');
 
-// Доставить произвольный текст в указанный чат канала.
-async function deliver(channel, contact, text) {
+// Доставить текст и/или медиа в указанный чат канала.
+// media = { kind:'image'|'voice', buffer, caption? } — опционально.
+// Instagram (Wazzup) медиа не поддерживает → шлём текст/подпись (graceful fallback).
+async function deliver(channel, contact, text, media = null) {
   const ch = String(channel || '').toLowerCase();
-  if (!contact || !text) return false;
+  if (!contact || (!text && !media)) return false;
   try {
     if (ch === 'telegram') {
-      await require('../channels/telegram').sendMessage(String(contact), text);
+      const tg = require('../channels/telegram');
+      if (media && media.kind === 'image') await tg.sendPhoto(String(contact), media.buffer, media.caption || text || '');
+      else if (media && media.kind === 'voice') { if (text) await tg.sendMessage(String(contact), text); await tg.sendVoice(String(contact), media.buffer); }
+      else await tg.sendMessage(String(contact), text);
     } else if (ch === 'whatsapp') {
       const jid = String(contact).includes('@') ? contact : `${String(contact).replace(/\D/g, '')}@s.whatsapp.net`;
-      await require('../services/baileys').sendMessage(jid, text);
+      const wa = require('../services/baileys');
+      if (media && media.kind === 'image') await wa.sendImage(jid, media.buffer, media.caption || text || '');
+      else if (media && media.kind === 'voice') { if (text) await wa.sendMessage(jid, text); await wa.sendVoice(jid, media.buffer); }
+      else await wa.sendMessage(jid, text);
     } else if (ch === 'instagram') {
-      await require('../channels/instagram').sendMessage(String(contact), text);
+      // Wazzup IG: только текст. Медиа недоступно — шлём подпись/текст честно.
+      await require('../channels/instagram').sendMessage(String(contact), text || (media && media.caption) || '[медиа недоступно в Instagram]');
     } else {
       return false;
     }

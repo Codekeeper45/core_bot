@@ -168,6 +168,19 @@ class BaileysService extends EventEmitter {
     return true;
   }
 
+  async sendImage(jid, buffer, caption = '') {
+    if (!this.sock) throw new Error('[Baileys] Сокет не инициализирован');
+    await this.sock.sendMessage(jid, { image: buffer, caption: caption || undefined });
+    return true;
+  }
+
+  // Голосовое сообщение (ptt). buffer — ogg/opus.
+  async sendVoice(jid, buffer, mimetype = 'audio/ogg; codecs=opus') {
+    if (!this.sock) throw new Error('[Baileys] Сокет не инициализирован');
+    await this.sock.sendMessage(jid, { audio: buffer, mimetype, ptt: true });
+    return true;
+  }
+
   async sendTyping(jid) {
     if (!this.sock) return;
     try {

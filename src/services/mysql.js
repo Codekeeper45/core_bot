@@ -210,6 +210,35 @@ async function initTables() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
+  // Память-факты: что бот запомнил о пользователе (простая, без векторов).
+  // Подмешивается в системный промпт для босса.
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS bot_memory_facts (
+      id         INT AUTO_INCREMENT PRIMARY KEY,
+      channel    VARCHAR(20)  NOT NULL,
+      chat_id    VARCHAR(255) NOT NULL,
+      fact       TEXT         NOT NULL,
+      category   VARCHAR(64)  NULL,
+      created_at TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_facts_chat (channel, chat_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  // Личные заметки и задачи босса (отдельно от orch_tasks для сотрудников).
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS bot_personal_items (
+      id         INT AUTO_INCREMENT PRIMARY KEY,
+      channel    VARCHAR(20)  NOT NULL,
+      chat_id    VARCHAR(255) NOT NULL,
+      kind       VARCHAR(8)   NOT NULL,   -- note | todo
+      text       TEXT         NOT NULL,
+      done       TINYINT(1)   NOT NULL DEFAULT 0,
+      due        DATETIME     NULL,
+      created_at TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_items_chat (channel, chat_id, kind, done)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
   // Миграция: добавить колонку сводки в уже существующие таблицы истории
   // (CREATE TABLE IF NOT EXISTS не добавит колонку к созданной ранее таблице).
   try {
@@ -770,6 +799,116 @@ async function cleanupScheduleRuns(days = 90) {
   }
 }
 
+// ── Память-факты (bot_memory_facts) ─────────────────────────────────────────
+function normFact(s) { return String(s || '').trim().toLowerCase().replace(/\s+/g, ' '); }
+
+async function addFact(channel, chatId, fact, category) {
+  try {
+    // Дедуп: не дублировать факт с тем же нормализованным текстом у этого чата.
+    const existing = await dbQuery(
+      'SELECT id, fact FROM bot_memory_facts WHERE channel = ? AND chat_id = ?',
+      [String(channel), String(chatId)]
+    );
+    const norm = normFact(fact);
+    const dup = existing.find((r) => normFact(r.fact) === norm);
+    if (dup) return { id: dup.id, duplicate: true };
+    const res = await dbQuery(
+      'INSERT INTO bot_memory_facts (channel, chat_id, fact, category) VALUES (?,?,?,?)',
+      [String(channel), String(chatId), String(fact), category ? String(category).slice(0, 60) : null]
+    );
+    return { id: res.insertId, duplicate: false };
+  } catch (err) {
+    console.error('[MySQL] addFact:', err.message);
+    throw dbError(err, 'addFact');
+  }
+}
+
+async function listFacts(channel, chatId, limit = 50) {
+  try {
+    return await dbQuery(
+      'SELECT id, fact, category, created_at FROM bot_memory_facts WHERE channel = ? AND chat_id = ? ORDER BY id DESC LIMIT ?',
+      [String(channel), String(chatId), Number(limit) || 50]
+    );
+  } catch (err) {
+    console.error('[MySQL] listFacts:', err.message);
+    return [];
+  }
+}
+
+// Удалить по id (в пределах чата) или по совпадению текста. Возвращает число удалённых.
+async function deleteFact(channel, chatId, { id, match } = {}) {
+  try {
+    if (id) {
+      const res = await dbQuery('DELETE FROM bot_memory_facts WHERE id = ? AND channel = ? AND chat_id = ?',
+        [id, String(channel), String(chatId)]);
+      return res.affectedRows || 0;
+    }
+    if (match) {
+      const rows = await dbQuery('SELECT id, fact FROM bot_memory_facts WHERE channel = ? AND chat_id = ?',
+        [String(channel), String(chatId)]);
+      const norm = normFact(match);
+      const hit = rows.find((r) => normFact(r.fact).includes(norm) || norm.includes(normFact(r.fact)));
+      if (!hit) return 0;
+      const res = await dbQuery('DELETE FROM bot_memory_facts WHERE id = ?', [hit.id]);
+      return res.affectedRows || 0;
+    }
+    return 0;
+  } catch (err) {
+    console.error('[MySQL] deleteFact:', err.message);
+    return 0;
+  }
+}
+
+// ── Личные заметки/задачи босса (bot_personal_items) ────────────────────────
+async function addPersonalItem(channel, chatId, kind, text, due) {
+  try {
+    const res = await dbQuery(
+      'INSERT INTO bot_personal_items (channel, chat_id, kind, text, due) VALUES (?,?,?,?,?)',
+      [String(channel), String(chatId), kind === 'todo' ? 'todo' : 'note', String(text), due || null]
+    );
+    return res.insertId;
+  } catch (err) {
+    console.error('[MySQL] addPersonalItem:', err.message);
+    throw dbError(err, 'addPersonalItem');
+  }
+}
+
+async function listPersonalItems(channel, chatId, kind, includeDone = false) {
+  try {
+    const where = includeDone ? '' : ' AND done = 0';
+    return await dbQuery(
+      `SELECT id, kind, text, done, due, created_at FROM bot_personal_items
+       WHERE channel = ? AND chat_id = ? AND kind = ?${where} ORDER BY (due IS NULL), due ASC, id DESC`,
+      [String(channel), String(chatId), kind === 'todo' ? 'todo' : 'note']
+    );
+  } catch (err) {
+    console.error('[MySQL] listPersonalItems:', err.message);
+    return [];
+  }
+}
+
+async function setPersonalItemDone(channel, chatId, id, done = true) {
+  try {
+    const res = await dbQuery('UPDATE bot_personal_items SET done = ? WHERE id = ? AND channel = ? AND chat_id = ?',
+      [done ? 1 : 0, id, String(channel), String(chatId)]);
+    return (res.affectedRows || 0) > 0;
+  } catch (err) {
+    console.error('[MySQL] setPersonalItemDone:', err.message);
+    return false;
+  }
+}
+
+async function deletePersonalItem(channel, chatId, id) {
+  try {
+    const res = await dbQuery('DELETE FROM bot_personal_items WHERE id = ? AND channel = ? AND chat_id = ?',
+      [id, String(channel), String(chatId)]);
+    return (res.affectedRows || 0) > 0;
+  } catch (err) {
+    console.error('[MySQL] deletePersonalItem:', err.message);
+    return false;
+  }
+}
+
 // ВСЕ открытые задачи одним запросом (для сводки нагрузки в list_employees, без N+1).
 async function listOpenTasksBrief() {
   try {
@@ -1093,6 +1232,8 @@ module.exports = {
   updateSchedule, setScheduleEnabled, deleteSchedule,
   markScheduleRun, setScheduleNextRun, touchScheduleStatus, bumpScheduleFail, countSchedules,
   logScheduleRun, listScheduleRuns, cleanupScheduleRuns,
+  addFact, listFacts, deleteFact,
+  addPersonalItem, listPersonalItems, setPersonalItemDone, deletePersonalItem,
   // Оркестратор: задачи
   createTasksBulk, getTask, listTasksForProject, assignTask, markDispatched, updateTaskStatus,
   updateTaskFields,

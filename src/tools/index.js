@@ -34,6 +34,16 @@ function loadTools() {
     (f) => f.endsWith('.js') && f !== 'index.js'
   );
 
+  function register(mod, file) {
+    const name = mod.definition.function.name;
+    if (handlers.has(name)) {
+      console.warn(`[Tools] Дубликат инструмента "${name}" в ${file} — пропущен`);
+      return;
+    }
+    tools.push(mod.definition);
+    handlers.set(name, mod.handler);
+  }
+
   for (const file of files) {
     let mod;
     try {
@@ -42,17 +52,18 @@ function loadTools() {
       console.error(`[Tools] Не удалось загрузить ${file}: ${err.message}`);
       continue;
     }
+    // Файл может экспортировать один инструмент {definition, handler} ИЛИ группу { tools: [...] }.
+    if (Array.isArray(mod && mod.tools)) {
+      const valid = mod.tools.filter(isToolModule);
+      if (!valid.length) { console.warn(`[Tools] Пропущен ${file}: нет валидных инструментов в tools[]`); continue; }
+      for (const t of valid) register(t, file);
+      continue;
+    }
     if (!isToolModule(mod)) {
       console.warn(`[Tools] Пропущен ${file}: нет валидных { definition, handler }`);
       continue;
     }
-    const name = mod.definition.function.name;
-    if (handlers.has(name)) {
-      console.warn(`[Tools] Дубликат инструмента "${name}" в ${file} — пропущен`);
-      continue;
-    }
-    tools.push(mod.definition);
-    handlers.set(name, mod.handler);
+    register(mod, file);
   }
 
   console.log(`[Tools] Загружено инструментов: ${tools.length} (${[...handlers.keys()].join(', ') || 'нет'})`);
@@ -69,6 +80,9 @@ const BOSS_ONLY = new Set([
   'create_project', 'revise_project', 'dispatch_task', 'assign_task',
   'manage_employees', 'message_employee', 'project_status', 'manage_scheduler',
   'manage_schedule',
+  // Ассистентские фичи — личные инструменты владельца.
+  'render_diagram', 'web_search', 'remember_fact', 'list_facts', 'forget_fact',
+  'manage_notes', 'manage_todos',
 ]);
 
 // Выполнить инструмент по имени. context = { channel, chatId, phone, clientName, role }.

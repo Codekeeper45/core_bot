@@ -140,4 +140,15 @@ module.exports = {
   // одновременно активных расписаний (каждый запуск — полный агентный цикл).
   SCHEDULE_MIN_INTERVAL_MIN: parseInt(process.env.SCHEDULE_MIN_INTERVAL_MIN || '5', 10),
   SCHEDULE_MAX_ACTIVE: parseInt(process.env.SCHEDULE_MAX_ACTIVE || '30', 10),
+
+  // ── Ассистентские фичи (референс Bot_opekyn) ──────────────────────────────
+  // Веб-поиск (Brave Search API). Пусто → инструмент честно отказывает.
+  BRAVE_API_KEY: process.env.BRAVE_API_KEY || '',
+  // TTS (Google Gemini). Один ключ или несколько через запятую (ротация при 429).
+  GOOGLE_GENAI_API_KEY: process.env.GOOGLE_GENAI_API_KEY || '',
+  GOOGLE_GENAI_API_KEYS: (process.env.GOOGLE_GENAI_API_KEYS || '').split(',').map((s) => s.trim()).filter(Boolean),
+  TTS_MODEL: process.env.TTS_MODEL || 'gemini-2.5-flash-preview-tts',
+  TTS_VOICE: process.env.TTS_VOICE || 'Kore',
+  // Озвучивать ответ голосом, если входящее было голосом (и явная просьба). Выкл: TTS_ENABLED=0.
+  TTS_ENABLED: process.env.TTS_ENABLED !== '0' && process.env.TTS_ENABLED !== 'false',
 };

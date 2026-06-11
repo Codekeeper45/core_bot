@@ -47,6 +47,28 @@ async function sendMessage(chatId, text) {
   }
 }
 
+// Отправить картинку (буфер PNG/JPG) с подписью.
+async function sendPhoto(chatId, buffer, caption = '') {
+  try {
+    await getBot().telegram.sendPhoto(chatId, { source: buffer }, caption ? { caption } : {});
+    return true;
+  } catch (err) {
+    console.error('[TG] sendPhoto error:', err.message);
+    return false;
+  }
+}
+
+// Отправить голосовое сообщение (ogg/opus буфер).
+async function sendVoice(chatId, buffer, caption = '') {
+  try {
+    await getBot().telegram.sendVoice(chatId, { source: buffer }, caption ? { caption } : {});
+    return true;
+  } catch (err) {
+    console.error('[TG] sendVoice error:', err.message);
+    return false;
+  }
+}
+
 async function sendChatAction(chatId, action = 'typing') {
   try {
     await getBot().telegram.sendChatAction(chatId, action);
@@ -75,4 +97,4 @@ async function deleteMessage(chatId, messageId) {
   try { await getBot().telegram.deleteMessage(chatId, messageId); } catch {}
 }
 
-module.exports = { getBot, sendMessage, splitForTelegram, sendChatAction, downloadFile, getFileUrl, deleteMessage };
+module.exports = { getBot, sendMessage, sendPhoto, sendVoice, splitForTelegram, sendChatAction, downloadFile, getFileUrl, deleteMessage };

@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const config = require('../config');
-const { findEmployeeByContact, getOpenTasksForEmployee } = require('../services/mysql');
+const { findEmployeeByContact, getOpenTasksForEmployee, listFacts } = require('../services/mysql');
 
 const SYSTEM_PROMPT_RAW = fs.readFileSync(
   path.join(__dirname, 'prompts/system_prompt.txt'), 'utf8'
@@ -58,7 +58,22 @@ ${taskLines}
     }
   } catch (_) { /* lookup некритичен — без него работаем как с боссом */ }
 
-  return prompt + userContext + employeeContext;
+  // Запомненные факты о пользователе (простая память) — подмешиваем в обоих режимах.
+  let factsContext = '';
+  try {
+    const facts = await listFacts(channel, chatId, 50);
+    if (facts.length) {
+      const lines = facts.map((f) => `- ${f.fact}${f.category ? ` [${f.category}]` : ''}`).join('\n');
+      factsContext = `
+
+=== ЗАПОМНЕННЫЕ ФАКТЫ О ПОЛЬЗОВАТЕЛЕ ===
+Учитывай это в ответах. Если факт устарел — обнови (forget_fact + remember_fact).
+${lines}
+=== КОНЕЦ ФАКТОВ ===`;
+    }
+  } catch (_) { /* память некритична */ }
+
+  return prompt + userContext + employeeContext + factsContext;
 }
 
 module.exports = { getSystemPrompt };
