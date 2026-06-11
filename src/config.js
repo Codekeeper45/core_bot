@@ -147,12 +147,12 @@ module.exports = {
   // TTS (Google Gemini). Один ключ или несколько через запятую (ротация при 429).
   GOOGLE_GENAI_API_KEY: process.env.GOOGLE_GENAI_API_KEY || '',
   GOOGLE_GENAI_API_KEYS: (process.env.GOOGLE_GENAI_API_KEYS || '').split(',').map((s) => s.trim()).filter(Boolean),
-  TTS_MODEL: process.env.TTS_MODEL || 'gemini-2.5-flash-preview-tts',
-  TTS_VOICE: process.env.TTS_VOICE || 'Kore',
+  TTS_MODEL: process.env.TTS_MODEL || 'gemini-3.1-flash-tts-preview',
+  TTS_VOICE: process.env.TTS_VOICE || 'Leda',
   // Озвучивать ответ голосом, если входящее было голосом (и явная просьба). Выкл: TTS_ENABLED=0.
   TTS_ENABLED: process.env.TTS_ENABLED !== '0' && process.env.TTS_ENABLED !== 'false',
   // Fallback-TTS через OpenRouter (если все Google-ключи не ответили). Использует
   // OPENROUTER_API_KEY. Модель/голос можно переопределить (id зависит от каталога OpenRouter).
-  OPENROUTER_TTS_MODEL: process.env.OPENROUTER_TTS_MODEL || 'google/gemini-2.5-flash-preview-tts',
-  OPENROUTER_TTS_VOICE: process.env.OPENROUTER_TTS_VOICE || process.env.TTS_VOICE || 'Kore',
+  OPENROUTER_TTS_MODEL: process.env.OPENROUTER_TTS_MODEL || 'google/gemini-3.1-flash-tts-preview',
+  OPENROUTER_TTS_VOICE: process.env.OPENROUTER_TTS_VOICE || process.env.TTS_VOICE || 'Leda',
 };

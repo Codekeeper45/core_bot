@@ -6,6 +6,57 @@
 const { spawn } = require('node:child_process');
 const config = require('../config');
 
+// Профили голосов Gemini (подмножество; полный каталог ~30). Используются для подсказки
+// характера голоса в TTS-промпте. Если голос не в списке — всё равно передаём как есть
+// (Gemini знает свои голоса), валидация лишь подставляет дефолт для пустого имени.
+const VOICE_PROFILES = {
+  Leda: { tone: 'Youthful', personality: 'молодой, энергичный, игривый (дефолт)' },
+  Zephyr: { tone: 'Bright', personality: 'жизнерадостный, бодрый — радость, утро' },
+  Fenrir: { tone: 'Excitable', personality: 'эмоциональный, для шуток и сюрпризов' },
+  Vindemiatrix: { tone: 'Gentle', personality: 'мягкий, ласковый — утешение, поддержка' },
+  Gacrux: { tone: 'Mature', personality: 'зрелый, мудрый — серьёзный разговор, совет' },
+  Erinome: { tone: 'Clear', personality: 'чёткий, ясный — объяснение, обучение' },
+  Alnilam: { tone: 'Firm', personality: 'твёрдый, уверенный — мотивация, инструкции' },
+  Umbriel: { tone: 'Easy-going', personality: 'непринуждённый — расслабленный вечер' },
+  Achird: { tone: 'Friendly', personality: 'дружелюбный, тёплый — повседневная беседа' },
+  Algieba: { tone: 'Smooth', personality: 'плавный, спокойный — для объяснений' },
+  Kore: { tone: 'Neutral', personality: 'нейтральный, ровный — деловой тон' },
+  Puck: { tone: 'Upbeat', personality: 'живой, позитивный' },
+};
+const DEFAULT_VOICE_TONE = 'нейтральный';
+
+function validateVoiceName(name) {
+  const n = String(name || '').trim();
+  return n || config.TTS_VOICE;
+}
+
+// Удалить аудио-теги [excited] и т.п. (для fallback-текста и OpenRouter, где обёртки нет).
+function stripAudioTags(text) {
+  return String(text || '')
+    .replace(/\s*\[[^\]]+\]\s*/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+// Структурированный TTS-промпт (как в референсе): профиль голоса + «режиссёрские заметки»
+// с КЛЮЧЕВОЙ инструкцией не зачитывать теги вслух, а трактовать как управление интонацией.
+function buildTtsPrompt(text, voiceName) {
+  const p = VOICE_PROFILES[voiceName];
+  return [
+    `# ГОЛОС: ${voiceName}`,
+    `Характер: ${p ? `${p.tone}, ${p.personality}` : DEFAULT_VOICE_TONE}.`,
+    `Ты — голос делового AI-ассистента. Говоришь по-русски, живо и естественно.`,
+    '',
+    '## РЕЖИССЁРСКИЕ ЗАМЕТКИ',
+    '- Аудио-теги в квадратных скобках ([excited], [warmly], [sighs] и т.п.) и стиль-инструкции',
+    '  в начале — это УПРАВЛЕНИЕ ИНТОНАЦИЕЙ. НЕ зачитывай их вслух, только меняй тон.',
+    '- Адаптируй интонацию к смыслу. Сохрани текст дословно. Верни только произносимую речь.',
+    '',
+    '### ТЕКСТ',
+    text,
+  ].join('\n');
+}
+
 // Указатель круговой ротации Google-ключей: каждый запрос НАЧИНАЕТ со следующего ключа,
 // так нагрузка распределяется равномерно (а не «первый ключ ест всё, пока не упрётся»).
 let rrIndex = 0;
@@ -69,7 +120,7 @@ async function tryGoogle(text, voiceName) {
   const k = googleKeysRotated();
   if (!k.length) return { ok: false, error: 'нет Google-ключей' };
   const body = {
-    contents: [{ parts: [{ text }] }],
+    contents: [{ parts: [{ text: buildTtsPrompt(text, voiceName) }] }],
     generationConfig: {
       responseModalities: ['AUDIO'],
       speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
@@ -110,7 +161,9 @@ async function tryOpenRouter(text, voiceName) {
       },
       body: JSON.stringify({
         model: config.OPENROUTER_TTS_MODEL,
-        input: text,
+        // У /audio/speech нет «режиссёрской» обёртки — теги могут прочитаться буквально,
+        // поэтому для fallback убираем их (интонация будет нейтральной, но без мусора).
+        input: stripAudioTags(text),
         voice: config.OPENROUTER_TTS_VOICE || voiceName,
         response_format: 'mp3',
       }),
@@ -129,7 +182,7 @@ async function tryOpenRouter(text, voiceName) {
 async function synthesizeSpeech(text, voice) {
   if (!text || !String(text).trim()) return { ok: false, error: 'Пустой текст.' };
   const clean = String(text).slice(0, 2000);
-  const voiceName = voice || config.TTS_VOICE;
+  const voiceName = validateVoiceName(voice);
 
   const hasGoogle = config.GOOGLE_GENAI_API_KEYS.length || config.GOOGLE_GENAI_API_KEY;
   if (!hasGoogle && !config.OPENROUTER_API_KEY) {
@@ -153,4 +206,8 @@ async function synthesizeSpeech(text, voice) {
   };
 }
 
-module.exports = { synthesizeSpeech, _internals: { pcmToWav, toOgg, googleKeysRotated } };
+module.exports = {
+  synthesizeSpeech,
+  VOICE_PROFILES,
+  _internals: { pcmToWav, toOgg, googleKeysRotated, buildTtsPrompt, stripAudioTags, validateVoiceName },
+};

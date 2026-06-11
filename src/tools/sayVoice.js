@@ -24,7 +24,10 @@ const definition = {
       type: 'object',
       properties: {
         text: { type: 'string', description: 'Текст для озвучки со стилем/тегами (НЕ показывается как текст).' },
-        voice: { type: 'string', description: 'Имя голоса Gemini (опц.; по умолчанию из настроек, напр. Kore, Puck).' },
+        voice: { type: 'string', description: 'Имя голоса Gemini под настроение (опц.; дефолт из настроек). '
+          + 'Leda — энергичный; Vindemiatrix — мягкий/утешение; Fenrir — эмоциональный/шутка; '
+          + 'Gacrux — зрелый/серьёзный; Erinome — чёткий/объяснение; Alnilam — твёрдый/мотивация; '
+          + 'Achird — дружелюбный; Kore — нейтральный/деловой.' },
       },
       required: ['text'],
     },

@@ -99,6 +99,23 @@ describe('tts', () => {
     assert.equal(wav.readUInt32LE(24), 24000); // sample rate
   });
 
+  test('buildTtsPrompt оборачивает текст: режиссёрские заметки + теги не вслух + сам текст', () => {
+    const out = _internals.buildTtsPrompt('[warmly] Привет, босс!', 'Leda');
+    assert.match(out, /ГОЛОС: Leda/);
+    assert.match(out, /НЕ зачитывай.*вслух/is);   // ключевая инструкция управления тегами
+    assert.match(out, /\[warmly\] Привет, босс!/); // исходный текст с тегами сохранён
+  });
+
+  test('stripAudioTags вычищает теги (для текст-fallback и OpenRouter)', () => {
+    assert.equal(_internals.stripAudioTags('[sighs] Ладно, [excited] пошли!'), 'Ладно, пошли!');
+    assert.equal(_internals.stripAudioTags('без тегов'), 'без тегов');
+  });
+
+  test('validateVoiceName: пустое → дефолт, заданное → как есть', () => {
+    assert.equal(_internals.validateVoiceName('Fenrir'), 'Fenrir');
+    assert.ok(_internals.validateVoiceName('').length > 0); // подставился дефолт из конфига
+  });
+
   test('googleKeysRotated: круговая ротация старта по запросам', () => {
     const Module = require('module');
     const orig = Module.prototype.require;
