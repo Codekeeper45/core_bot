@@ -82,7 +82,7 @@ const BOSS_ONLY = new Set([
   'manage_schedule',
   // Ассистентские фичи — личные инструменты владельца.
   'render_diagram', 'web_search', 'remember_fact', 'list_facts', 'forget_fact',
-  'manage_notes', 'manage_todos',
+  'manage_notes', 'manage_todos', 'say_voice',
 ]);
 
 // Выполнить инструмент по имени. context = { channel, chatId, phone, clientName, role }.

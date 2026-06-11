@@ -134,3 +134,39 @@ describe('tts', () => {
     assert.match(r.error, /TTS не настроен/);
   });
 });
+
+// ── say_voice: озвучка с тегами, отделена от текста, ставит флаг ──────────────
+describe('say_voice', () => {
+  const calls = { synth: [], delivered: [], marked: [] };
+  const Module = require('module');
+  const orig = Module.prototype.require;
+  Module.prototype.require = function (id) {
+    if (id === '../services/tts') return { synthesizeSpeech: async (text, voice) => { calls.synth.push({ text, voice }); return { ok: true, source: 'google', media: { kind: 'voice', buffer: Buffer.from('x'), format: 'ogg' } }; } };
+    if (id === '../services/notifier') return { deliver: async (ch, c, t, media) => { calls.delivered.push({ ch, media }); return true; } };
+    if (id === '../services/voiceFlag') return { mark: (ch, id2) => calls.marked.push(`${ch}:${id2}`), reset() {}, taken() { return false; } };
+    return orig.apply(this, arguments);
+  };
+  delete require.cache[require.resolve('../src/tools/sayVoice')];
+  const tool = require('../src/tools/sayVoice');
+  Module.prototype.require = orig;
+
+  test('синтезирует переданный текст с тегами и шлёт голосовым, ставит флаг', async () => {
+    calls.synth.length = 0; calls.delivered.length = 0; calls.marked.length = 0;
+    const r = await tool.handler({ text: '[warmly] Привет! Скажи воодушевлённо: всё готово.' }, { channel: 'whatsapp', chatId: '777' });
+    assert.equal(r.success, true);
+    assert.match(calls.synth[0].text, /\[warmly\]/);          // теги уходят в TTS как есть
+    assert.equal(calls.delivered[0].media.kind, 'voice');     // отправлено голосовым
+    assert.equal(calls.marked[0], 'whatsapp:777');            // флаг «уже озвучили» поставлен
+  });
+
+  test('Instagram → отказ (нет голосовых)', async () => {
+    const r = await tool.handler({ text: 'привет' }, { channel: 'instagram', chatId: '1' });
+    assert.equal(r.success, false);
+    assert.match(r.message, /Instagram/);
+  });
+
+  test('пустой текст → ошибка', async () => {
+    const r = await tool.handler({ text: '  ' }, { channel: 'telegram', chatId: '1' });
+    assert.equal(r.success, false);
+  });
+});

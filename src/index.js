@@ -30,6 +30,7 @@ const igChannel = require('./channels/instagram');
 const baileysService = require('./services/baileys');
 const wazzup = require('./services/wazzup');
 const notifier = require('./services/notifier');
+const voiceFlag = require('./services/voiceFlag');
 
 const { bufferAndCollect } = require('./middleware/buffer');
 const { acquireLock, enqueue, releaseLockAndProcessQueue } = require('./middleware/concurrency');
@@ -243,6 +244,7 @@ async function processMessage(rawPayload) {
     const combinedWithTime = `${systemTimestamp()}\n${combined_message}`;
 
     let replyText;
+    voiceFlag.reset(channel, chat_id); // агент мог сам озвучить через say_voice — отметит флаг
     try {
       replyText = await runAgent({
         combinedMessage: combinedWithTime,
@@ -264,9 +266,10 @@ async function processMessage(rawPayload) {
     if (replyText) {
       replyText = sanitizeReply(replyText);
       await sendReply(channel, chat_id, replyText);
-      // Авто-голос: если босс написал ГОЛОСОМ — отвечаем и голосом (текст уже отправлен).
-      // Instagram голос не поддерживает — пропускаем. Ошибка TTS некритична.
-      if (config.TTS_ENABLED && message_type === 'voice' && channel !== 'instagram') {
+      // Авто-голос (safety net): если босс написал ГОЛОСОМ, а агент НЕ озвучил сам через
+      // say_voice — озвучиваем текст ответа (без тегов). Instagram голос не поддерживает.
+      if (config.TTS_ENABLED && message_type === 'voice' && channel !== 'instagram'
+          && !voiceFlag.taken(channel, chat_id)) {
         try {
           const { synthesizeSpeech } = require('./services/tts');
           const r = await synthesizeSpeech(replyText);
