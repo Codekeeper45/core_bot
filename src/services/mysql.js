@@ -273,6 +273,28 @@ async function initTables() {
     if (err && err.errno !== 1060) console.error('[MySQL] orch_schedules migration:', err.message);
   }
 
+  // Миграция: «календарь + будильник + таймер» — фазовый автомат расписаний.
+  // fire_phase: pre (пред-напоминание) → main (основное срабатывание) → nag
+  // (повтор-будильник до подтверждения босса). next_run_at всегда указывает на
+  // ближайшее событие текущей фазы.
+  for (const col of [
+    "ADD COLUMN fire_phase VARCHAR(8) NOT NULL DEFAULT 'main'",
+    'ADD COLUMN nag_interval_min INT NULL',
+    'ADD COLUMN nag_max INT NULL',
+    'ADD COLUMN nag_count INT NOT NULL DEFAULT 0',
+    'ADD COLUMN remind_before_min INT NULL',
+    'ADD COLUMN yearly_date CHAR(5) NULL',
+    'ADD COLUMN until_at DATETIME NULL',
+    'ADD COLUMN max_runs INT NULL',
+    'ADD COLUMN run_count INT NOT NULL DEFAULT 0',
+  ]) {
+    try {
+      await dbQuery(`ALTER TABLE orch_schedules ${col}`);
+    } catch (err) {
+      if (err && err.errno !== 1060) console.error('[MySQL] orch_schedules phase migration:', err.message);
+    }
+  }
+
   // Проверка миграций: если ALTER выше упал не по 1060 (нет колонки) — падаем
   // ГРОМКО на старте, а не делаем вид, что схема готова (иначе ошибки всплывут
   // позже как невнятные сбои запросов).
@@ -288,7 +310,7 @@ async function initTables() {
 async function verifyCriticalSchema() {
   const probes = [
     'SELECT deadline, dispatched_at, completed_at FROM orch_tasks LIMIT 0',
-    'SELECT next_run_at FROM orch_schedules LIMIT 0',
+    'SELECT next_run_at, fire_phase, nag_interval_min, until_at, run_count FROM orch_schedules LIMIT 0',
   ];
   for (const sql of probes) {
     try {
@@ -607,6 +629,9 @@ const SCHEDULE_FIELDS = [
   'title', 'instruction', 'kind', 'run_at', 'at_hour', 'at_minute',
   'weekdays', 'month_days', 'interval_min', 'enabled',
   'next_run_at', 'last_run_at', 'fail_count',
+  // Календарь + будильник: фазовый автомат и его параметры.
+  'fire_phase', 'nag_interval_min', 'nag_max', 'nag_count',
+  'remind_before_min', 'yearly_date', 'until_at', 'max_runs', 'run_count',
 ];
 
 async function createSchedule(s) {
@@ -614,14 +639,17 @@ async function createSchedule(s) {
     const rows = await dbQuery(
       `INSERT INTO orch_schedules
         (owner_channel, owner_chat_id, owner_phone, title, instruction, kind,
-         run_at, at_hour, at_minute, weekdays, month_days, interval_min, next_run_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         run_at, at_hour, at_minute, weekdays, month_days, interval_min, next_run_at,
+         fire_phase, nag_interval_min, nag_max, remind_before_min, yearly_date, until_at, max_runs)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         s.owner_channel, String(s.owner_chat_id), s.owner_phone || null,
         s.title, s.instruction, s.kind,
         s.run_at || null, s.at_hour ?? null, s.at_minute ?? 0,
         s.weekdays || null, s.month_days || null, s.interval_min ?? null,
         s.next_run_at || null,
+        s.fire_phase || 'main', s.nag_interval_min ?? null, s.nag_max ?? null,
+        s.remind_before_min ?? null, s.yearly_date || null, s.until_at || null, s.max_runs ?? null,
       ]
     );
     return rows.insertId;
@@ -704,13 +732,18 @@ async function deleteSchedule(id) {
 
 // Успешный (или штатно-завершённый) запуск: фиксируем момент + статус, сбрасываем счётчик
 // ошибок и записываем предвычисленный момент следующего запуска (null = больше не планируется).
-async function markScheduleRun(id, when, status, nextRunAt = null) {
+// opts.bumpRunCount — инкремент счётчика основных (main) срабатываний (для max_runs);
+// opts.firePhase — записать новую фазу автомата; opts.nagCount — выставить счётчик повторов.
+async function markScheduleRun(id, when, status, nextRunAt = null, opts = {}) {
   try {
     const dt = (when instanceof Date ? when : new Date()).toISOString().slice(0, 19).replace('T', ' ');
-    await dbQuery(
-      'UPDATE orch_schedules SET last_run_at = ?, last_status = ?, fail_count = 0, next_run_at = ? WHERE id = ?',
-      [dt, String(status || 'ok').slice(0, 250), nextRunAt, id]
-    );
+    const sets = ['last_run_at = ?', 'last_status = ?', 'fail_count = 0', 'next_run_at = ?'];
+    const vals = [dt, String(status || 'ok').slice(0, 250), nextRunAt];
+    if (opts.bumpRunCount) sets.push('run_count = run_count + 1');
+    if (opts.firePhase !== undefined) { sets.push('fire_phase = ?'); vals.push(opts.firePhase); }
+    if (opts.nagCount !== undefined) { sets.push('nag_count = ?'); vals.push(opts.nagCount); }
+    vals.push(id);
+    await dbQuery(`UPDATE orch_schedules SET ${sets.join(', ')} WHERE id = ?`, vals);
   } catch (err) {
     console.error('[MySQL] markScheduleRun:', err.message);
   }

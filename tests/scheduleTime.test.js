@@ -2,7 +2,7 @@
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { computeNextRunAt, toUtc, fmtUtc, csvHas } = require('../src/utils/scheduleTime');
+const { computeNextRunAt, computeNextFire, fmtTimeLeft, toUtc, fmtUtc, csvHas } = require('../src/utils/scheduleTime');
 
 // UTC helper: локальное (UTC+5) HH = UTC HH-5. Напр. 9:00 локально = 4:00 UTC.
 const utc = (y, mo, d, h, mi = 0) => new Date(Date.UTC(y, mo - 1, d, h, mi));
@@ -75,6 +75,74 @@ describe('computeNextRunAt: monthly', () => {
     const row = { kind: 'monthly', at_hour: 9, at_minute: 0, month_days: '31' };
     // июнь 2026 — 30 дней → ближайшее 31-е = 31 июля
     assert.equal(computeNextRunAt(row, utc(2026, 6, 1, 0, 0)).toISOString(), '2026-07-31T04:00:00.000Z');
+  });
+});
+
+describe('computeNextRunAt: yearly', () => {
+  test('ближайшая дата MM-DD: в этом году, если впереди, иначе в следующем', () => {
+    const row = { kind: 'yearly', at_hour: 9, at_minute: 0, yearly_date: '06-15' };
+    assert.equal(computeNextRunAt(row, utc(2026, 6, 8, 4, 0)).toISOString(), '2026-06-15T04:00:00.000Z');
+    assert.equal(computeNextRunAt(row, utc(2026, 6, 16, 4, 0)).toISOString(), '2027-06-15T04:00:00.000Z');
+  });
+  test('29.02: в невисокосный год срабатывает 28.02, в високосный — 29.02', () => {
+    const row = { kind: 'yearly', at_hour: 9, at_minute: 0, yearly_date: '02-29' };
+    // 2026 — невисокосный → 28.02.2026
+    assert.equal(computeNextRunAt(row, utc(2025, 12, 1, 0, 0)).toISOString(), '2026-02-28T04:00:00.000Z');
+    // после 28.02.2027 (невисокосный 2027 уже прошёл дату) → 29.02.2028 (високосный)
+    assert.equal(computeNextRunAt(row, utc(2027, 3, 1, 0, 0)).toISOString(), '2028-02-29T04:00:00.000Z');
+  });
+  test('кривой yearly_date → null', () => {
+    assert.equal(computeNextRunAt({ kind: 'yearly', at_hour: 9, yearly_date: '13-01' }, utc(2026, 6, 8, 0, 0)), null);
+    assert.equal(computeNextRunAt({ kind: 'yearly', at_hour: 9, yearly_date: 'июнь' }, utc(2026, 6, 8, 0, 0)), null);
+  });
+});
+
+describe('until_at: конец повторов', () => {
+  test('daily: вхождение в пределах until (включительно) — есть, за пределами — null', () => {
+    const row = { kind: 'daily', at_hour: 9, at_minute: 0, until_at: '2026-06-10 04:00:00' };
+    assert.equal(computeNextRunAt(row, utc(2026, 6, 9, 5, 0)).toISOString(), '2026-06-10T04:00:00.000Z'); // ровно на границе — ок
+    assert.equal(computeNextRunAt(row, utc(2026, 6, 10, 5, 0)), null); // следующее было бы 11-го — за границей
+  });
+  test('interval с until → null после границы', () => {
+    const row = { kind: 'interval', interval_min: 30, until_at: '2026-06-08 09:15:00' };
+    assert.equal(computeNextRunAt(row, utc(2026, 6, 8, 9, 0)), null); // next 9:30 > 9:15
+  });
+});
+
+describe('computeNextFire (фаза pre/main)', () => {
+  test('remind_before_min впереди → pre за N минут до main', () => {
+    const row = { kind: 'once', run_at: '2026-06-08 10:00:00', last_run_at: null, remind_before_min: 30 };
+    const f = computeNextFire(row, utc(2026, 6, 8, 9, 0));
+    assert.equal(f.phase, 'pre');
+    assert.equal(f.at.toISOString(), '2026-06-08T09:30:00.000Z');
+  });
+  test('момент pre уже прошёл (впритык) → сразу main', () => {
+    const row = { kind: 'once', run_at: '2026-06-08 10:00:00', last_run_at: null, remind_before_min: 30 };
+    const f = computeNextFire(row, utc(2026, 6, 8, 9, 45));
+    assert.equal(f.phase, 'main');
+    assert.equal(f.at.toISOString(), '2026-06-08T10:00:00.000Z');
+  });
+  test('без remind_before_min → main; нечего планировать → null', () => {
+    const row = { kind: 'daily', at_hour: 9, at_minute: 0 };
+    assert.equal(computeNextFire(row, utc(2026, 6, 8, 3, 0)).phase, 'main');
+    assert.equal(computeNextFire({ kind: 'once', run_at: null, last_run_at: null }, utc(2026, 6, 8, 3, 0)), null);
+  });
+  test('свойство автомата: computeNextRunAt из момента pre даёт ровно main', () => {
+    const row = { kind: 'daily', at_hour: 9, at_minute: 0, remind_before_min: 45 };
+    const f = computeNextFire(row, utc(2026, 6, 8, 1, 0));
+    assert.equal(f.phase, 'pre');
+    assert.equal(computeNextRunAt(row, f.at).toISOString(), '2026-06-08T04:00:00.000Z');
+  });
+});
+
+describe('fmtTimeLeft', () => {
+  test('минуты / часы / дни / просрочка', () => {
+    assert.equal(fmtTimeLeft(12 * 60000), 'через 12 мин');
+    assert.equal(fmtTimeLeft(125 * 60000), 'через 2 ч 05 мин');
+    assert.equal(fmtTimeLeft(2 * 60 * 60000), 'через 2 ч');
+    assert.equal(fmtTimeLeft(76 * 60 * 60000), 'через 3 дн 4 ч');
+    assert.equal(fmtTimeLeft(0), 'прямо сейчас');
+    assert.equal(fmtTimeLeft(-10 * 60000), 'просрочено на 10 мин');
   });
 });
 

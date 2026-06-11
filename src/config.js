@@ -140,6 +140,11 @@ module.exports = {
   // одновременно активных расписаний (каждый запуск — полный агентный цикл).
   SCHEDULE_MIN_INTERVAL_MIN: parseInt(process.env.SCHEDULE_MIN_INTERVAL_MIN || '5', 10),
   SCHEDULE_MAX_ACTIVE: parseInt(process.env.SCHEDULE_MAX_ACTIVE || '30', 10),
+  // Будильник (nag): минимальный период повторов до подтверждения, дефолт и
+  // потолок числа повторов (каждый повтор — полный агентный цикл).
+  SCHEDULE_NAG_MIN_INTERVAL_MIN: parseInt(process.env.SCHEDULE_NAG_MIN_INTERVAL_MIN || '5', 10),
+  SCHEDULE_NAG_MAX_DEFAULT: parseInt(process.env.SCHEDULE_NAG_MAX_DEFAULT || '10', 10),
+  SCHEDULE_NAG_MAX_CAP: parseInt(process.env.SCHEDULE_NAG_MAX_CAP || '20', 10),
 
   // ── Ассистентские фичи (референс Bot_opekyn) ──────────────────────────────
   // Веб-поиск (Brave Search API). Пусто → инструмент честно отказывает.
