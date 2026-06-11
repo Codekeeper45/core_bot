@@ -6,24 +6,48 @@
 const { spawn } = require('node:child_process');
 const config = require('../config');
 
-// Профили голосов Gemini (подмножество; полный каталог ~30). Используются для подсказки
-// характера голоса в TTS-промпте. Если голос не в списке — всё равно передаём как есть
-// (Gemini знает свои голоса), валидация лишь подставляет дефолт для пустого имени.
+// Полный каталог голосов Gemini (30). Используется для валидации, подсказки характера в
+// TTS-промпте и для list_voices (агент выбирает голос под ситуацию). g — пол (m/f).
 const VOICE_PROFILES = {
-  Leda: { tone: 'Youthful', personality: 'молодой, энергичный, игривый (дефолт)' },
-  Zephyr: { tone: 'Bright', personality: 'жизнерадостный, бодрый — радость, утро' },
-  Fenrir: { tone: 'Excitable', personality: 'эмоциональный, для шуток и сюрпризов' },
-  Vindemiatrix: { tone: 'Gentle', personality: 'мягкий, ласковый — утешение, поддержка' },
-  Gacrux: { tone: 'Mature', personality: 'зрелый, мудрый — серьёзный разговор, совет' },
-  Erinome: { tone: 'Clear', personality: 'чёткий, ясный — объяснение, обучение' },
-  Alnilam: { tone: 'Firm', personality: 'твёрдый, уверенный — мотивация, инструкции' },
-  Umbriel: { tone: 'Easy-going', personality: 'непринуждённый — расслабленный вечер' },
-  Achird: { tone: 'Friendly', personality: 'дружелюбный, тёплый — повседневная беседа' },
-  Algieba: { tone: 'Smooth', personality: 'плавный, спокойный — для объяснений' },
-  Kore: { tone: 'Neutral', personality: 'нейтральный, ровный — деловой тон' },
-  Puck: { tone: 'Upbeat', personality: 'живой, позитивный' },
+  Achernar: { tone: 'Soft', g: 'f', personality: 'мягкий, нежный — утешение и ласка' },
+  Achird: { tone: 'Friendly', g: 'f', personality: 'дружелюбный, тёплый — универсальный собеседник' },
+  Algenib: { tone: 'Gravelly', g: 'm', personality: 'хриплый, харизматичный — серьёзные темы' },
+  Algieba: { tone: 'Smooth', g: 'm', personality: 'плавный, спокойный — объяснения' },
+  Alnilam: { tone: 'Firm', g: 'm', personality: 'твёрдый, уверенный — мотивация, инструкции' },
+  Aoede: { tone: 'Breezy', g: 'f', personality: 'лёгкий, воздушный — повседневные беседы' },
+  Autonoe: { tone: 'Bright', g: 'f', personality: 'яркий, энергичный — радостные новости' },
+  Callirrhoe: { tone: 'Easy-going', g: 'f', personality: 'непринуждённый, расслабленный — дружеский тон' },
+  Charon: { tone: 'Informative', g: 'm', personality: 'информативный, взвешенный — факты и новости' },
+  Despina: { tone: 'Smooth', g: 'f', personality: 'гладкий, ровный — универсальный' },
+  Enceladus: { tone: 'Breathy', g: 'm', personality: 'дыхательный, интимный — тихие моменты' },
+  Erinome: { tone: 'Clear', g: 'f', personality: 'чёткий, ясный — объяснения и обучение' },
+  Fenrir: { tone: 'Excitable', g: 'm', personality: 'возбудимый, эмоциональный — шутки и сюрпризы' },
+  Gacrux: { tone: 'Mature', g: 'm', personality: 'зрелый, мудрый — советы и размышления' },
+  Iapetus: { tone: 'Clear', g: 'm', personality: 'чёткий, глубокий — деловые разговоры' },
+  Kore: { tone: 'Firm', g: 'f', personality: 'твёрдый, сбалансированный — хороший дефолт' },
+  Laomedeia: { tone: 'Upbeat', g: 'f', personality: 'жизнерадостный, бодрый — утренние приветствия' },
+  Leda: { tone: 'Youthful', g: 'f', personality: 'молодой, игривый, энергичный (дефолт)' },
+  Orus: { tone: 'Firm', g: 'm', personality: 'твёрдый, уверенный — мотивация' },
+  Puck: { tone: 'Upbeat', g: 'm', personality: 'весёлый, оживлённый — шутки' },
+  Pulcherrima: { tone: 'Forward', g: 'f', personality: 'напористый, прямой — важные напоминания' },
+  Rasalgethi: { tone: 'Informative', g: 'm', personality: 'информативный, нейтральный — новости' },
+  Sadachbia: { tone: 'Lively', g: 'm', personality: 'живой, динамичный — активные обсуждения' },
+  Sadaltager: { tone: 'Knowledgeable', g: 'm', personality: 'знающий, экспертный — обучение' },
+  Schedar: { tone: 'Even', g: 'f', personality: 'ровный, стабильный — долгие беседы' },
+  Sulafat: { tone: 'Warm', g: 'f', personality: 'тёплый, уютный — поддержка и забота' },
+  Umbriel: { tone: 'Easy-going', g: 'm', personality: 'непринуждённый, мягкий — вечерние разговоры' },
+  Vindemiatrix: { tone: 'Gentle', g: 'f', personality: 'нежный, ласковый — утешение' },
+  Zephyr: { tone: 'Bright', g: 'm', personality: 'современный, яркий — молодёжный тон' },
+  Zubenelgenubi: { tone: 'Casual', g: 'm', personality: 'неформальный, расслабленный — для своих' },
 };
 const DEFAULT_VOICE_TONE = 'нейтральный';
+
+// Список голосов для инструмента выбора (агент видит описания и подбирает под ситуацию).
+function listVoices() {
+  return Object.entries(VOICE_PROFILES).map(([name, p]) => ({
+    name, tone: p.tone, gender: p.g === 'f' ? 'жен' : 'муж', description: p.personality,
+  }));
+}
 
 function validateVoiceName(name) {
   const n = String(name || '').trim();
@@ -209,5 +233,6 @@ async function synthesizeSpeech(text, voice) {
 module.exports = {
   synthesizeSpeech,
   VOICE_PROFILES,
+  listVoices,
   _internals: { pcmToWav, toOgg, googleKeysRotated, buildTtsPrompt, stripAudioTags, validateVoiceName },
 };

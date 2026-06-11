@@ -158,14 +158,16 @@ describe('say_voice', () => {
   const Module = require('module');
   const orig = Module.prototype.require;
   Module.prototype.require = function (id) {
-    if (id === '../services/tts') return { synthesizeSpeech: async (text, voice) => { calls.synth.push({ text, voice }); return { ok: true, source: 'google', media: { kind: 'voice', buffer: Buffer.from('x'), format: 'ogg' } }; } };
+    if (id === '../services/tts') return { synthesizeSpeech: async (text, voice) => { calls.synth.push({ text, voice }); return { ok: true, source: 'google', media: { kind: 'voice', buffer: Buffer.from('x'), format: 'ogg' } }; }, listVoices: () => Array.from({ length: 30 }, (_, i) => ({ name: `V${i}`, tone: 't', gender: 'муж', description: 'd' })) };
     if (id === '../services/notifier') return { deliver: async (ch, c, t, media) => { calls.delivered.push({ ch, media }); return true; } };
     if (id === '../services/voiceFlag') return { mark: (ch, id2) => calls.marked.push(`${ch}:${id2}`), reset() {}, taken() { return false; } };
     return orig.apply(this, arguments);
   };
   delete require.cache[require.resolve('../src/tools/sayVoice')];
-  const tool = require('../src/tools/sayVoice');
+  const mod = require('../src/tools/sayVoice');
   Module.prototype.require = orig;
+  const tool = mod.tools.find((t) => t.definition.function.name === 'say_voice');
+  const voicesTool = mod.tools.find((t) => t.definition.function.name === 'list_voices');
 
   test('синтезирует переданный текст с тегами и шлёт голосовым, ставит флаг', async () => {
     calls.synth.length = 0; calls.delivered.length = 0; calls.marked.length = 0;
@@ -185,5 +187,27 @@ describe('say_voice', () => {
   test('пустой текст → ошибка', async () => {
     const r = await tool.handler({ text: '  ' }, { channel: 'telegram', chatId: '1' });
     assert.equal(r.success, false);
+  });
+
+  test('list_voices отдаёт каталог из 30 голосов с описаниями', async () => {
+    const r = await voicesTool.handler({}, { channel: 'whatsapp', chatId: '1' });
+    assert.equal(r.success, true);
+    assert.equal(r.count, 30);
+    assert.equal(r.voices.length, 30);
+    assert.ok(r.voices[0].name && r.voices[0].description);
+  });
+});
+
+// Полный каталог в самом сервисе TTS — ровно 30 голосов.
+describe('VOICE_PROFILES', () => {
+  test('каталог содержит 30 голосов; listVoices отдаёт name+tone+gender+description', () => {
+    const tts = require('../src/services/tts');
+    assert.equal(Object.keys(tts.VOICE_PROFILES).length, 30);
+    const list = tts.listVoices();
+    assert.equal(list.length, 30);
+    for (const v of list) {
+      assert.ok(v.name && v.tone && v.gender && v.description);
+    }
+    assert.ok(tts.VOICE_PROFILES.Leda && tts.VOICE_PROFILES.Vindemiatrix);
   });
 });

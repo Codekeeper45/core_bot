@@ -2,7 +2,7 @@
 // Озвучить ответ голосом по решению агента — с управлением интонацией.
 // Текст здесь ОТДЕЛЁН от отображаемого ответа: теги [] и стиль-инструкции попадают только
 // в голос и не показываются пользователю. Режим босса (BOSS_ONLY).
-const { synthesizeSpeech } = require('../services/tts');
+const { synthesizeSpeech, listVoices } = require('../services/tts');
 const notifier = require('../services/notifier');
 const voiceFlag = require('../services/voiceFlag');
 
@@ -25,9 +25,9 @@ const definition = {
       properties: {
         text: { type: 'string', description: 'Текст для озвучки со стилем/тегами (НЕ показывается как текст).' },
         voice: { type: 'string', description: 'Имя голоса Gemini под настроение (опц.; дефолт из настроек). '
-          + 'Leda — энергичный; Vindemiatrix — мягкий/утешение; Fenrir — эмоциональный/шутка; '
+          + 'Частые: Leda — энергичный; Vindemiatrix — мягкий/утешение; Fenrir — эмоциональный/шутка; '
           + 'Gacrux — зрелый/серьёзный; Erinome — чёткий/объяснение; Alnilam — твёрдый/мотивация; '
-          + 'Achird — дружелюбный; Kore — нейтральный/деловой.' },
+          + 'Sulafat — тёплый/забота; Kore — нейтральный/деловой. Полный список (30) — list_voices.' },
       },
       required: ['text'],
     },
@@ -47,4 +47,23 @@ async function handler(args, context = {}) {
   return { success: true, source: r.source, note: 'Голосовое отправлено.' };
 }
 
-module.exports = { definition, handler };
+// Каталог из 30 голосов с описаниями — чтобы агент осознанно выбирал голос под ситуацию.
+const listVoicesTool = {
+  definition: {
+    type: 'function',
+    function: {
+      name: 'list_voices',
+      description:
+        'Показать полный каталог голосов (30) с характером и полом — чтобы подобрать голос под '
+        + 'настроение/ситуацию перед say_voice. Имя выбранного голоса передавай в say_voice(voice=…).',
+      parameters: { type: 'object', properties: {} },
+    },
+  },
+  async handler() {
+    return { success: true, count: 30, voices: listVoices() };
+  },
+};
+
+const sayVoiceTool = { definition, handler };
+
+module.exports = { tools: [sayVoiceTool, listVoicesTool] };
