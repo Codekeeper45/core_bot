@@ -7,10 +7,11 @@ const calls = [];
 const journal = [];
 const mysqlMock = {
   listEnabledSchedules: async () => mysqlMock._rows,
-  markScheduleRun: async (id, when, status, next) => calls.push(['markRun', id, status, next]),
+  markScheduleRun: async (id, when, status, next, opts) => calls.push(['markRun', id, status, next, opts || {}]),
   touchScheduleStatus: async (id, status) => calls.push(['touch', id, status]),
   bumpScheduleFail: async (id, status) => calls.push(['bumpFail', id, status]),
   claimSchedule: async (id, expected) => { calls.push(['claim', id, expected]); return mysqlMock._claimResult; },
+  updateSchedule: async (id, fields) => { calls.push(['update', id, fields]); return Object.keys(fields).length; },
   setScheduleNextRun: async (id, next) => calls.push(['setNext', id, next]),
   setScheduleEnabled: async (id, on) => calls.push(['setEnabled', id, on]),
   logScheduleRun: async (id, title, status, detail) => journal.push({ id, status, detail }),
@@ -70,7 +71,7 @@ describe('tick', () => {
     calls.length = 0;
     setDeliver(async () => ({ ok: true }));
     await tick(utc(2026, 6, 8, 4, 0));
-    assert.deepEqual(calls.find((c) => c[0] === 'markRun'), ['markRun', 2, 'ok', null]);
+    assert.deepEqual(calls.find((c) => c[0] === 'markRun').slice(0, 4), ['markRun', 2, 'ok', null]);
     assert.deepEqual(calls.find((c) => c[0] === 'setEnabled'), ['setEnabled', 2, false]);
   });
 
@@ -209,6 +210,158 @@ describe('tick', () => {
     const m = journal.find((j) => j.id === 13);
     assert.equal(m.status, 'missed');
     assert.match(m.detail, /опоздание/);
+  });
+
+  test('main + nag_interval_min: once НЕ выключается, взводится фаза nag (next = now+N)', async () => {
+    mysqlMock._rows = [row({ id: 30, kind: 'once', run_at: '2026-06-08 04:00:00', next_run_at: '2026-06-08 04:00:00', nag_interval_min: 10 })];
+    calls.length = 0; journal.length = 0;
+    setDeliver(async () => ({ ok: true }));
+    await tick(utc(2026, 6, 8, 4, 0));
+    const mark = calls.find((c) => c[0] === 'markRun');
+    assert.equal(mark[2], 'ok');
+    assert.equal(mark[3], '2026-06-08 04:10:00'); // повтор через 10 мин
+    assert.deepEqual(mark[4], { bumpRunCount: true, firePhase: 'nag', nagCount: 0 });
+    assert.equal(calls.find((c) => c[0] === 'setEnabled'), undefined, 'once с будильником не выключается');
+    assert.match(journal.find((j) => j.id === 30).detail, /будильник/);
+  });
+
+  test('nag: повтор доставлен → счётчик растёт, next = now+N; инструкция содержит acknowledge', async () => {
+    mysqlMock._rows = [row({ id: 31, kind: 'once', run_at: '2026-06-08 04:00:00', last_run_at: '2026-06-08 04:00:00',
+      next_run_at: '2026-06-08 04:10:00', fire_phase: 'nag', nag_interval_min: 10, nag_count: 1, nag_max: 3 })];
+    calls.length = 0;
+    let instr = '';
+    setDeliver(async ({ instruction }) => { instr = instruction; return { ok: true }; });
+    await tick(utc(2026, 6, 8, 4, 10));
+    assert.match(instr, /ПОВТОР 2\/3/);
+    assert.match(instr, /acknowledge/);
+    const mark = calls.find((c) => c[0] === 'markRun');
+    assert.equal(mark[2], 'nag');
+    assert.equal(mark[3], '2026-06-08 04:20:00');
+    assert.deepEqual(mark[4], { nagCount: 2 });
+  });
+
+  test('nag исчерпан (k>=max): once → выключение + nag_exhausted в журнале', async () => {
+    mysqlMock._rows = [row({ id: 32, kind: 'once', run_at: '2026-06-08 04:00:00', last_run_at: '2026-06-08 04:00:00',
+      next_run_at: '2026-06-08 04:30:00', fire_phase: 'nag', nag_interval_min: 10, nag_count: 2, nag_max: 3 })];
+    calls.length = 0; journal.length = 0;
+    setDeliver(async () => ({ ok: true }));
+    await tick(utc(2026, 6, 8, 4, 30));
+    assert.equal(calls.find((c) => c[0] === 'markRun')[2], 'nag_exhausted');
+    assert.deepEqual(calls.find((c) => c[0] === 'setEnabled'), ['setEnabled', 32, false]);
+    assert.equal(journal.find((j) => j.id === 32).status, 'nag_exhausted');
+  });
+
+  test('nag исчерпан у recurring → возврат к следующему вхождению (фаза main)', async () => {
+    mysqlMock._rows = [row({ id: 33, kind: 'daily', at_hour: 9, at_minute: 0,
+      next_run_at: '2026-06-08 04:30:00', fire_phase: 'nag', nag_interval_min: 10, nag_count: 2, nag_max: 3 })];
+    calls.length = 0;
+    setDeliver(async () => ({ ok: true }));
+    await tick(utc(2026, 6, 8, 4, 30));
+    const mark = calls.find((c) => c[0] === 'markRun');
+    assert.equal(mark[2], 'nag_exhausted');
+    assert.equal(mark[3], '2026-06-09 04:00:00'); // завтра 9:00 локально
+    assert.deepEqual(mark[4], { firePhase: 'main', nagCount: 0 });
+  });
+
+  test('nag + lock_busy: счётчик НЕ растёт, момент восстановлен', async () => {
+    mysqlMock._rows = [row({ id: 34, kind: 'once', run_at: '2026-06-08 04:00:00', last_run_at: '2026-06-08 04:00:00',
+      next_run_at: '2026-06-08 04:10:00', fire_phase: 'nag', nag_interval_min: 10, nag_count: 1 })];
+    calls.length = 0;
+    setDeliver(async () => ({ ok: false, reason: 'lock_busy' }));
+    await tick(utc(2026, 6, 8, 4, 10));
+    assert.deepEqual(calls.find((c) => c[0] === 'setNext'), ['setNext', 34, '2026-06-08 04:10:00']);
+    assert.equal(calls.find((c) => c[0] === 'markRun'), undefined);
+  });
+
+  test('nag после суточного простоя досылается (catch-up не применяется)', async () => {
+    mysqlMock._rows = [row({ id: 35, kind: 'daily', at_hour: 9, at_minute: 0,
+      next_run_at: '2026-06-07 04:10:00', fire_phase: 'nag', nag_interval_min: 10, nag_count: 0 })];
+    calls.length = 0;
+    let delivered = false;
+    setDeliver(async () => { delivered = true; return { ok: true }; });
+    await tick(utc(2026, 6, 8, 4, 10)); // сутки спустя
+    assert.equal(delivered, true, 'будильник обязан дозвонить после рестарта');
+  });
+
+  test('pre: доставка → промоут в main с точным mainAt, last_run_at не трогается', async () => {
+    mysqlMock._rows = [row({ id: 36, kind: 'once', run_at: '2026-06-08 04:00:00',
+      next_run_at: '2026-06-08 03:30:00', fire_phase: 'pre', remind_before_min: 30 })];
+    calls.length = 0; journal.length = 0;
+    let instr = '';
+    setDeliver(async ({ instruction }) => { instr = instruction; return { ok: true }; });
+    await tick(utc(2026, 6, 8, 3, 30));
+    assert.match(instr, /ПРЕД-НАПОМИНАНИЕ за 30 мин/);
+    assert.deepEqual(calls.find((c) => c[0] === 'update'),
+      ['update', 36, { fire_phase: 'main', next_run_at: '2026-06-08 04:00:00' }]);
+    assert.equal(calls.find((c) => c[0] === 'markRun'), undefined, 'last_run_at не трогаем на pre');
+    assert.equal(journal.find((j) => j.id === 36).status, 'pre_ok');
+  });
+
+  test('pre протух за main (бот лежал) → одно сообщение: сразу основной запуск', async () => {
+    mysqlMock._rows = [row({ id: 37, kind: 'once', run_at: '2026-06-08 04:00:00',
+      next_run_at: '2026-06-08 03:30:00', fire_phase: 'pre', remind_before_min: 30 })];
+    calls.length = 0;
+    const instrs = [];
+    setDeliver(async ({ instruction }) => { instrs.push(instruction); return { ok: true }; });
+    await tick(utc(2026, 6, 8, 4, 5)); // уже позже main
+    assert.equal(instrs.length, 1);
+    assert.match(instrs[0], /АВТО-ЗАДАЧА/); // основной, не пред-напоминание
+    assert.equal(calls.find((c) => c[0] === 'markRun')[2], 'ok');
+  });
+
+  test('pre с ошибкой доставки → промоут в main всё равно (основной запуск в силе)', async () => {
+    mysqlMock._rows = [row({ id: 38, kind: 'once', run_at: '2026-06-08 04:00:00',
+      next_run_at: '2026-06-08 03:30:00', fire_phase: 'pre', remind_before_min: 30 })];
+    calls.length = 0; journal.length = 0;
+    setDeliver(async () => ({ ok: false, reason: 'agent_error' }));
+    await tick(utc(2026, 6, 8, 3, 30));
+    assert.deepEqual(calls.find((c) => c[0] === 'update'),
+      ['update', 38, { fire_phase: 'main', next_run_at: '2026-06-08 04:00:00' }]);
+    assert.equal(journal.find((j) => j.id === 38).status, 'pre_error');
+  });
+
+  test('recurring + max_runs достигнут → выключение + completed в журнале', async () => {
+    mysqlMock._rows = [row({ id: 39, kind: 'daily', at_hour: 9, at_minute: 0,
+      next_run_at: '2026-06-08 04:00:00', run_count: 2, max_runs: 3 })];
+    calls.length = 0; journal.length = 0;
+    setDeliver(async () => ({ ok: true }));
+    await tick(utc(2026, 6, 8, 4, 0));
+    const mark = calls.find((c) => c[0] === 'markRun');
+    assert.equal(mark[3], null);
+    assert.deepEqual(calls.find((c) => c[0] === 'setEnabled'), ['setEnabled', 39, false]);
+    const j = journal.find((x) => x.id === 39);
+    assert.equal(j.status, 'completed');
+    assert.match(j.detail, /3 из 3/);
+  });
+
+  test('recurring + until истёк после этого запуска → выключение + completed (until)', async () => {
+    mysqlMock._rows = [row({ id: 40, kind: 'daily', at_hour: 9, at_minute: 0,
+      next_run_at: '2026-06-08 04:00:00', until_at: '2026-06-08 12:00:00' })];
+    calls.length = 0; journal.length = 0;
+    setDeliver(async () => ({ ok: true }));
+    await tick(utc(2026, 6, 8, 4, 0)); // следующее было бы завтра — за границей until
+    assert.deepEqual(calls.find((c) => c[0] === 'setEnabled'), ['setEnabled', 40, false]);
+    assert.match(journal.find((x) => x.id === 40).detail, /until/);
+  });
+
+  test('recurring с remind_before: после ok следующая фаза — pre за N минут', async () => {
+    mysqlMock._rows = [row({ id: 41, kind: 'daily', at_hour: 9, at_minute: 0,
+      next_run_at: '2026-06-08 04:00:00', remind_before_min: 30 })];
+    calls.length = 0;
+    setDeliver(async () => ({ ok: true }));
+    await tick(utc(2026, 6, 8, 4, 0));
+    const mark = calls.find((c) => c[0] === 'markRun');
+    assert.equal(mark[3], '2026-06-09 03:30:00'); // завтра 9:00 минус 30 мин
+    assert.equal(mark[4].firePhase, 'pre');
+  });
+
+  test('rearm оборванного nag (next_run_at=NULL после рестарта) → повтор от «сейчас»', async () => {
+    mysqlMock._rows = [row({ id: 42, kind: 'once', run_at: '2026-06-08 04:00:00', last_run_at: '2026-06-08 04:00:00',
+      next_run_at: null, fire_phase: 'nag', nag_interval_min: 10, nag_count: 1, last_status: 'nag' })];
+    calls.length = 0;
+    setDeliver(async () => ({ ok: true }));
+    await tick(utc(2026, 6, 8, 5, 0));
+    assert.deepEqual(calls, [['setNext', 42, '2026-06-08 05:10:00']]);
   });
 
   test('running-гард: повторный tick во время незавершённого deliver не дублирует', async () => {

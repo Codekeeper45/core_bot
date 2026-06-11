@@ -12,12 +12,13 @@
 // once досылается всегда.
 const {
   listEnabledSchedules, markScheduleRun, touchScheduleStatus, bumpScheduleFail,
-  claimSchedule, setScheduleNextRun, setScheduleEnabled, logScheduleRun, cleanupScheduleRuns,
+  claimSchedule, setScheduleNextRun, setScheduleEnabled, updateSchedule,
+  logScheduleRun, cleanupScheduleRuns,
 } = require('./mysql');
-const { computeNextRunAt, toUtc, fmtUtc } = require('../utils/scheduleTime');
+const { computeNextRunAt, computeNextFire, toUtc, fmtUtc } = require('../utils/scheduleTime');
 const config = require('../config');
 
-const RECURRING_FIXED = ['daily', 'weekly', 'monthly'];
+const RECURRING_FIXED = ['daily', 'weekly', 'monthly', 'yearly'];
 
 // Пора ли запускать расписание прямо сейчас. Чистая функция.
 function isDue(row, now = new Date()) {
@@ -29,10 +30,38 @@ function wrapInstruction(title, instruction) {
   return `[АВТО-ЗАДАЧА ПО РАСПИСАНИЮ «${title}»]\n${instruction}`;
 }
 
-// Следующий next_run_at строкой для БД (или null, если планировать нечего).
+function wrapPre(row) {
+  return `[ПРЕД-НАПОМИНАНИЕ за ${row.remind_before_min} мин до «${row.title}» (#${row.id})]\n${row.instruction}\n\n`
+    + 'Это раннее предупреждение: основное напоминание придёт в срок. '
+    + 'Кратко предупреди босса, что событие приближается.';
+}
+
+function wrapNag(row, k, max, nagN) {
+  return `[ПОВТОР ${k}/${max} НАПОМИНАНИЯ «${row.title}» (#${row.id})]\n${row.instruction}\n\n`
+    + `Это будильник: повтор приходит каждые ${nagN} мин, пока босс не подтвердит. `
+    + `Если в недавней переписке босс УЖЕ подтвердил/ответил по этой теме («ок», «понял», «сделал») — `
+    + `НЕ повторяй напоминание, а вызови manage_schedule {action:"acknowledge", id:${row.id}} и сообщи, что снял его. `
+    + `Иначе напомни ещё раз и добавь в конец: «(повторю через ${nagN} мин — ответьте „ок“, чтобы я перестал)».`;
+}
+
+// Следующий МОМЕНТ ОСНОВНОГО запуска строкой для БД (или null).
 function nextFor(row, now) {
   const d = computeNextRunAt(row, now);
   return d ? fmtUtc(d) : null;
+}
+
+// Следующее СОБЫТИЕ автомата фаз: { next: 'YYYY-MM-DD HH:MM:SS', phase } | null.
+function nextFireFor(row, now) {
+  const f = computeNextFire(row, now);
+  return f ? { next: fmtUtc(f.at), phase: f.phase } : null;
+}
+
+// Параметры будильника с дефолтами/потолками из конфига.
+function nagParams(row) {
+  const nagN = Math.max(1, Number(row.nag_interval_min) || 0);
+  const max = Math.min(config.SCHEDULE_NAG_MAX_CAP,
+    Number(row.nag_max) > 0 ? Number(row.nag_max) : config.SCHEDULE_NAG_MAX_DEFAULT);
+  return { nagN, max };
 }
 
 let deliverFn = null;   // инъекция из index.js (deliverInstruction)
@@ -40,26 +69,55 @@ let timer = null;
 let running = false;     // гард: одно исполнение tick за раз (агентный цикл долгий)
 let lastCleanupDay = ''; // журнал чистим раз в сутки (старше 90 дней)
 
-// Выполнить одно расписание (строка уже захвачена claim'ом: next_run_at в БД = NULL).
-// prevNextRunAt — прежнее значение, чтобы восстановить его при lock_busy.
-// Возвращает строку-статус для записи.
-async function runSchedule(row, now, prevNextRunAt) {
-  const res = await deliverFn({
+function deliverRow(row, instruction) {
+  return deliverFn({
     channel: row.owner_channel,
     chatId: row.owner_chat_id,
     phone: row.owner_phone,
     clientName: 'boss',
-    instruction: wrapInstruction(row.title, row.instruction),
+    instruction,
     title: row.title,
   });
+}
 
+// ── Фаза MAIN: основное срабатывание ────────────────────────────────────────
+// Строка уже захвачена claim'ом (next_run_at в БД = NULL); prevNextRunAt — прежнее
+// значение для восстановления при lock_busy/ошибке once.
+async function runMainPhase(row, now, prevNextRunAt) {
+  const res = await deliverRow(row, wrapInstruction(row.title, row.instruction));
   const isOnce = row.kind === 'once';
+
   if (res && res.ok) {
-    await markScheduleRun(row.id, now, 'ok', isOnce ? null : nextFor(row, now));
-    if (isOnce) await setScheduleEnabled(row.id, false); // завершено — больше не опрашиваем
+    // Будильник: повторяем напоминание каждые N минут до подтверждения босса.
+    if (Number(row.nag_interval_min) > 0) {
+      const { nagN } = nagParams(row);
+      await markScheduleRun(row.id, now, 'ok', fmtUtc(new Date(now.getTime() + nagN * 60000)),
+        { bumpRunCount: true, firePhase: 'nag', nagCount: 0 });
+      await logScheduleRun(row.id, row.title, 'ok', `будильник: повтор каждые ${nagN} мин до подтверждения`);
+      return 'ok';
+    }
+    if (isOnce) {
+      await markScheduleRun(row.id, now, 'ok', null, { bumpRunCount: true });
+      await setScheduleEnabled(row.id, false); // завершено — больше не опрашиваем
+      await logScheduleRun(row.id, row.title, 'ok', null);
+      return 'ok';
+    }
+    // Recurring: следующий запуск (с учётом pre-фазы и until), лимит max_runs.
+    const runs = (Number(row.run_count) || 0) + 1;
+    const maxRuns = Number(row.max_runs) || 0;
+    const nf = nextFireFor(row, now);
+    if (!nf || (maxRuns > 0 && runs >= maxRuns)) {
+      await markScheduleRun(row.id, now, 'ok', null, { bumpRunCount: true, firePhase: 'main' });
+      await setScheduleEnabled(row.id, false);
+      await logScheduleRun(row.id, row.title, 'completed',
+        !nf ? 'повторы исчерпаны (until)' : `выполнено ${runs} из ${maxRuns} раз`);
+      return 'ok';
+    }
+    await markScheduleRun(row.id, now, 'ok', nf.next, { bumpRunCount: true, firePhase: nf.phase });
     await logScheduleRun(row.id, row.title, 'ok', null);
     return 'ok';
   }
+
   if (res && res.reason === 'lock_busy') {
     // Чат владельца занят (босс пишет прямо сейчас). Возвращаем прежний next_run_at
     // (claim его занулил) — расписание остаётся due и повторится на следующем tick.
@@ -68,6 +126,7 @@ async function runSchedule(row, now, prevNextRunAt) {
     await logScheduleRun(row.id, row.title, 'lock_busy', 'чат занят, повтор на следующем tick');
     return 'lock_busy';
   }
+
   // Ошибка агентного цикла. Для once — восстанавливаем due-момент и копим fail_count
   // (ретрай каждый tick, cutoff в БД); для recurring — переносим на следующий раз,
   // чтобы не спамить ретраями каждую минуту.
@@ -76,10 +135,90 @@ async function runSchedule(row, now, prevNextRunAt) {
     await setScheduleNextRun(row.id, prevNextRunAt);
     await bumpScheduleFail(row.id, status);
   } else {
-    await markScheduleRun(row.id, now, status, nextFor(row, now));
+    const nf = nextFireFor(row, now);
+    await markScheduleRun(row.id, now, status, nf ? nf.next : null, { firePhase: nf ? nf.phase : 'main' });
+    if (!nf) await setScheduleEnabled(row.id, false);
   }
   await logScheduleRun(row.id, row.title, status, isOnce ? 'once: ретрай, после 3 неудач отключится' : 'перенесено на следующий раз');
   return status;
+}
+
+// ── Фаза PRE: пред-напоминание за remind_before_min до основного запуска ────
+async function runPrePhase(row, now, prevNextRunAt) {
+  // Основной момент восстанавливается из момента pre (свойство computeNextFire).
+  const mainAt = computeNextRunAt(row, toUtc(prevNextRunAt));
+  if (!mainAt) {
+    // Крайний случай: until истёк между pre и main.
+    await setScheduleEnabled(row.id, false);
+    await logScheduleRun(row.id, row.title, 'completed', 'повторы исчерпаны (until)');
+    return 'completed';
+  }
+  if (now.getTime() >= mainAt.getTime()) {
+    // Pre протух за main (бот лежал): пред-напоминание бессмысленно — без двойного
+    // сообщения, сразу основной запуск в этом же tick.
+    return runMainPhase({ ...row, fire_phase: 'main' }, now, fmtUtc(mainAt));
+  }
+  const res = await deliverRow(row, wrapPre(row));
+  if (res && res.reason === 'lock_busy') {
+    await setScheduleNextRun(row.id, prevNextRunAt);
+    await touchScheduleStatus(row.id, 'lock_busy');
+    return 'lock_busy';
+  }
+  // ok ИЛИ ошибка превью → промоут в main: сбой пред-напоминания не должен
+  // сорвать основной запуск. last_run_at не трогаем (важно для once-логики).
+  await updateSchedule(row.id, { fire_phase: 'main', next_run_at: fmtUtc(mainAt) });
+  const ok = !!(res && res.ok);
+  await logScheduleRun(row.id, row.title, ok ? 'pre_ok' : 'pre_error',
+    ok ? `предупреждение за ${row.remind_before_min} мин` : 'сбой пред-напоминания; основной запуск в силе');
+  return ok ? 'pre_ok' : 'pre_error';
+}
+
+// ── Фаза NAG: будильник-повтор до подтверждения (acknowledge) ───────────────
+async function runNagPhase(row, now, prevNextRunAt) {
+  const { nagN, max } = nagParams(row);
+  const k = (Number(row.nag_count) || 0) + 1;
+  const res = await deliverRow(row, wrapNag(row, k, max, nagN));
+
+  if (res && res.ok) {
+    if (k >= max) {
+      // Повторы исчерпаны без подтверждения.
+      if (row.kind === 'once') {
+        await markScheduleRun(row.id, now, 'nag_exhausted', null, { nagCount: k });
+        await setScheduleEnabled(row.id, false);
+      } else {
+        const nf = nextFireFor(row, now);
+        await markScheduleRun(row.id, now, 'nag_exhausted', nf ? nf.next : null,
+          { firePhase: nf ? nf.phase : 'main', nagCount: 0 });
+        if (!nf) await setScheduleEnabled(row.id, false);
+      }
+      await logScheduleRun(row.id, row.title, 'nag_exhausted', `${max} повторов без подтверждения`);
+      return 'nag_exhausted';
+    }
+    await markScheduleRun(row.id, now, 'nag', fmtUtc(new Date(now.getTime() + nagN * 60000)), { nagCount: k });
+    await logScheduleRun(row.id, row.title, 'nag', `повтор ${k} из ${max}`);
+    return 'nag';
+  }
+
+  if (res && res.reason === 'lock_busy') {
+    // Повтор не «сгорает» впустую: счётчик не растёт, момент восстановлен.
+    await setScheduleNextRun(row.id, prevNextRunAt);
+    await touchScheduleStatus(row.id, 'lock_busy');
+    return 'lock_busy';
+  }
+
+  const status = (res && res.reason) || 'agent_error';
+  await setScheduleNextRun(row.id, prevNextRunAt);
+  await bumpScheduleFail(row.id, status); // cutoff 3 отключит и не даст спамить
+  await logScheduleRun(row.id, row.title, status, 'будильник: ретрай, после 3 неудач отключится');
+  return status;
+}
+
+// Выполнить одно захваченное расписание согласно его фазе.
+async function runSchedule(row, now, prevNextRunAt) {
+  const phase = row.fire_phase || 'main';
+  if (phase === 'pre') return runPrePhase(row, now, prevNextRunAt);
+  if (phase === 'nag') return runNagPhase(row, now, prevNextRunAt);
+  return runMainPhase(row, now, prevNextRunAt);
 }
 
 // Свежий захват другим процессом (перекрытие на деплое) не трогаем; старше — считаем
@@ -87,16 +226,23 @@ async function runSchedule(row, now, prevNextRunAt) {
 const STUCK_RUN_MIN = 15;
 
 // Строка без next_run_at: legacy до миграции, ручная правка в БД или оборванный
-// claim (рестарт между захватом и фиксацией). Дозаполнить; завершённое once
-// реанимировать нечем — выключаем, чтобы не опрашивать вечно.
+// claim (рестарт между захватом и фиксацией). Дозаполнить по фазе; завершённое
+// once реанимировать нечем — выключаем, чтобы не опрашивать вечно.
 async function rearmSchedule(row, now) {
   if (row.last_status === 'running' && row.updated_at) {
     const ageMs = Math.abs(now.getTime() - toUtc(row.updated_at).getTime());
     if (ageMs < STUCK_RUN_MIN * 60000) return; // прогон идёт прямо сейчас
   }
-  const next = nextFor(row, now);
-  if (next) {
-    await setScheduleNextRun(row.id, next);
+  // Оборванный будильник дозванивает: следующий повтор от «сейчас».
+  if ((row.fire_phase || 'main') === 'nag' && Number(row.nag_interval_min) > 0) {
+    const { nagN } = nagParams(row);
+    await setScheduleNextRun(row.id, fmtUtc(new Date(now.getTime() + nagN * 60000)));
+    return;
+  }
+  const nf = nextFireFor(row, now);
+  if (nf) {
+    if ((row.fire_phase || 'main') === nf.phase) await setScheduleNextRun(row.id, nf.next);
+    else await updateSchedule(row.id, { fire_phase: nf.phase, next_run_at: nf.next });
   } else {
     await setScheduleEnabled(row.id, false);
     await logScheduleRun(row.id, row.title, 'auto_disabled',
@@ -126,11 +272,15 @@ async function tick(now = new Date()) {
         const prevNextRunAt = fmtUtc(toUtc(row.next_run_at));
         if (!(await claimSchedule(row.id, prevNextRunAt))) continue;
         // Сильно протухший фиксированный recurring (простой дольше окна) — missed,
-        // переносим: дневная сводка в 18:00 уже не нужна. once досылаем всегда.
-        if (RECURRING_FIXED.includes(row.kind)) {
+        // переносим: дневная сводка в 18:00 уже не нужна. once досылаем всегда;
+        // nag-повторы (будильник) тоже досылаются всегда; pre обрабатывает протухание
+        // сам (промоут в main без двойного сообщения).
+        if (RECURRING_FIXED.includes(row.kind) && (row.fire_phase || 'main') === 'main') {
           const lateMs = now.getTime() - toUtc(row.next_run_at).getTime();
           if (lateMs > config.SCHEDULE_CATCHUP_WINDOW_MIN * 60000) {
-            await markScheduleRun(row.id, now, 'missed', nextFor(row, now));
+            const nf = nextFireFor(row, now);
+            await markScheduleRun(row.id, now, 'missed', nf ? nf.next : null, { firePhase: nf ? nf.phase : 'main' });
+            if (!nf) await setScheduleEnabled(row.id, false);
             await logScheduleRun(row.id, row.title, 'missed',
               `опоздание ${Math.round(lateMs / 60000)} мин > окна ${config.SCHEDULE_CATCHUP_WINDOW_MIN} мин`);
             continue;
