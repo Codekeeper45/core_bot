@@ -79,7 +79,7 @@ loadTools();
 const BOSS_ONLY = new Set([
   'create_project', 'revise_project', 'dispatch_task', 'assign_task',
   'manage_employees', 'message_employee', 'project_status', 'manage_scheduler',
-  'manage_schedule',
+  'manage_schedule', 'performance_report',
   // Ассистентские фичи — личные инструменты владельца.
   'render_diagram', 'web_search', 'remember_fact', 'list_facts', 'forget_fact',
   'manage_notes', 'manage_todos', 'say_voice', 'list_voices',

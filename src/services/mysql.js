@@ -812,6 +812,37 @@ async function countSchedules() {
   }
 }
 
+// ── Успеваемость: агрегация задач по сотрудникам за период ──────────────────
+// from/to — границы периода в UTC ('YYYY-MM-DD HH:MM:SS'), to не включается.
+// Одним запросом: поставлено за период / из них выполнено / выполнено всего /
+// с опозданием / открытых просроченных / заблокированных / среднее время (часы).
+async function getEmployeePeriodStats(from, to) {
+  try {
+    return await dbQuery(
+      `SELECT e.id, e.name, e.roles,
+              COALESCE(SUM(t.created_at >= ? AND t.created_at < ?), 0)                          AS assigned,
+              COALESCE(SUM(t.created_at >= ? AND t.created_at < ? AND t.status = 'done'), 0)    AS assigned_done,
+              COALESCE(SUM(t.completed_at >= ? AND t.completed_at < ?), 0)                      AS done_total,
+              COALESCE(SUM(t.completed_at >= ? AND t.completed_at < ?
+                           AND t.deadline IS NOT NULL AND t.completed_at > t.deadline), 0)      AS done_late,
+              COALESCE(SUM(t.status NOT IN ('done')
+                           AND t.deadline IS NOT NULL AND t.deadline < ?), 0)                   AS open_overdue,
+              COALESCE(SUM(t.status = 'blocked'), 0)                                            AS blocked_now,
+              AVG(CASE WHEN t.completed_at >= ? AND t.completed_at < ? AND t.dispatched_at IS NOT NULL
+                       THEN TIMESTAMPDIFF(HOUR, t.dispatched_at, t.completed_at) END)           AS avg_hours
+       FROM orch_employees e
+       LEFT JOIN orch_tasks t ON t.assignee_id = e.id
+       WHERE e.active = 1
+       GROUP BY e.id, e.name, e.roles
+       ORDER BY e.id ASC`,
+      [from, to, from, to, from, to, from, to, to, from, to]
+    );
+  } catch (err) {
+    console.error('[MySQL] getEmployeePeriodStats:', err.message);
+    return [];
+  }
+}
+
 // ── Журнал запусков расписаний (orch_schedule_runs) ─────────────────────────
 async function logScheduleRun(scheduleId, title, status, detail) {
   try {
@@ -1284,6 +1315,7 @@ module.exports = {
   updateSchedule, setScheduleEnabled, deleteSchedule,
   markScheduleRun, claimSchedule, setScheduleNextRun, touchScheduleStatus, bumpScheduleFail, countSchedules,
   logScheduleRun, listScheduleRuns, cleanupScheduleRuns,
+  getEmployeePeriodStats,
   addFact, listFacts, deleteFact,
   addPersonalItem, listPersonalItems, setPersonalItemDone, deletePersonalItem,
   // Оркестратор: задачи
