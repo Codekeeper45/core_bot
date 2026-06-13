@@ -12,8 +12,18 @@
 // (вкл/выкл, смена часов, запуск вручную). Изменения сохраняются в orch_settings
 // и переживают рестарт: env-значения — только дефолт при первом старте.
 const config = require('../config');
-const { listEmployees, listOpenTasksBrief, getSettings, setSetting } = require('./mysql');
+const { listEmployees, listOpenTasksBrief, getSettings, setSetting, listActiveQuiet } = require('./mysql');
 const notifier = require('./notifier');
+
+// Кому сейчас нельзя писать первым (тихий режим) — по нормализованному телефону.
+async function quietDigitsSet() {
+  try {
+    const rows = await listActiveQuiet();
+    return new Set(rows.map((q) => String(q.owner_phone || '').replace(/\D/g, '')).filter(Boolean));
+  } catch (_) {
+    return new Set();
+  }
+}
 
 const STATUS_RU = {
   new: 'не взята',
@@ -97,8 +107,11 @@ function buildEveningReminders(employees, tasks) {
 async function runEveningReminders() {
   const [employees, tasks] = await Promise.all([listEmployees(), listOpenTasksBrief()]);
   const reminders = buildEveningReminders(employees, tasks);
+  const quiet = await quietDigitsSet();
   let sent = 0;
   for (const r of reminders) {
+    // Тихий режим сотрудника — вечернее напоминание ему не шлём.
+    if (quiet.has(String(r.employee.contact || '').replace(/\D/g, ''))) continue;
     const ok = await notifier.deliver(r.employee.channel || 'whatsapp', r.employee.contact, r.text);
     if (ok) sent += 1;
   }
@@ -150,8 +163,11 @@ async function runMorningSummary() {
   }
   const [employees, tasks] = await Promise.all([listEmployees(), listOpenTasksBrief()]);
   const text = buildMorningSummary(tasks, employees);
+  const quiet = await quietDigitsSet();
   let sent = 0;
   for (const digits of targets) {
+    // Босс в тихом режиме — утреннюю сводку не шлём.
+    if (quiet.has(String(digits).replace(/\D/g, ''))) continue;
     const ok = await notifier.deliver('whatsapp', digits, text);
     if (ok) sent += 1;
   }

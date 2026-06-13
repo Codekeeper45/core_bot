@@ -239,6 +239,20 @@ async function initTables() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
+  // Тихий режим («не пиши мне первым»): пока активен — бот НЕ шлёт владельцу
+  // проактивных сообщений (расписания/будильники/проверки/сводки). На ответы в
+  // диалоге не влияет. quiet_until: NULL = бессрочно; иначе UTC-момент авто-снятия.
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS bot_quiet_state (
+      owner_channel VARCHAR(20)  NOT NULL,
+      owner_chat_id VARCHAR(255) NOT NULL,
+      owner_phone   VARCHAR(32)  NULL,
+      quiet_until   DATETIME     NULL,
+      updated_at    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (owner_channel, owner_chat_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
   // Миграция: добавить колонку сводки в уже существующие таблицы истории
   // (CREATE TABLE IF NOT EXISTS не добавит колонку к созданной ранее таблице).
   try {
@@ -1298,6 +1312,65 @@ async function incrementDailyCount(channel, chatId, type) {
   }
 }
 
+// ── Тихий режим («не пиши мне первым») ──────────────────────────────────────
+// untilUtc: UTC-строка 'YYYY-MM-DD HH:MM:SS' для авто-снятия или null = бессрочно.
+async function setQuiet(channel, chatId, phone, untilUtc) {
+  try {
+    await dbQuery(
+      `INSERT INTO bot_quiet_state (owner_channel, owner_chat_id, owner_phone, quiet_until)
+       VALUES (?,?,?,?)
+       ON DUPLICATE KEY UPDATE owner_phone = VALUES(owner_phone), quiet_until = VALUES(quiet_until)`,
+      [String(channel), String(chatId), phone || null, untilUtc || null]
+    );
+    return true;
+  } catch (err) {
+    console.error('[MySQL] setQuiet:', err.message);
+    throw dbError(err, 'setQuiet');
+  }
+}
+
+async function clearQuiet(channel, chatId) {
+  try {
+    const res = await dbQuery(
+      'DELETE FROM bot_quiet_state WHERE owner_channel = ? AND owner_chat_id = ?',
+      [String(channel), String(chatId)]
+    );
+    return res.affectedRows > 0;
+  } catch (err) {
+    console.error('[MySQL] clearQuiet:', err.message);
+    throw dbError(err, 'clearQuiet');
+  }
+}
+
+// Текущая запись тишины владельца (или null). active=true, если режим ещё действует.
+async function getQuiet(channel, chatId) {
+  try {
+    const rows = await dbQuery(
+      `SELECT owner_channel, owner_chat_id, owner_phone, quiet_until,
+              (quiet_until IS NULL OR quiet_until > UTC_TIMESTAMP()) AS active
+       FROM bot_quiet_state WHERE owner_channel = ? AND owner_chat_id = ? LIMIT 1`,
+      [String(channel), String(chatId)]
+    );
+    return rows.length ? rows[0] : null;
+  } catch (err) {
+    console.error('[MySQL] getQuiet:', err.message);
+    return null;
+  }
+}
+
+// Владельцы, у кого тихий режим ДЕЙСТВУЕТ прямо сейчас (для планировщиков).
+async function listActiveQuiet() {
+  try {
+    return await dbQuery(
+      `SELECT owner_channel, owner_chat_id, owner_phone FROM bot_quiet_state
+       WHERE quiet_until IS NULL OR quiet_until > UTC_TIMESTAMP()`
+    );
+  } catch (err) {
+    console.error('[MySQL] listActiveQuiet:', err.message);
+    return [];
+  }
+}
+
 
 module.exports = {
   getPool, dbQuery, withTransaction, initTables,
@@ -1318,6 +1391,7 @@ module.exports = {
   getEmployeePeriodStats,
   addFact, listFacts, deleteFact,
   addPersonalItem, listPersonalItems, setPersonalItemDone, deletePersonalItem,
+  setQuiet, clearQuiet, getQuiet, listActiveQuiet,
   // Оркестратор: задачи
   createTasksBulk, getTask, listTasksForProject, assignTask, markDispatched, updateTaskStatus,
   updateTaskFields,

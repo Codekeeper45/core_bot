@@ -13,7 +13,7 @@
 const {
   listEnabledSchedules, markScheduleRun, touchScheduleStatus, bumpScheduleFail,
   claimSchedule, setScheduleNextRun, setScheduleEnabled, updateSchedule,
-  logScheduleRun, cleanupScheduleRuns,
+  logScheduleRun, cleanupScheduleRuns, listActiveQuiet,
 } = require('./mysql');
 const { computeNextRunAt, computeNextFire, toUtc, fmtUtc } = require('../utils/scheduleTime');
 const config = require('../config');
@@ -262,8 +262,15 @@ async function tick(now = new Date()) {
     }
 
     const rows = await listEnabledSchedules();
+    // Тихий режим: владельцы, которым сейчас нельзя писать первым. Их созревшие
+    // расписания держим (next_run_at не трогаем) — сработают, когда режим снимут.
+    // Долгий простой recurring потом подчистит окно catch-up как обычно.
+    const quiet = new Set(
+      (await listActiveQuiet()).map((q) => `${q.owner_channel}|${q.owner_chat_id}`)
+    );
     for (const row of rows) {
       try {
+        if (quiet.has(`${row.owner_channel}|${row.owner_chat_id}`)) continue;
         if (!row.next_run_at) { await rearmSchedule(row, now); continue; }
         if (!isDue(row, now)) continue;
         // Атомарный claim: между снимком rows и этим местом расписание могли отменить

@@ -49,7 +49,7 @@ describe('tool authorization (BOSS_ONLY guard)', () => {
 describe('личные инструменты доступны сотруднику', () => {
   test('личные инструменты НЕ в BOSS_ONLY', () => {
     for (const name of ['manage_schedule', 'manage_notes', 'manage_todos',
-      'remember_fact', 'list_facts', 'forget_fact', 'web_search', 'render_diagram']) {
+      'remember_fact', 'list_facts', 'forget_fact', 'web_search', 'render_diagram', 'quiet_mode']) {
       assert.ok(!BOSS_ONLY.has(name), `${name} должен быть доступен сотруднику`);
       assert.ok(handlers.has(name), `${name} должен быть зарегистрирован`);
     }
