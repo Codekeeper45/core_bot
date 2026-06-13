@@ -1,6 +1,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const config = require('../config');
 
 // ───────────────────────────────────────────────────────────────────────────
 // Tool registry — автозагрузка инструментов.
@@ -71,18 +72,29 @@ function loadTools() {
 
 loadTools();
 
-// Инструменты режима БОССА: планирование, делегирование, управление штатом и
-// процессами, рассылки, чтение всех планов. Code-level гейт — НЕ полагаемся на
-// промпт: сотрудник (или посторонний) prompt-инъекцией не должен их вызвать.
-// update_task намеренно НЕ здесь: он доступен и сотруднику (для своей задачи —
-// внутренняя проверка владельца), и боссу (форс-режим над любой задачей).
+// Голосовые тулы прячем от LLM, когда озвучка выключена (config.TTS_ENABLED=false).
+// Файлы остаются — включить обратно = TTS_ENABLED=1. См. также гейт в executeToolCall.
+const VOICE_TOOLS = new Set(['say_voice', 'list_voices']);
+if (!config.TTS_ENABLED) {
+  for (let i = tools.length - 1; i >= 0; i--) {
+    if (VOICE_TOOLS.has(tools[i].function.name)) tools.splice(i, 1);
+  }
+}
+
+// Инструменты режима БОССА: ОРКЕСТРАЦИЯ — планирование, делегирование, управление
+// штатом и процессами, рассылки, чтение всех планов, отчёты успеваемости. Code-level
+// гейт — НЕ полагаемся на промпт: сотрудник (или посторонний) prompt-инъекцией не
+// должен их вызвать.
+// НЕ здесь (доступно и сотруднику, изолировано по chat_id владельца):
+//   - update_task (своя задача / босс — форс над любой),
+//   - manage_schedule (личный календарь/напоминания),
+//   - manage_notes, manage_todos (личные заметки/задачи),
+//   - remember_fact, list_facts, forget_fact (личная память),
+//   - web_search, render_diagram (личные ассистентские фичи).
 const BOSS_ONLY = new Set([
   'create_project', 'revise_project', 'dispatch_task', 'assign_task',
   'manage_employees', 'message_employee', 'project_status', 'manage_scheduler',
-  'manage_schedule', 'performance_report',
-  // Ассистентские фичи — личные инструменты владельца.
-  'render_diagram', 'web_search', 'remember_fact', 'list_facts', 'forget_fact',
-  'manage_notes', 'manage_todos', 'say_voice', 'list_voices',
+  'performance_report',
 ]);
 
 // Выполнить инструмент по имени. context = { channel, chatId, phone, clientName, role }.
@@ -90,6 +102,9 @@ async function executeToolCall(name, args, context = {}) {
   const handler = handlers.get(name);
   if (!handler) {
     return { success: false, message: `Unknown tool: ${name}` };
+  }
+  if (VOICE_TOOLS.has(name) && !config.TTS_ENABLED) {
+    return { success: false, message: 'Голосовые ответы временно отключены — отвечаю текстом.' };
   }
   if (BOSS_ONLY.has(name) && context.role && context.role !== 'boss') {
     console.warn(`[Tools] Отказ: '${name}' доступен только боссу, роль='${context.role}' (${context.channel}:${context.chatId})`);

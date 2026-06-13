@@ -14,7 +14,8 @@ const definition = {
     description:
       'Отчёт успеваемости команды за месяц (режим босса): по каждому сотруднику — сколько задач '
       + 'поставлено, выполнено (в процентах), с опозданием, просрочено сейчас, заблокировано, '
-      + 'среднее время выполнения. Код сам считает слабые места (weak_points) и готовит '
+      + 'среднее время выполнения. Код сам считает сильные (strong_points) и слабые места '
+      + '(weak_points) и готовит '
       + 'mermaid-график (suggested_chart_mermaid) — отправь его боссу через render_diagram. '
       + 'Используй на «как успеваемость за месяц?», «итоги месяца», «кто отстаёт?» и в '
       + 'ежемесячном авто-отчёте.',
@@ -65,6 +66,24 @@ function weakPoints(rows) {
   return out;
 }
 
+// Сильные стороны — зеркало weakPoints: отмечаем тех, кто реально тянет (нужна заметная
+// выборка задач, чтобы похвала была заслуженной, а не от одной выполненной задачи).
+function strongPoints(rows) {
+  const out = [];
+  for (const r of rows) {
+    if (r.assigned >= 3 && r.completion_pct !== null && r.completion_pct >= 90) {
+      out.push(`${r.name}: ${r.completion_pct}% выполнения (${r.assigned_done} из ${r.assigned}) — отличный результат`);
+    }
+    if (r.assigned_done >= 3 && r.done_late === 0 && r.open_overdue === 0 && r.blocked_now === 0) {
+      out.push(`${r.name}: всё сдано в срок, без просрочек и блокеров`);
+    }
+    if (r.assigned_done >= 3 && r.avg_completion_days !== null && r.avg_completion_days <= 1) {
+      out.push(`${r.name}: быстро закрывает задачи (в среднем ${r.avg_completion_days} дн)`);
+    }
+  }
+  return out;
+}
+
 // Горизонтальная диаграмма «% выполнения по сотрудникам» (mermaid pie не подходит
 // для сравнения людей; gantt/xychart в kroki ненадёжны → используем flowchart-карточки).
 function buildChart(rows, label) {
@@ -108,11 +127,13 @@ async function handler(args = {}) {
     return {
       success: true,
       month: label,
-      note: 'Все проценты и weak_points уже посчитаны — пересказывай, не пересчитывай. '
+      note: 'Все проценты, strong_points и weak_points уже посчитаны — пересказывай и сильные, '
+        + 'и слабые стороны, не пересчитывай. '
         + 'График: вызови render_diagram с suggested_chart_mermaid (если не null).',
       totals,
       employees: active,
       idle_employees: rows.filter((r) => !active.includes(r)).map((r) => r.name),
+      strong_points: strongPoints(rows),
       weak_points: weakPoints(rows),
       suggested_chart_mermaid: buildChart(rows, label),
     };
@@ -121,4 +142,4 @@ async function handler(args = {}) {
   }
 }
 
-module.exports = { definition, handler, _internals: { monthBoundsUtc, weakPoints, buildChart } };
+module.exports = { definition, handler, _internals: { monthBoundsUtc, weakPoints, strongPoints, buildChart } };

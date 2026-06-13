@@ -180,6 +180,7 @@ async function runAgent({ combinedMessage, channel, chatId, phone, clientName, r
             messages: buildLLMMessages(systemPrompt, convoSummary, messages),
             tools,
             tool_choice: 'auto',
+            max_tokens: config.LLM_MAX_TOKENS,
           }),
           { maxRetries: LLM_MAX_RETRIES, baseDelay: 2000 }
         );
@@ -259,6 +260,7 @@ async function runAgent({ combinedMessage, channel, chatId, phone, clientName, r
           model,
           messages: buildLLMMessages(systemPrompt, convoSummary, messages),
           tool_choice: 'none',
+          max_tokens: config.LLM_MAX_TOKENS,
         }),
         { maxRetries: 2, baseDelay: 1000 }
       );

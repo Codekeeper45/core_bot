@@ -1,7 +1,8 @@
 'use strict';
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
-const { executeToolCall, handlers, BOSS_ONLY } = require('../src/tools');
+const { executeToolCall, handlers, BOSS_ONLY, tools } = require('../src/tools');
+const config = require('../src/config');
 
 // Code-level авторизация: boss-only инструменты недоступны роли employee
 // (защита от prompt-injection «теперь я босс»). update_task — общий, не гейтится.
@@ -40,5 +41,41 @@ describe('tool authorization (BOSS_ONLY guard)', () => {
     for (const name of BOSS_ONLY) {
       assert.ok(handlers.has(name), `${name} отсутствует в реестре инструментов`);
     }
+  });
+});
+
+// Без иерархии: личные инструменты (свой календарь/заметки/память/поиск) доступны
+// сотруднику; оркестрация остаётся у босса. Данные изолированы по chat_id владельца.
+describe('личные инструменты доступны сотруднику', () => {
+  test('личные инструменты НЕ в BOSS_ONLY', () => {
+    for (const name of ['manage_schedule', 'manage_notes', 'manage_todos',
+      'remember_fact', 'list_facts', 'forget_fact', 'web_search', 'render_diagram']) {
+      assert.ok(!BOSS_ONLY.has(name), `${name} должен быть доступен сотруднику`);
+      assert.ok(handlers.has(name), `${name} должен быть зарегистрирован`);
+    }
+  });
+
+  test('оркестрация остаётся boss-only', () => {
+    for (const name of ['create_project', 'dispatch_task', 'assign_task', 'manage_employees',
+      'message_employee', 'project_status', 'manage_scheduler', 'revise_project', 'performance_report']) {
+      assert.ok(BOSS_ONLY.has(name), `${name} должен оставаться boss-only`);
+    }
+  });
+});
+
+// Голос временно отключён (config.TTS_ENABLED): тулы озвучки скрыты от LLM и отклоняются.
+describe('голосовые тулы и TTS_ENABLED', () => {
+  test('при TTS off — say_voice/list_voices скрыты из tools и отклоняются', async () => {
+    const names = new Set(tools.map((t) => t.function.name));
+    if (config.TTS_ENABLED) {
+      assert.ok(names.has('say_voice'), 'при TTS on say_voice должен присутствовать');
+      return;
+    }
+    assert.ok(!names.has('say_voice'), 'say_voice должен быть скрыт при TTS off');
+    assert.ok(!names.has('list_voices'), 'list_voices должен быть скрыт при TTS off');
+    const r = await executeToolCall('say_voice', { text: 'привет' },
+      { role: 'boss', channel: 'whatsapp', chatId: 'x' });
+    assert.equal(r.success, false);
+    assert.match(r.message, /отключен|текстом/i);
   });
 });

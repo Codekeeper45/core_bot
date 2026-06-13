@@ -100,6 +100,8 @@ async function summarizeIfNeeded({ messages, summary, openai, model }) {
         { role: 'user', content: userContent },
       ],
       tool_choice: 'none',
+      // Сводка короткая — не даём провайдеру резервировать полный лимит модели (→402).
+      max_tokens: Math.min(config.LLM_MAX_TOKENS, 1024),
     });
     const newSummary = resp.choices && resp.choices[0]
       && resp.choices[0].message && resp.choices[0].message.content

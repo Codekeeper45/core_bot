@@ -1,6 +1,6 @@
 'use strict';
-// Личные заметки и задачи босса (отдельно от orch_tasks для сотрудников). Лёгкий список.
-// Режим босса (BOSS_ONLY). due у задач — в локальном времени компании (UTC+5).
+// Личные заметки и задачи ПОЛЬЗОВАТЕЛЯ (босса ИЛИ сотрудника) — отдельно от orch_tasks.
+// Изолированы по (channel, chatId): каждый видит только своё. due — локальное время (UTC+5).
 const {
   addPersonalItem, listPersonalItems, setPersonalItemDone, deletePersonalItem,
 } = require('../services/mysql');
@@ -27,7 +27,7 @@ const notes = {
     function: {
       name: 'manage_notes',
       description:
-        'Личные ЗАМЕТКИ босса (идеи, мысли, что не забыть). Действия: add (text), list, delete (id). '
+        'Личные ЗАМЕТКИ пользователя (идеи, мысли, что не забыть). Действия: add (text), list, delete (id). '
         + 'Это памятки для себя, НЕ задачи сотрудникам.',
       parameters: {
         type: 'object',
@@ -67,10 +67,10 @@ const todos = {
     function: {
       name: 'manage_todos',
       description:
-        'Личные ЗАДАЧИ босса (его собственный to-do, НЕ задачи сотрудникам — для тех есть '
+        'Личные ЗАДАЧИ пользователя (его собственный to-do, НЕ задачи сотрудникам — для тех есть '
         + 'create_project/assign_task). Действия: add (text, due?), list, done (id), delete (id). '
         + 'due — срок в ЛОКАЛЬНОМ времени (UTC+5), формат YYYY-MM-DD HH:MM. Если у задачи есть срок, '
-        + 'предложи боссу поставить напоминание через manage_schedule.',
+        + 'предложи поставить напоминание через manage_schedule.',
       parameters: {
         type: 'object',
         properties: {

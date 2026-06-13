@@ -27,6 +27,11 @@ module.exports = {
   DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY || '',
   DEEPSEEK_BASE_URL: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
   DEEPSEEK_MODEL: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
+  // Потолок длины ответа LLM (output tokens). ВАЖНО: без явного лимита OpenRouter
+  // резервирует полный лимит модели (напр. 65536) и требует баланс под него → 402
+  // «requires more credits». Явный потолок снимает 402 и удешевляет ответы. 8192 с
+  // запасом хватает на длинные tool-call'ы (большой create_project). Переопределяется.
+  LLM_MAX_TOKENS: parseInt(process.env.LLM_MAX_TOKENS || '8192', 10),
 
   // STT (распознавание речи) и Vision (распознавание картинок) через OpenRouter.
   // У каждого есть primary + fallback: если primary падает после ретраев —
@@ -111,8 +116,9 @@ module.exports = {
   CONTEXT_SUMMARY_CHAR_LIMIT: 50000,
   CONTEXT_KEEP_RECENT_MSGS: 20,
   AI_MAX_ITERATIONS: 20,
-  // Авто-эхо вызовов инструментов в чат (видно, что делает бот). Выкл: ECHO_TOOL_CALLS=0
-  ECHO_TOOL_CALLS: process.env.ECHO_TOOL_CALLS !== '0' && process.env.ECHO_TOOL_CALLS !== 'false',
+  // Авто-эхо вызовов инструментов в чат («Смотрю список…» перед тулом). По умолчанию
+  // ВЫКЛ — раздражает в проде. Вкл: ECHO_TOOL_CALLS=1.
+  ECHO_TOOL_CALLS: process.env.ECHO_TOOL_CALLS === '1' || process.env.ECHO_TOOL_CALLS === 'true',
   // Обслуживать только сотрудников и боссов (BOSS_CONTACTS), прочих игнорировать.
   // Выкл: RESTRICT_TO_KNOWN_SENDERS=0. ВНИМАНИЕ: при включённом — задайте BOSS_CONTACTS.
   RESTRICT_TO_KNOWN_SENDERS: process.env.RESTRICT_TO_KNOWN_SENDERS !== '0' && process.env.RESTRICT_TO_KNOWN_SENDERS !== 'false',
@@ -154,8 +160,10 @@ module.exports = {
   GOOGLE_GENAI_API_KEYS: (process.env.GOOGLE_GENAI_API_KEYS || '').split(',').map((s) => s.trim()).filter(Boolean),
   TTS_MODEL: process.env.TTS_MODEL || 'gemini-3.1-flash-tts-preview',
   TTS_VOICE: process.env.TTS_VOICE || 'Leda',
-  // Озвучивать ответ голосом, если входящее было голосом (и явная просьба). Выкл: TTS_ENABLED=0.
-  TTS_ENABLED: process.env.TTS_ENABLED !== '0' && process.env.TTS_ENABLED !== 'false',
+  // Голосовые ОТВЕТЫ бота (TTS). По умолчанию ВЫКЛ (босс просил только текст). Когда
+  // выключено: нет авто-голоса и тулы say_voice/list_voices скрыты от LLM. Вкл: TTS_ENABLED=1.
+  // На входящие голосовые (STT, распознавание) это НЕ влияет.
+  TTS_ENABLED: process.env.TTS_ENABLED === '1' || process.env.TTS_ENABLED === 'true',
   // Fallback-TTS через OpenRouter (если все Google-ключи не ответили). Использует
   // OPENROUTER_API_KEY. Модель/голос можно переопределить (id зависит от каталога OpenRouter).
   OPENROUTER_TTS_MODEL: process.env.OPENROUTER_TTS_MODEL || 'google/gemini-3.1-flash-tts-preview',

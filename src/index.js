@@ -44,7 +44,13 @@ const { transcribeVoice } = require('./media/voice');
 const { analyzeImages, checkDailyImageLimit, incrementDailyImageCount } = require('./media/image');
 const { processDocument } = require('./media/document');
 
-const { runAgent } = require('./agent/agent');
+const { runAgent, _internals: agentInternals } = require('./agent/agent');
+
+// Заглушки агента (сбой LLM / пустой ответ): по расписанию их не доставляем.
+const FALLBACK_REPLIES = new Set([agentInternals.FALLBACK_AI, agentInternals.FALLBACK_BUSY]);
+function isFallbackReply(text) {
+  return FALLBACK_REPLIES.has(String(text || '').trim());
+}
 
 const { sanitizeReply } = require('./security/sanitizer');
 
@@ -313,6 +319,11 @@ async function deliverInstruction({ channel, chatId, phone, clientName, instruct
   if (!locked) return { ok: false, reason: 'lock_busy' }; // босс сейчас пишет — повторим на след. tick
 
   try {
+    // Роль владельца расписания вычисляем по факту (босс vs сотрудник): личное
+    // расписание сотрудника должно исполняться под ЕГО ролью, без боссовых тулов.
+    // Неизвестный отправитель (например удалён из реестра) → employee, без эскалации.
+    const access = await isAllowedSender(channel, chatId, phone);
+    const role = access.role || 'employee';
     const combinedMessage = `${systemTimestamp()}\n${instruction}`;
     let reply;
     try {
@@ -321,15 +332,20 @@ async function deliverInstruction({ channel, chatId, phone, clientName, instruct
         channel,
         chatId,
         phone,
-        clientName: clientName || 'boss',
-        role: 'boss',
+        clientName: clientName || (role === 'boss' ? 'boss' : ''),
+        role,
         emit: (text) => sendReply(channel, chatId, text),
       });
     } catch (err) {
       console.error('[Deliver] Agent error:', err.message);
       return { ok: false, reason: 'agent_error' };
     }
-    // ИИ сам решает, есть ли что сообщить (промпт). Пустой ответ — молчим.
+    // ИИ сам решает, есть ли что сообщить (промпт). Пустой ответ — молчим. Заглушки
+    // (FALLBACK_* при кратком сбое LLM) по расписанию НЕ шлём — иначе босс получает
+    // «Наши системы загружены» по таймеру. Считаем это мягким сбоем → ретрай.
+    if (reply && isFallbackReply(reply)) {
+      return { ok: false, reason: 'agent_error' };
+    }
     if (reply) {
       const clean = sanitizeReply(reply);
       if (clean) await sendReply(channel, chatId, clean);
