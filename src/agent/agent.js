@@ -95,7 +95,16 @@ async function llmCreateWithFallback(makeParams, retryOpts, client) {
   for (let i = 0; i < chain.length; i++) {
     const { client: oa, model, label } = chain[i];
     try {
-      return await withRetry(() => oa.chat.completions.create(makeParams(model)), retryOpts);
+      const resp = await withRetry(() => oa.chat.completions.create(makeParams(model)), retryOpts);
+      // Некоторые провайдеры (особенно бесплатные модели OpenRouter) на ошибку/лимит
+      // отдают HTTP 200 с телом без choices (часто { error: {...} }). SDK это не бросает,
+      // и дальше `resp.choices[0]` падал бы в unexpected_error. Считаем такой ответ сбоем
+      // провайдера → ретрай/переход к следующему, как при обычной ошибке API.
+      if (!resp || !Array.isArray(resp.choices) || resp.choices.length === 0) {
+        const reason = resp && resp.error && resp.error.message ? resp.error.message : 'ответ без choices';
+        throw new Error(`провайдер вернул некорректный ответ (${reason})`);
+      }
+      return resp;
     } catch (err) {
       lastErr = err;
       const more = i < chain.length - 1;
@@ -264,7 +273,7 @@ async function runAgent({ combinedMessage, channel, chatId, phone, clientName, r
         }),
         { maxRetries: 2, baseDelay: 1000 }
       );
-      replyText = fallbackResp.choices[0]?.message?.content || '';
+      replyText = fallbackResp?.choices?.[0]?.message?.content || '';
     } catch (_) {}
     if (!replyText) {
       agentMetrics.empty_reply++;
