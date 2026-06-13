@@ -37,7 +37,7 @@ const { acquireLock, enqueue, releaseLockAndProcessQueue } = require('./middlewa
 const { checkRateLimit } = require('./middleware/rateLimit');
 const { isDuplicate } = require('./middleware/deduplication');
 const { isAllowedSender } = require('./middleware/access');
-const { clearHistory, initTables } = require('./services/mysql');
+const { clearHistory, initTables, setQuiet, clearQuiet } = require('./services/mysql');
 const { startTypingLoop, stopTypingLoop } = require('./middleware/typing');
 
 const { transcribeVoice } = require('./media/voice');
@@ -164,6 +164,39 @@ async function processMessage(rawPayload) {
     await sendReply(channel, chat_id,
       'История диалога очищена. Можно ставить новую задачу с чистого листа. '
       + '(Планы и задачи сохранены.)');
+    return;
+  }
+
+  // Тихий режим — «не пиши мне первым». ПРЯМЫЕ команды (без участия ИИ — работают
+  // даже когда LLM недоступен). /stop [минуты] — замолчать (проактивные напоминания/
+  // проверки/сводки молчат, на сообщения бот отвечает); /start — снова на связи.
+  // Персонально по (channel, chat_id) — каждый глушит только себя.
+  const STOP_CMDS = new Set(['/stop', '/стоп', '/quiet', '/mute', '/тихо']);
+  const START_CMDS = new Set(['/start', '/старт', '/resume', '/unmute', '/продолжай']);
+  const cmdWord = rawCmd.split(/\s+/)[0];
+  if (STOP_CMDS.has(cmdWord)) {
+    const m = parseInt(rawCmd.split(/\s+/)[1], 10);
+    const digits = String(phone || '').replace(/\D/g, '') || null;
+    let untilUtc = null;
+    if (Number.isInteger(m) && m > 0) {
+      const mins = Math.min(m, 7 * 24 * 60); // потолок — неделя
+      untilUtc = new Date(Date.now() + mins * 60000).toISOString().slice(0, 19).replace('T', ' ');
+    }
+    try { await setQuiet(channel, chat_id, digits, untilUtc); } catch (_) {}
+    await sendReply(channel, chat_id,
+      (untilUtc
+        ? `Тихий режим включён на ${Math.min(m, 7 * 24 * 60)} мин. `
+        : 'Тихий режим включён. ')
+      + 'Первым не пишу — напоминания, проверки и сводки молчат. На сообщения отвечаю как обычно. '
+      + 'Команда /start — снять.');
+    return;
+  }
+  if (START_CMDS.has(cmdWord)) {
+    let had = false;
+    try { had = await clearQuiet(channel, chat_id); } catch (_) {}
+    await sendReply(channel, chat_id,
+      had ? 'Тихий режим снят — снова пишу по расписанию.'
+        : 'Тихий режим и так был выключен — пишу по расписанию.');
     return;
   }
 
