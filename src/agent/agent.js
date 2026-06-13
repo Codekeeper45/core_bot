@@ -8,8 +8,36 @@ const notifier = require('../services/notifier');
 const { withRetry } = require('../utils/retry');
 const { formatToolEcho } = require('../utils/toolEcho');
 
-const FALLBACK_AI = 'Произошла ошибка при обработке сообщения. Пожалуйста, повторите запрос чуть позже.';
-const FALLBACK_BUSY = 'Наши системы немного загружены. Мы вернёмся к вам в ближайшее время. Спасибо за терпение!';
+// Честные сообщения об ошибках: бот обслуживает только своих (босс/сотрудники),
+// поэтому говорим прямо, что и где сломалось и что делать, а не «системы загружены».
+const FALLBACK_NO_CREDITS = '⚠️ Сбой ИИ: на балансе OpenRouter недостаточно средств (ошибка 402). Пополните баланс — и я снова в строю.';
+const FALLBACK_MODEL_REJECTED = '⚠️ Сбой ИИ: модель отклонила запрос (ошибка 400). Скорее всего выбранная модель не поддерживает инструменты — поставьте в OPENROUTER_MODEL модель с function-calling.';
+const FALLBACK_RATE_LIMIT = '⚠️ Сбой ИИ: модель ограничила частоту запросов (429). Подождите минуту или смените модель.';
+const FALLBACK_MODEL_EMPTY = '⚠️ Сбой ИИ: модель вернула пустой ответ — похоже, она не подходит (нет поддержки инструментов). Смените модель в OPENROUTER_MODEL.';
+const FALLBACK_NETWORK = '⚠️ Сбой ИИ: нет связи с провайдером модели (таймаут/сеть). Повторите чуть позже.';
+const FALLBACK_NO_PROVIDER = '⚠️ Сбой ИИ: не настроен провайдер модели (нет OPENROUTER_API_KEY / DEEPSEEK_API_KEY). Задайте ключ в .env.';
+const FALLBACK_LLM_GENERIC = '⚠️ Сбой ИИ: провайдер модели не отвечает. Проверьте модель (OPENROUTER_MODEL) и баланс OpenRouter — детали в логах сервера.';
+const FALLBACK_INTERNAL = '⚠️ Внутренняя ошибка бота — не смог обработать сообщение. Детали в логах сервера.';
+// Совместимость со старыми ссылками + детектор «это аварийный ответ» (для планировщика).
+const FALLBACK_AI = FALLBACK_INTERNAL;
+const FALLBACK_BUSY = FALLBACK_LLM_GENERIC;
+const FALLBACK_MESSAGES = new Set([
+  FALLBACK_NO_CREDITS, FALLBACK_MODEL_REJECTED, FALLBACK_RATE_LIMIT, FALLBACK_MODEL_EMPTY,
+  FALLBACK_NETWORK, FALLBACK_NO_PROVIDER, FALLBACK_LLM_GENERIC, FALLBACK_INTERNAL,
+]);
+
+// Превратить ошибку провайдера в честное сообщение по её сути.
+function classifyLlmError(message) {
+  const m = String(message || '');
+  if (/no llm provider configured/i.test(m)) return FALLBACK_NO_PROVIDER;
+  if (/\b402\b|insufficient|credit|afford|balance|more credits/i.test(m)) return FALLBACK_NO_CREDITS;
+  if (/\b429\b|rate.?limit|too many requests/i.test(m)) return FALLBACK_RATE_LIMIT;
+  if (/некорректный ответ|no choices|без choices|empty (response|reply)/i.test(m)) return FALLBACK_MODEL_EMPTY;
+  if (/\b400\b|provider returned error|unsupported|invalid request|not support|no endpoints/i.test(m)) return FALLBACK_MODEL_REJECTED;
+  if (/timeout|etimedout|econnreset|enotfound|econnrefused|network|socket|fetch failed|ehostunreach/i.test(m)) return FALLBACK_NETWORK;
+  return FALLBACK_LLM_GENERIC;
+}
+
 const LLM_MAX_RETRIES = 3; // 3 retries = 4 total attempts (first retry after 20s for 429)
 
 // Observability: agent run outcomes. Every non-success outcome = a degraded
@@ -196,16 +224,17 @@ async function runAgent({ combinedMessage, channel, chatId, phone, clientName, r
       } catch (llmErr) {
         agentMetrics.llm_error++;
         console.error('[Agent] LLM error after retries:', llmErr.message);
+        const honest = classifyLlmError(llmErr.message);
         // After all retries failed — alert a human operator if MANAGER_* configured.
         try {
           await notifier.alertManager(
-            `⚠️ Сбой AI: не удалось обработать сообщение (${context?.channel || '?'}:${context?.chatId || '?'}). Нужен ручной ответ.`
+            `⚠️ Сбой AI (${context?.channel || '?'}:${context?.chatId || '?'}): ${llmErr.message}`
           );
         } catch (notifyErr) {
           console.error('[Agent] alertManager error:', notifyErr.message);
         }
-        await persistErrorHistory(channel, chatId, messages, convoSummary, FALLBACK_BUSY);
-        return FALLBACK_BUSY;
+        await persistErrorHistory(channel, chatId, messages, convoSummary, honest);
+        return honest;
       }
 
       const choice = response.choices[0];
@@ -263,6 +292,7 @@ async function runAgent({ combinedMessage, channel, chatId, phone, clientName, r
   if (!replyText) {
     agentMetrics.loop_exhausted++;
     console.warn('[Agent] No reply after loop — making final fallback call');
+    let _emptyReplyErr = null;
     try {
       const fallbackResp = await llmCreateWithFallback(
         (model) => ({
@@ -274,11 +304,14 @@ async function runAgent({ combinedMessage, channel, chatId, phone, clientName, r
         { maxRetries: 2, baseDelay: 1000 }
       );
       replyText = fallbackResp?.choices?.[0]?.message?.content || '';
-    } catch (_) {}
+    } catch (fbErr) { replyText = ''; _emptyReplyErr = fbErr; }
     if (!replyText) {
       agentMetrics.empty_reply++;
-      await persistErrorHistory(channel, chatId, messages, convoSummary, FALLBACK_AI);
-      return FALLBACK_AI;
+      // Честно: если финальный вызов упал (402/400/сеть) — назвать причину; если просто
+      // вернул пусто — значит модель не дала текст (не подходит).
+      const honest = _emptyReplyErr ? classifyLlmError(_emptyReplyErr.message) : FALLBACK_MODEL_EMPTY;
+      await persistErrorHistory(channel, chatId, messages, convoSummary, honest);
+      return honest;
     }
     agentMetrics.fallback_recovered++;
     // Fallback-ответ должен попасть в историю: цикл его не push'ил (вышли без
@@ -317,5 +350,10 @@ async function runAgent({ combinedMessage, channel, chatId, phone, clientName, r
 
 module.exports = {
   runAgent, onToolCall, getAgentMetrics, llmCreateWithFallback,
-  _internals: { dropDanglingToolTail, persistErrorHistory, FALLBACK_AI, FALLBACK_BUSY },
+  _internals: {
+    dropDanglingToolTail, persistErrorHistory, classifyLlmError, FALLBACK_MESSAGES,
+    FALLBACK_AI, FALLBACK_BUSY, FALLBACK_NO_CREDITS, FALLBACK_MODEL_REJECTED,
+    FALLBACK_RATE_LIMIT, FALLBACK_MODEL_EMPTY, FALLBACK_NETWORK, FALLBACK_NO_PROVIDER,
+    FALLBACK_LLM_GENERIC, FALLBACK_INTERNAL,
+  },
 };

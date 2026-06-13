@@ -46,8 +46,10 @@ const { processDocument } = require('./media/document');
 
 const { runAgent, _internals: agentInternals } = require('./agent/agent');
 
-// Заглушки агента (сбой LLM / пустой ответ): по расписанию их не доставляем.
-const FALLBACK_REPLIES = new Set([agentInternals.FALLBACK_AI, agentInternals.FALLBACK_BUSY]);
+// Аварийные ответы агента (любой сбой LLM / пустой ответ / внутренняя ошибка):
+// по расписанию их не доставляем (иначе босс ловит ошибку по таймеру), но в
+// интерактивном чате — показываем честно. Набор всех таких сообщений — из agent.
+const FALLBACK_REPLIES = agentInternals.FALLBACK_MESSAGES || new Set();
 function isFallbackReply(text) {
   return FALLBACK_REPLIES.has(String(text || '').trim());
 }
@@ -297,7 +299,8 @@ async function processMessage(rawPayload) {
       });
     } catch (err) {
       console.error('[Main] Agent error:', err.message);
-      replyText = 'Произошла ошибка при обработке сообщения. Пожалуйста, повторите запрос чуть позже.';
+      // Честно: называем причину по сути ошибки (баланс/модель/сеть), а не «повторите позже».
+      replyText = agentInternals.classifyLlmError(err.message);
     }
 
     // Шаг 10: Остановить typing, отправить ответ
