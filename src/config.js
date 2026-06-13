@@ -29,9 +29,11 @@ module.exports = {
   DEEPSEEK_MODEL: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
   // Потолок длины ответа LLM (output tokens). ВАЖНО: без явного лимита OpenRouter
   // резервирует полный лимит модели (напр. 65536) и требует баланс под него → 402
-  // «requires more credits». Явный потолок снимает 402 и удешевляет ответы. 8192 с
-  // запасом хватает на длинные tool-call'ы (большой create_project). Переопределяется.
-  LLM_MAX_TOKENS: parseInt(process.env.LLM_MAX_TOKENS || '8192', 10),
+  // «requires more credits». Явный потолок снимает 402 и удешевляет ответы. 32768 —
+  // большой запас на длинные планы/отчёты; всё ещё вдвое меньше 65536. Переопределяется.
+  // ПРИМЕЧАНИЕ: при почти пустом балансе OpenRouter даже этот лимит может дать 402 —
+  // тогда нужно пополнить баланс, а не уменьшать лимит.
+  LLM_MAX_TOKENS: parseInt(process.env.LLM_MAX_TOKENS || '32768', 10),
 
   // STT (распознавание речи) и Vision (распознавание картинок) через OpenRouter.
   // У каждого есть primary + fallback: если primary падает после ретраев —
