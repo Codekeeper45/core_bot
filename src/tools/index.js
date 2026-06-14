@@ -81,20 +81,17 @@ if (!config.TTS_ENABLED) {
   }
 }
 
-// Инструменты режима БОССА: ОРКЕСТРАЦИЯ — планирование, делегирование, управление
-// штатом и процессами, рассылки, чтение всех планов, отчёты успеваемости. Code-level
-// гейт — НЕ полагаемся на промпт: сотрудник (или посторонний) prompt-инъекцией не
-// должен их вызвать.
-// НЕ здесь (доступно и сотруднику, изолировано по chat_id владельца):
-//   - update_task (своя задача / босс — форс над любой),
-//   - manage_schedule (личный календарь/напоминания),
-//   - manage_notes, manage_todos (личные заметки/задачи),
-//   - remember_fact, list_facts, forget_fact (личная память),
-//   - web_search, render_diagram (личные ассистентские фичи).
+// Инструменты ТОЛЬКО для босса. По решению «убрать иерархию» оркестрация (планы,
+// задачи, делегирование, чтение всех планов, рассылки) доступна ВСЕМ сотрудникам —
+// поэтому здесь остаётся лишь то, что реально опасно дать каждому:
+//   - manage_employees — добавить/удалить людей из общего реестра,
+//   - performance_report — KPI/успеваемость по всем сотрудникам,
+//   - manage_scheduler — общефирменные утренняя/вечерняя рассылки.
+// Всё остальное (create_project, revise_project, assign_task, dispatch_task,
+// project_status, message_employee, update_task + личные инструменты) — доступно
+// и сотруднику. Code-level гейт: prompt-инъекция не обойдёт.
 const BOSS_ONLY = new Set([
-  'create_project', 'revise_project', 'dispatch_task', 'assign_task',
-  'manage_employees', 'message_employee', 'project_status', 'manage_scheduler',
-  'performance_report',
+  'manage_employees', 'performance_report', 'manage_scheduler',
 ]);
 
 // Выполнить инструмент по имени. context = { channel, chatId, phone, clientName, role }.

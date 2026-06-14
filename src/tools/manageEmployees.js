@@ -1,5 +1,5 @@
 'use strict';
-const { addEmployee, updateEmployee, deactivateEmployee, findEmployees } = require('../services/mysql');
+const { addEmployee, updateEmployee, deactivateEmployee, findEmployees, findEmployeeByContact } = require('../services/mysql');
 const { normalizePhone } = require('../services/employeeImport');
 
 const definition = {
@@ -51,16 +51,28 @@ async function handler(args) {
     const list = Array.isArray(args.employees) ? args.employees : [];
     if (!list.length) return { success: false, message: 'Пустой список employees.' };
     const added = [];
+    const skipped = [];
     for (const e of list) {
       if (!e.name) continue;
       const contact = normalizePhone(e.phone);
+      // Дубликат номера — не молчим: говорим, у кого он уже есть.
+      if (contact) {
+        const dup = await findEmployeeByContact('whatsapp', contact);
+        if (dup) { skipped.push({ name: e.name, contact, reason: `номер уже у «${dup.name}» (#${dup.id})` }); continue; }
+      }
       const id = await addEmployee({
         name: e.name, roles: e.roles || 'сотрудник', skills: e.skills || null,
         channel: contact ? 'whatsapp' : null, contact,
       });
       if (id) added.push({ id, name: e.name, contact: contact || null });
+      else skipped.push({ name: e.name, contact: contact || null, reason: 'не удалось сохранить (возможно, дубль номера)' });
     }
-    return { success: true, action: 'add', added_count: added.length, added };
+    const out = { success: added.length > 0 || skipped.length === 0, action: 'add', added_count: added.length, added };
+    if (skipped.length) {
+      out.skipped = skipped;
+      if (!added.length) out.message = 'Никто не добавлен: ' + skipped.map((s) => `${s.name} — ${s.reason}`).join('; ');
+    }
+    return out;
   }
 
   if (args.action === 'update' || args.action === 'remove') {
@@ -85,6 +97,12 @@ async function handler(args) {
     if (f.skills !== undefined) fields.skills = f.skills;
     if (f.phone !== undefined) {
       const c = normalizePhone(f.phone);
+      if (c) {
+        const dup = await findEmployeeByContact('whatsapp', c);
+        if (dup && dup.id !== emp.id) {
+          return { success: false, message: `Этот номер уже у «${dup.name}» (#${dup.id}). Сначала освободи его или укажи другой.` };
+        }
+      }
       fields.contact = c;
       fields.channel = c ? 'whatsapp' : null;
     }

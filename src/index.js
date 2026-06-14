@@ -37,7 +37,7 @@ const { acquireLock, enqueue, releaseLockAndProcessQueue } = require('./middlewa
 const { checkRateLimit } = require('./middleware/rateLimit');
 const { isDuplicate } = require('./middleware/deduplication');
 const { isAllowedSender } = require('./middleware/access');
-const { clearHistory, initTables, setQuiet, clearQuiet } = require('./services/mysql');
+const { clearHistory, initTables, setQuiet, clearQuiet, getQuiet } = require('./services/mysql');
 const { startTypingLoop, stopTypingLoop } = require('./middleware/typing');
 
 const { transcribeVoice } = require('./media/voice');
@@ -199,6 +199,22 @@ async function processMessage(rawPayload) {
     await sendReply(channel, chat_id,
       had ? 'Тихий режим снят — снова пишу по расписанию.'
         : 'Тихий режим и так был выключен — пишу по расписанию.');
+    return;
+  }
+  // /status — прямая команда: текущее состояние тихого режима (без участия ИИ).
+  const STATUS_CMDS = new Set(['/status', '/статус']);
+  if (STATUS_CMDS.has(cmdWord)) {
+    let q = null;
+    try { q = await getQuiet(channel, chat_id); } catch (_) {}
+    const active = !!(q && Number(q.active));
+    let msg;
+    if (!active) msg = 'Тихий режим: ВЫКЛ — пишу по расписанию. Команды: /stop — замолчать, /stop 60 — на 60 мин.';
+    else if (q.quiet_until) {
+      const local = new Date(new Date(String(q.quiet_until).replace(' ', 'T') + 'Z').getTime() + config.SCHEDULER_TZ_OFFSET_MIN * 60000)
+        .toISOString().slice(0, 16).replace('T', ' ');
+      msg = `Тихий режим: ВКЛ до ${local}. Первым не пишу. /start — снять сейчас.`;
+    } else msg = 'Тихий режим: ВКЛ (бессрочно). Первым не пишу. /start — снять.';
+    await sendReply(channel, chat_id, msg);
     return;
   }
 

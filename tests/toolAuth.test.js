@@ -7,10 +7,8 @@ const config = require('../src/config');
 // Code-level авторизация: boss-only инструменты недоступны роли employee
 // (защита от prompt-injection «теперь я босс»). update_task — общий, не гейтится.
 describe('tool authorization (BOSS_ONLY guard)', () => {
-  test('BOSS_ONLY содержит управляющие инструменты, но не update_task', () => {
-    for (const name of ['create_project', 'dispatch_task', 'assign_task',
-      'manage_employees', 'message_employee', 'project_status', 'revise_project',
-      'manage_scheduler']) {
+  test('BOSS_ONLY — только штат, отчёты и общефирменный планировщик', () => {
+    for (const name of ['manage_employees', 'performance_report', 'manage_scheduler']) {
       assert.ok(BOSS_ONLY.has(name), `${name} должен быть boss-only`);
     }
     assert.ok(!BOSS_ONLY.has('update_task'), 'update_task — общий инструмент');
@@ -44,20 +42,21 @@ describe('tool authorization (BOSS_ONLY guard)', () => {
   });
 });
 
-// Без иерархии: личные инструменты (свой календарь/заметки/память/поиск) доступны
-// сотруднику; оркестрация остаётся у босса. Данные изолированы по chat_id владельца.
-describe('личные инструменты доступны сотруднику', () => {
-  test('личные инструменты НЕ в BOSS_ONLY', () => {
-    for (const name of ['manage_schedule', 'manage_notes', 'manage_todos',
+// Без иерархии: оркестрация (планы/задачи/делегирование/чтение планов/рассылки) и
+// личные инструменты доступны и сотруднику. Только штат и отчёты — у босса.
+describe('без иерархии: доступ сотрудника', () => {
+  test('оркестрация + личные инструменты НЕ в BOSS_ONLY (доступны сотруднику)', () => {
+    for (const name of ['create_project', 'revise_project', 'assign_task', 'dispatch_task',
+      'project_status', 'message_employee', 'update_task',
+      'manage_schedule', 'manage_notes', 'manage_todos',
       'remember_fact', 'list_facts', 'forget_fact', 'web_search', 'render_diagram']) {
       assert.ok(!BOSS_ONLY.has(name), `${name} должен быть доступен сотруднику`);
       assert.ok(handlers.has(name), `${name} должен быть зарегистрирован`);
     }
   });
 
-  test('оркестрация остаётся boss-only', () => {
-    for (const name of ['create_project', 'dispatch_task', 'assign_task', 'manage_employees',
-      'message_employee', 'project_status', 'manage_scheduler', 'revise_project', 'performance_report']) {
+  test('штат и отчёты успеваемости остаются boss-only', () => {
+    for (const name of ['manage_employees', 'performance_report', 'manage_scheduler']) {
       assert.ok(BOSS_ONLY.has(name), `${name} должен оставаться boss-only`);
     }
   });
