@@ -47,7 +47,7 @@ describe('tool authorization (BOSS_ONLY guard)', () => {
 describe('без иерархии: доступ сотрудника', () => {
   test('оркестрация + личные инструменты НЕ в BOSS_ONLY (доступны сотруднику)', () => {
     for (const name of ['create_project', 'revise_project', 'assign_task', 'dispatch_task',
-      'project_status', 'message_employee', 'update_task',
+      'project_status', 'message_employee', 'update_task', 'forward_message',
       'manage_schedule', 'manage_notes', 'manage_todos',
       'remember_fact', 'list_facts', 'forget_fact', 'web_search', 'render_diagram']) {
       assert.ok(!BOSS_ONLY.has(name), `${name} должен быть доступен сотруднику`);

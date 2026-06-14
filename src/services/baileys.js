@@ -181,6 +181,13 @@ class BaileysService extends EventEmitter {
     return true;
   }
 
+  // Документ/файл-вложение. buffer — содержимое файла.
+  async sendDocument(jid, buffer, fileName = 'файл', mimetype = 'application/octet-stream') {
+    if (!this.sock) throw new Error('[Baileys] Сокет не инициализирован');
+    await this.sock.sendMessage(jid, { document: buffer, fileName, mimetype });
+    return true;
+  }
+
   async sendTyping(jid) {
     if (!this.sock) return;
     try {

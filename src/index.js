@@ -232,13 +232,28 @@ async function processMessage(rawPayload) {
   let messageContent = n.message || '';
   let imgRef = null;
   let baileysMediaObj = null;
+  // Дескриптор входящего медиа для пересылки (forward_message): ссылки/идентификаторы,
+  // по которым медиа можно ПОВТОРНО скачать в момент пересылки (см. media/incomingMedia.js).
+  let mediaDescriptor = null;
 
   if (message_type === 'voice') {
     messageContent = await transcribeVoice(n);
+    mediaDescriptor = {
+      type: 'voice', channel,
+      file_id: n.voice_file_id || null,
+      source_url: n.voice_source_url || null,
+      baileys_media_obj: n.baileys_media_obj || null,
+      file_name: 'voice.ogg', mime: n.voice_mime_type || null,
+    };
   } else if (message_type === 'image') {
     imgRef = n.image_source || n.image_url || '';
     baileysMediaObj = n.baileys_media_obj || null;
     messageContent = n.image_caption || '';
+    mediaDescriptor = {
+      type: 'image', channel, ref: imgRef,
+      baileys_media_obj: baileysMediaObj,
+      file_name: 'photo.jpg', mime: 'image/jpeg',
+    };
   } else if (message_type === 'document') {
     const docResult = await processDocument(n);
     if (docResult.error) {
@@ -246,6 +261,13 @@ async function processMessage(rawPayload) {
       return;
     }
     messageContent = docResult.text;
+    mediaDescriptor = {
+      type: 'document', channel,
+      file_id: n.document_file_id || null,
+      source_url: n.document_source_url || null,
+      baileys_media_obj: n.baileys_media_obj || null,
+      file_name: n.document_file_name || 'файл', mime: n.document_mime_type || null,
+    };
   }
 
   // Шаг 4: Буферизация
@@ -254,6 +276,7 @@ async function processMessage(rawPayload) {
     content: messageContent,
     img_url: imgRef,
     baileys_media_obj: baileysMediaObj,
+    media: mediaDescriptor,
   };
 
   // Key the buffer by channel:chat_id (like every other middleware) so two
@@ -262,6 +285,7 @@ async function processMessage(rawPayload) {
   if (!buffered) return;
 
   let { combined_message, buffered_images, has_buffered_images } = buffered;
+  const buffered_media = buffered.buffered_media || [];
 
   // Шаг 5.5: Rate limit check (before concurrency lock to avoid holding locks for rate-limited messages)
   const rateLimitResult = checkRateLimit(channel, chat_id);
@@ -310,6 +334,8 @@ async function processMessage(rawPayload) {
         phone,
         clientName: client_name,
         role: senderRole,
+        media: buffered_media, // входящие вложения текущего батча — для forward_message
+
         // Авто-эхо: бот шлёт в чат короткие строки о вызываемых тулах в реальном времени.
         emit: (text) => sendReply(channel, chat_id, text),
       });

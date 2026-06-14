@@ -188,8 +188,11 @@ function buildLLMMessages(systemPrompt, convoSummary, messages) {
   return [...head, ...messages];
 }
 
-async function runAgent({ combinedMessage, channel, chatId, phone, clientName, role, emit }) {
-  const context = { channel, chatId, phone, clientName, role: role || 'employee' };
+async function runAgent({ combinedMessage, channel, chatId, phone, clientName, role, emit, media }) {
+  const context = {
+    channel, chatId, phone, clientName, role: role || 'employee',
+    incomingMedia: Array.isArray(media) ? media : [], // вложения текущего сообщения — для forward_message
+  };
   // emit(text) — отправка промежуточного сообщения в чат (авто-эхо тулов).
   const echo = (config.ECHO_TOOL_CALLS && typeof emit === 'function') ? emit : null;
 

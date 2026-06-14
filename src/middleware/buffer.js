@@ -29,11 +29,15 @@ async function bufferAndCollect(chatId, msgData) {
       baileys_media_obj: m.baileys_media_obj || null,
     }));
 
+  // Все вложения батча (фото+док+голос) — для пересылки forward_message.
+  const bufferedMedia = sorted.map(m => m.media).filter(Boolean);
+
   return {
     combined_message: combinedMessage,
     buffered_images: bufferedImages,
     buffered_image_count: bufferedImages.length,
     has_buffered_images: bufferedImages.length > 0,
+    buffered_media: bufferedMedia,
   };
 }
 
