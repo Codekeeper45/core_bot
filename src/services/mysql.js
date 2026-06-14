@@ -301,6 +301,9 @@ async function initTables() {
     'ADD COLUMN until_at DATETIME NULL',
     'ADD COLUMN max_runs INT NULL',
     'ADD COLUMN run_count INT NOT NULL DEFAULT 0',
+    // Сторож исполнения (watchdog): расписание стережёт статус задачи.
+    'ADD COLUMN watch_task_id INT NULL',
+    'ADD COLUMN watch_goal VARCHAR(12) NULL',
   ]) {
     try {
       await dbQuery(`ALTER TABLE orch_schedules ${col}`);
@@ -324,7 +327,7 @@ async function initTables() {
 async function verifyCriticalSchema() {
   const probes = [
     'SELECT deadline, dispatched_at, completed_at FROM orch_tasks LIMIT 0',
-    'SELECT next_run_at, fire_phase, nag_interval_min, until_at, run_count FROM orch_schedules LIMIT 0',
+    'SELECT next_run_at, fire_phase, nag_interval_min, until_at, run_count, watch_task_id, watch_goal FROM orch_schedules LIMIT 0',
   ];
   for (const sql of probes) {
     try {
@@ -646,6 +649,8 @@ const SCHEDULE_FIELDS = [
   // Календарь + будильник: фазовый автомат и его параметры.
   'fire_phase', 'nag_interval_min', 'nag_max', 'nag_count',
   'remind_before_min', 'yearly_date', 'until_at', 'max_runs', 'run_count',
+  // Сторож исполнения (watchdog).
+  'watch_task_id', 'watch_goal',
 ];
 
 async function createSchedule(s) {
@@ -654,8 +659,9 @@ async function createSchedule(s) {
       `INSERT INTO orch_schedules
         (owner_channel, owner_chat_id, owner_phone, title, instruction, kind,
          run_at, at_hour, at_minute, weekdays, month_days, interval_min, next_run_at,
-         fire_phase, nag_interval_min, nag_max, remind_before_min, yearly_date, until_at, max_runs)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         fire_phase, nag_interval_min, nag_max, remind_before_min, yearly_date, until_at, max_runs,
+         watch_task_id, watch_goal)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         s.owner_channel, String(s.owner_chat_id), s.owner_phone || null,
         s.title, s.instruction, s.kind,
@@ -664,6 +670,7 @@ async function createSchedule(s) {
         s.next_run_at || null,
         s.fire_phase || 'main', s.nag_interval_min ?? null, s.nag_max ?? null,
         s.remind_before_min ?? null, s.yearly_date || null, s.until_at || null, s.max_runs ?? null,
+        s.watch_task_id ?? null, s.watch_goal || null,
       ]
     );
     return rows.insertId;

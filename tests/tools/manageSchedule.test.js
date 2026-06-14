@@ -306,6 +306,61 @@ describe('manage_schedule: будильник/календарь (create с но
   });
 });
 
+describe('manage_schedule: контроль исполнения (watchdog)', () => {
+  test('валидный once-контроль создаётся, watch_goal по умолчанию done', async () => {
+    reset();
+    const r = await handler({
+      action: 'create', title: 'Контроль доставки', instruction: 'проследи', kind: 'once',
+      delay_minutes: 30, watch_task_id: 7, nag_interval_min: 10, nag_max: 3,
+    }, ctx);
+    assert.equal(r.success, true);
+    assert.equal(created[0].watch_task_id, 7);
+    assert.equal(created[0].watch_goal, 'done');
+    assert.match(r.when, /контроль задачи #7/);
+    assert.match(r.when, /эскалирую боссу/);
+  });
+
+  test('watch_goal accepted сохраняется', async () => {
+    reset();
+    const r = await handler({
+      action: 'create', title: 'X', instruction: 'y', kind: 'once', delay_minutes: 30,
+      watch_task_id: 7, watch_goal: 'accepted', nag_interval_min: 10,
+    }, ctx);
+    assert.equal(r.success, true);
+    assert.equal(created[0].watch_goal, 'accepted');
+  });
+
+  test('watch_task_id на не-once → отказ', async () => {
+    reset();
+    const r = await handler({
+      action: 'create', title: 'X', instruction: 'y', kind: 'daily', at_hour: 9,
+      watch_task_id: 7, nag_interval_min: 10,
+    }, ctx);
+    assert.equal(r.success, false);
+    assert.match(r.message, /once/i);
+    assert.equal(created.length, 0);
+  });
+
+  test('контроль без nag_interval_min → отказ', async () => {
+    reset();
+    const r = await handler({
+      action: 'create', title: 'X', instruction: 'y', kind: 'once', delay_minutes: 30, watch_task_id: 7,
+    }, ctx);
+    assert.equal(r.success, false);
+    assert.match(r.message, /nag_interval_min/);
+  });
+
+  test('watch_goal вне enum → отказ', async () => {
+    reset();
+    const r = await handler({
+      action: 'create', title: 'X', instruction: 'y', kind: 'once', delay_minutes: 30,
+      watch_task_id: 7, watch_goal: 'maybe', nag_interval_min: 10,
+    }, ctx);
+    assert.equal(r.success, false);
+    assert.match(r.message, /watch_goal/);
+  });
+});
+
 describe('manage_schedule: acknowledge', () => {
   test('без id при одном ждущем → once выключается, журнал acked', async () => {
     reset();

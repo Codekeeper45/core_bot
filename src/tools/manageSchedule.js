@@ -24,6 +24,8 @@ const definition = {
       + 'календарь + будильник + таймер. '
       + '«напиши через час», «завтра в 15:00 проверь план X», «каждый день в 9:00 — сводка», '
       + '«день рождения мамы 14 марта», «напоминай каждые 10 минут, пока не отвечу». '
+      + 'КОНТРОЛЬ ИСПОЛНЕНИЯ (сторож): привяжи к задаче через watch_task_id — в срок код сам проверит '
+      + 'статус, не выполнено → напомнит сотруднику до nag_max раз, не реагирует → эскалирует боссу. '
       + 'В момент срабатывания ты выполнишь instruction своим обычным циклом (доступны все инструменты). '
       + 'Действия: create / list / update / cancel / enable / run_now / history / '
       + 'acknowledge (снять будильник после «ок» босса) / snooze (отложить на N минут) / '
@@ -68,7 +70,9 @@ const definition = {
         interval_min: { type: 'integer', description: `interval: период в минутах (минимум ${config.SCHEDULE_MIN_INTERVAL_MIN}). ОБЯЗАТЕЛЬНО вместе с лимитом max_runs (сколько раз всего) или until_date — без лимита бесконечный interval не создаётся (каждый повтор жжёт токены).` },
         yearly_date: { type: 'string', description: 'yearly: дата «MM-DD» («день рождения 14 марта» → «03-14»), время — at_hour/at_minute.' },
         nag_interval_min: { type: 'integer', description: `БУДИЛЬНИК: после срабатывания повторять напоминание каждые N минут, пока босс не подтвердит («ок»). Минимум ${config.SCHEDULE_NAG_MIN_INTERVAL_MIN}. Используй, когда босс просит «напоминай, пока не отвечу».` },
-        nag_max: { type: 'integer', description: `Будильник: максимум повторов (по умолчанию ${config.SCHEDULE_NAG_MAX_DEFAULT}, потолок ${config.SCHEDULE_NAG_MAX_CAP}).` },
+        nag_max: { type: 'integer', description: `Будильник/КОНТРОЛЬ: максимум повторов-попыток (по умолчанию ${config.SCHEDULE_NAG_MAX_DEFAULT}, потолок ${config.SCHEDULE_NAG_MAX_CAP}). Для контроля = сколько раз напомнить сотруднику до эскалации боссу.` },
+        watch_task_id: { type: 'integer', description: 'КОНТРОЛЬ ИСПОЛНЕНИЯ (сторож): id задачи, чьё выполнение стеречь. Только kind=once + nag_interval_min (интервал между напоминаниями) + nag_max (сколько попыток до эскалации). В момент срабатывания код сам читает статус задачи: достигнуто — молчит; нет — напоминает СОТРУДНИКУ; попытки кончились — пишет тебе/боссу.' },
+        watch_goal: { type: 'string', enum: ['accepted', 'done'], description: 'КОНТРОЛЬ: что считать выполненным. accepted = сотрудник взял задачу в работу (принял); done = отчитался/сдал. По умолчанию done.' },
         remind_before_min: { type: 'integer', description: 'КАЛЕНДАРЬ: пред-напоминание за N минут ДО срабатывания (5–1440). «предупреди за полчаса» → 30. Не для interval.' },
         until_date: { type: 'string', description: 'Последний день повторов ВКЛЮЧИТЕЛЬНО, локальная дата YYYY-MM-DD («каждый день до пятницы» → дата этой пятницы). Только для регулярных.' },
         max_runs: { type: 'integer', description: 'Остановиться после N срабатываний (1–365). «напомни 3 раза» → 3. Только для регулярных. Для interval — ОБЯЗАТЕЛЕН (или until_date): сам реши разумное число повторов.' },
@@ -221,6 +225,28 @@ function validateSpec(spec) {
       return `nag_max должен быть целым 1–${config.SCHEDULE_NAG_MAX_CAP}.`;
     }
   }
+  // Сторож исполнения (watchdog): стережёт статус задачи, гонит сотрудника, эскалирует боссу.
+  if (spec.watch_task_id !== undefined && spec.watch_task_id !== null) {
+    if (!Number.isInteger(Number(spec.watch_task_id)) || Number(spec.watch_task_id) <= 0) {
+      return 'watch_task_id должен быть положительным id задачи (контроль исполнения).';
+    }
+    if (spec.kind !== 'once') {
+      return 'Контроль исполнения (watch_task_id) ставится только на kind=once: проверь к конкретному сроку '
+        + '(run_at) или через delay_minutes. Для ежедневной проверки делай daily-расписание, которое утром '
+        + 'создаёт задачу и ставит на неё once-контроль.';
+    }
+    if (spec.nag_interval_min === undefined || spec.nag_interval_min === null) {
+      return 'Для контроля исполнения нужен nag_interval_min — через сколько минут напоминать сотруднику, '
+        + 'если не выполнил (и сколько раз — nag_max, по исчерпании эскалирую боссу).';
+    }
+    if (spec.watch_goal !== undefined && spec.watch_goal !== null
+      && !['accepted', 'done'].includes(spec.watch_goal)) {
+      return 'watch_goal должен быть accepted (взял в работу) или done (отчитался/сдал).';
+    }
+  }
+  if (spec.watch_goal && (spec.watch_task_id === undefined || spec.watch_task_id === null)) {
+    return 'watch_goal указан без watch_task_id — укажи задачу, которую стеречь.';
+  }
   if (spec.remind_before_min !== undefined && spec.remind_before_min !== null) {
     if (spec.kind === 'interval') return 'remind_before_min не сочетается с interval (период и так короткий).';
     const n = Number(spec.remind_before_min);
@@ -252,6 +278,12 @@ function describeWhen(row) {
     default: base = row.kind;
   }
   const extras = [];
+  if (row.watch_task_id) {
+    const goalTxt = row.watch_goal === 'accepted' ? 'примет в работу' : 'отчитается';
+    extras.push(`контроль задачи #${row.watch_task_id}: сотрудник ${goalTxt}, иначе напомню `
+      + `каждые ${row.nag_interval_min} мин и при исчерпании эскалирую боссу`);
+    return extras.length ? `${base} (${extras.join('; ')})` : base;
+  }
   if (Number(row.remind_before_min) > 0) extras.push(`предупрежу за ${row.remind_before_min} мин`);
   if (Number(row.nag_interval_min) > 0) extras.push(`повтор каждые ${row.nag_interval_min} мин до подтверждения`);
   if (row.until_at) extras.push(`до ${utcToLocalStr(row.until_at)}`);
@@ -316,6 +348,8 @@ async function handler(args, context = {}) {
           remind_before_min: args.remind_before_min ?? null,
           until_at: untilUtc ? fmtUtc(untilUtc) : null,
           max_runs: args.max_runs ?? null,
+          watch_task_id: args.watch_task_id ?? null,
+          watch_goal: args.watch_task_id != null ? (args.watch_goal || 'done') : null,
         };
         const err = validateSpec(spec);
         if (err) return { success: false, message: err };
@@ -376,7 +410,8 @@ async function handler(args, context = {}) {
         if (err) return { success: false, message: err };
         const fields = {};
         for (const f of ['title', 'instruction', 'kind', 'at_hour', 'at_minute', 'weekdays', 'month_days',
-          'interval_min', 'yearly_date', 'nag_interval_min', 'nag_max', 'remind_before_min', 'max_runs']) {
+          'interval_min', 'yearly_date', 'nag_interval_min', 'nag_max', 'remind_before_min', 'max_runs',
+          'watch_task_id', 'watch_goal']) {
           if (args[f] !== undefined) fields[f] = args[f];
         }
         if (args.until_date !== undefined) {
