@@ -69,13 +69,23 @@ describe('manage_schedule: create', () => {
 
   test('interval: не сразу, а через interval_min; меньше минимума → ошибка', async () => {
     reset();
-    const r = await handler({ action: 'create', title: 'X', instruction: 'y', kind: 'interval', interval_min: 30 }, ctx);
+    const r = await handler({ action: 'create', title: 'X', instruction: 'y', kind: 'interval', interval_min: 30, max_runs: 3 }, ctx);
     assert.equal(r.success, true);
     const next = new Date(String(created[0].next_run_at).replace(' ', 'T') + 'Z');
     assert.ok(next.getTime() > Date.now() + 25 * 60000, 'первый запуск не раньше чем через interval');
-    const bad = await handler({ action: 'create', title: 'X', instruction: 'y', kind: 'interval', interval_min: 1 }, ctx);
+    const bad = await handler({ action: 'create', title: 'X', instruction: 'y', kind: 'interval', interval_min: 1, max_runs: 3 }, ctx);
     assert.equal(bad.success, false);
     assert.match(bad.message, /interval_min/);
+  });
+
+  test('interval БЕЗ лимита (нет max_runs/until_date) → отказ', async () => {
+    reset();
+    const r = await handler({ action: 'create', title: 'X', instruction: 'y', kind: 'interval', interval_min: 30 }, ctx);
+    assert.equal(r.success, false);
+    assert.match(r.message, /лимит|max_runs|бесконечно/i);
+    // с until_date — проходит (лимит по дате)
+    const ok = await handler({ action: 'create', title: 'X', instruction: 'y', kind: 'interval', interval_min: 30, until_date: '2090-01-01' }, ctx);
+    assert.equal(ok.success, true);
   });
 
   test('delay_minutes: «через час» → run_at = now+60м UTC, без арифметики у LLM', async () => {

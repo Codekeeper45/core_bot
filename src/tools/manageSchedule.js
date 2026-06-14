@@ -65,13 +65,13 @@ const definition = {
         at_minute: { type: 'integer', description: 'Минута 0–59 (по умолчанию 0).' },
         weekdays: { type: 'string', description: 'weekly: дни недели через запятую, Пн=1..Вс=7 (напр. «1,3,5»).' },
         month_days: { type: 'string', description: 'monthly: числа месяца через запятую (напр. «1,15»).' },
-        interval_min: { type: 'integer', description: `interval: период в минутах (минимум ${config.SCHEDULE_MIN_INTERVAL_MIN}).` },
+        interval_min: { type: 'integer', description: `interval: период в минутах (минимум ${config.SCHEDULE_MIN_INTERVAL_MIN}). ОБЯЗАТЕЛЬНО вместе с лимитом max_runs (сколько раз всего) или until_date — без лимита бесконечный interval не создаётся (каждый повтор жжёт токены).` },
         yearly_date: { type: 'string', description: 'yearly: дата «MM-DD» («день рождения 14 марта» → «03-14»), время — at_hour/at_minute.' },
         nag_interval_min: { type: 'integer', description: `БУДИЛЬНИК: после срабатывания повторять напоминание каждые N минут, пока босс не подтвердит («ок»). Минимум ${config.SCHEDULE_NAG_MIN_INTERVAL_MIN}. Используй, когда босс просит «напоминай, пока не отвечу».` },
         nag_max: { type: 'integer', description: `Будильник: максимум повторов (по умолчанию ${config.SCHEDULE_NAG_MAX_DEFAULT}, потолок ${config.SCHEDULE_NAG_MAX_CAP}).` },
         remind_before_min: { type: 'integer', description: 'КАЛЕНДАРЬ: пред-напоминание за N минут ДО срабатывания (5–1440). «предупреди за полчаса» → 30. Не для interval.' },
         until_date: { type: 'string', description: 'Последний день повторов ВКЛЮЧИТЕЛЬНО, локальная дата YYYY-MM-DD («каждый день до пятницы» → дата этой пятницы). Только для регулярных.' },
-        max_runs: { type: 'integer', description: 'Остановиться после N срабатываний (1–365). «напомни 3 раза» → 3. Только для регулярных.' },
+        max_runs: { type: 'integer', description: 'Остановиться после N срабатываний (1–365). «напомни 3 раза» → 3. Только для регулярных. Для interval — ОБЯЗАТЕЛЕН (или until_date): сам реши разумное число повторов.' },
         snooze_minutes: { type: 'integer', description: 'snooze: на сколько минут отложить (1–1440). «отложи на 10 минут» → 10. Время считает код.' },
         horizon: { type: 'string', enum: ['today', 'tomorrow', 'week', 'all'], description: 'agenda: горизонт обзора (по умолчанию today).' },
         include_disabled: { type: 'boolean', description: 'list: показать и выключенные расписания.' },
@@ -191,6 +191,14 @@ function validateSpec(spec) {
     const min = Number(spec.interval_min);
     if (!Number.isInteger(min) || min < config.SCHEDULE_MIN_INTERVAL_MIN) {
       return `interval_min должен быть целым >= ${config.SCHEDULE_MIN_INTERVAL_MIN} (каждый запуск — полный цикл ИИ).`;
+    }
+    // Интервал НЕ может работать бесконечно: каждый повтор — полный прогон ИИ (токены).
+    // Обязателен лимит — max_runs (сколько раз всего) или until_date (до какой даты).
+    const hasMax = spec.max_runs !== undefined && spec.max_runs !== null && Number(spec.max_runs) > 0;
+    const hasUntil = !!spec.until_at;
+    if (!hasMax && !hasUntil) {
+      return 'Интервальное расписание не может повторяться бесконечно — нужен лимит. Укажи max_runs '
+        + '(сколько раз всего сработать) или until_date (до какой даты повторять). Сколько повторов реально нужно?';
     }
   }
   if (spec.kind === 'yearly') {
