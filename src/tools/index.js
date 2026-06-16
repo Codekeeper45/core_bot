@@ -94,6 +94,15 @@ const BOSS_ONLY = new Set([
   'manage_employees', 'performance_report', 'manage_scheduler',
 ]);
 
+// Подмножество тул-схем для роли: сотруднику не показываем boss-only инструменты
+// (он их всё равно не вызовет — гейт ниже остаётся как defense-in-depth, но и
+// схемы в промпт не уходят → экономия токенов и меньше путаницы у модели).
+// Чистая функция: возвращает новый массив, исходный `tools` не мутирует.
+function toolsForRole(role) {
+  if (role === 'boss') return tools;
+  return tools.filter((t) => !BOSS_ONLY.has(t.function.name));
+}
+
 // Выполнить инструмент по имени. context = { channel, chatId, phone, clientName, role }.
 async function executeToolCall(name, args, context = {}) {
   const handler = handlers.get(name);
@@ -110,4 +119,4 @@ async function executeToolCall(name, args, context = {}) {
   return handler(args, context);
 }
 
-module.exports = { tools, executeToolCall, handlers, BOSS_ONLY };
+module.exports = { tools, executeToolCall, handlers, BOSS_ONLY, toolsForRole };

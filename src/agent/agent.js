@@ -3,7 +3,7 @@ const OpenAI = require('openai');
 const config = require('../config');
 const { getSystemPrompt } = require('./systemPrompt');
 const { loadChatHistory, saveChatHistory } = require('./memory');
-const { tools, executeToolCall } = require('../tools');
+const { executeToolCall, toolsForRole } = require('../tools');
 const notifier = require('../services/notifier');
 const { withRetry } = require('../utils/retry');
 const { formatToolEcho } = require('../utils/toolEcho');
@@ -202,11 +202,15 @@ function capToolCall(name, counts, limits = {}) {
   return { capped: false };
 }
 
-async function runAgent({ combinedMessage, channel, chatId, phone, clientName, role, emit, media }) {
+async function runAgent({ combinedMessage, channel, chatId, phone, clientName, role, emit, media, maxIterations }) {
   const context = {
     channel, chatId, phone, clientName, role: role || 'employee',
     incomingMedia: Array.isArray(media) ? media : [], // вложения текущего сообщения — для forward_message
   };
+  // Тулы по роли: сотруднику не отдаём схемы boss-only (экономия токенов + меньше путаницы).
+  const activeTools = toolsForRole(context.role);
+  // Лимит итераций: scheduled-прогоны (deliverInstruction) короче — отдельный меньший потолок.
+  const maxIters = maxIterations || config.AI_MAX_ITERATIONS;
   // emit(text) — отправка промежуточного сообщения в чат (авто-эхо тулов).
   const echo = (config.ECHO_TOOL_CALLS && typeof emit === 'function') ? emit : null;
 
@@ -226,14 +230,14 @@ async function runAgent({ combinedMessage, channel, chatId, phone, clientName, r
   agentMetrics.total++;
 
   try {
-    for (let i = 0; i < config.AI_MAX_ITERATIONS; i++) {
+    for (let i = 0; i < maxIters; i++) {
       let response;
       try {
         response = await llmCreateWithFallback(
           (model) => ({
             model,
             messages: buildLLMMessages(systemPrompt, convoSummary, messages),
-            tools,
+            tools: activeTools,
             tool_choice: 'auto',
             max_tokens: config.LLM_MAX_TOKENS,
           }),

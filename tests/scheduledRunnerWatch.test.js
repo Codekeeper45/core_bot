@@ -17,12 +17,13 @@ const mysqlMock = {
   setScheduleEnabled: async (id, on) => calls.push(['setEnabled', id, on]),
   logScheduleRun: async (id, title, status, detail) => journal.push({ id, status, detail }),
   cleanupScheduleRuns: async () => 0,
-  listActiveQuiet: async () => [],
+  listActiveQuiet: async () => mysqlMock._quiet,
   getTask: async () => mysqlMock._task,
   getEmployeeById: async () => mysqlMock._emp,
   _rows: [],
   _task: null,
   _emp: null,
+  _quiet: [],
 };
 
 const Module = require('module');
@@ -131,9 +132,41 @@ describe('watchdog в tick', () => {
     mysqlMock._rows = [watchRow({ nag_count: 0 })];
     mysqlMock._task = { id: 5, title: 'X', status: 'dispatched', assignee_id: 9 };
     calls.length = 0;
+    mysqlMock._quiet = [];
     setDeliver(async () => ({ ok: false, reason: 'lock_busy' }));
     await tick(utc(2026, 6, 8, 4, 0));
     assert.deepEqual(calls.find((c) => c[0] === 'setNext'), ['setNext', 1, '2026-06-08 04:00:00']);
     assert.equal(calls.find((c) => c[0] === 'markRun'), undefined);
+  });
+});
+
+// M4: тихий режим (/stop) уважают напоминания/сводки, НО сторож (watch) — нет:
+// его эскалация это критичный алерт, который босс сам себе настроил.
+describe('watchdog мимо тихого режима (M4)', () => {
+  test('owner в quiet + watch-строка → погоня/эскалация ВСЁ РАВНО идёт', async () => {
+    mysqlMock._rows = [watchRow({ nag_count: 0 })];
+    mysqlMock._task = { id: 5, title: 'Доставка', status: 'dispatched', assignee_id: 9 };
+    mysqlMock._emp = { id: 9, name: 'Курбан' };
+    mysqlMock._quiet = [{ owner_channel: 'whatsapp', owner_chat_id: 'boss', owner_phone: null }];
+    calls.length = 0; journal.length = 0;
+    let delivered = false;
+    setDeliver(async () => { delivered = true; return { ok: true }; });
+    await tick(utc(2026, 6, 8, 4, 0));
+    assert.equal(delivered, true, 'сторож игнорирует тихий режим');
+    assert.equal(calls.find((c) => c[0] === 'markRun')[2], 'watch');
+  });
+
+  test('owner в quiet + обычная (не-watch) строка → молчит', async () => {
+    // once без watch_task_id → обычное напоминание боссу, его тихий режим глушит.
+    mysqlMock._rows = [watchRow({ watch_task_id: null, watch_goal: null, nag_interval_min: 0 })];
+    mysqlMock._task = null;
+    mysqlMock._quiet = [{ owner_channel: 'whatsapp', owner_chat_id: 'boss', owner_phone: null }];
+    calls.length = 0; journal.length = 0;
+    let delivered = false;
+    setDeliver(async () => { delivered = true; return { ok: true }; });
+    await tick(utc(2026, 6, 8, 4, 0));
+    assert.equal(delivered, false, 'обычное напоминание уважает тихий режим');
+    assert.equal(calls.find((c) => c[0] === 'claim'), undefined, 'строку даже не захватываем');
+    mysqlMock._quiet = [];
   });
 });

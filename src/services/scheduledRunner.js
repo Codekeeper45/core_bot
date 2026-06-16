@@ -374,7 +374,10 @@ async function tick(now = new Date()) {
     );
     for (const row of rows) {
       try {
-        if (quiet.has(`${row.owner_channel}|${row.owner_chat_id}`)) continue;
+        // Тихий режим уважают напоминания/сводки боссу. Сторож исполнения (watch_task_id)
+        // — исключение: его погоня пишет СОТРУДНИКУ (не боссу), а эскалация — это
+        // критичный алерт, который босс сам себе настроил; такое /stop не глушит.
+        if (!row.watch_task_id && quiet.has(`${row.owner_channel}|${row.owner_chat_id}`)) continue;
         if (!row.next_run_at) { await rearmSchedule(row, now); continue; }
         if (!isDue(row, now)) continue;
         // Атомарный claim: между снимком rows и этим местом расписание могли отменить

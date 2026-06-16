@@ -118,6 +118,9 @@ module.exports = {
   CONTEXT_SUMMARY_CHAR_LIMIT: 50000,
   CONTEXT_KEEP_RECENT_MSGS: 20,
   AI_MAX_ITERATIONS: parseInt(process.env.AI_MAX_ITERATIONS || '30', 10),
+  // Прогоны по расписанию (nag/watch/interval/daily) — почти всегда 1–3 тул-раунда,
+  // полные 30 итераций им не нужны. Меньший потолок режет токены на регулярных тиках.
+  AI_MAX_ITERATIONS_SCHEDULED: parseInt(process.env.AI_MAX_ITERATIONS_SCHEDULED || '12', 10),
   // Потолок вызовов web_search за ОДИН прогон агента — защита от зацикливания на ненаходимом
   // (напр. курс банка). Сверх лимита поиск не выполняется, агенту возвращается «хватит искать».
   WEB_SEARCH_MAX_PER_RUN: parseInt(process.env.WEB_SEARCH_MAX_PER_RUN || '10', 10),

@@ -189,8 +189,9 @@ async function processMessage(rawPayload) {
       (untilUtc
         ? `Тихий режим включён на ${Math.min(m, 7 * 24 * 60)} мин. `
         : 'Тихий режим включён. ')
-      + 'Первым не пишу — напоминания, проверки и сводки молчат. На сообщения отвечаю как обычно. '
-      + 'Команда /start — снять.');
+      + 'Первым не пишу — напоминания, проверки и сводки молчат. Контроль-сторож по задачам '
+      + 'продолжит эскалировать критичное (сотрудник не вышел/не сделал). На сообщения отвечаю '
+      + 'как обычно. Команда /start — снять.');
     return;
   }
   if (START_CMDS.has(cmdWord)) {
@@ -414,6 +415,8 @@ async function deliverInstruction({ channel, chatId, phone, clientName, instruct
         phone,
         clientName: clientName || (role === 'boss' ? 'boss' : ''),
         role,
+        // Прогон по расписанию — короче интерактивного: отдельный меньший потолок итераций.
+        maxIterations: config.AI_MAX_ITERATIONS_SCHEDULED,
         emit: (text) => sendReply(channel, chatId, text),
       });
     } catch (err) {
