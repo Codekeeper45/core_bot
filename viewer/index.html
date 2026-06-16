@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Чаты бота — читалка</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#161922; --line:#262b36; --muted:#8a93a6; --text:#e7ebf3;
+    --user:#2a3142; --bot:#16324e; --tool:#20242e; --accent:#4f9cf9;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
+    font:14px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+  .app{display:grid;grid-template-columns:340px 1fr;height:100vh}
+  /* левая панель */
+  .side{border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+  .side header{padding:12px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center}
+  .side header h1{font-size:14px;margin:0;font-weight:600;flex:1}
+  .side input{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;
+    background:var(--bg);color:var(--text);outline:none}
+  .btn{background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:8px;
+    padding:7px 10px;cursor:pointer}
+  .btn:hover{border-color:var(--accent)}
+  .list{overflow:auto;min-height:0;flex:1}
+  .chat{padding:10px 12px;border-bottom:1px solid var(--line);cursor:pointer}
+  .chat:hover{background:var(--panel)}
+  .chat.active{background:var(--panel);border-left:3px solid var(--accent);padding-left:9px}
+  .chat .top{display:flex;justify-content:space-between;gap:8px}
+  .chat .nm{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .chat .tm{color:var(--muted);font-size:11px;white-space:nowrap}
+  .chat .sub{color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .badge{display:inline-block;font-size:10px;padding:1px 6px;border:1px solid var(--line);
+    border-radius:20px;color:var(--muted);margin-right:6px}
+  /* правая панель */
+  .main{display:flex;flex-direction:column;min-height:0}
+  .main .head{padding:12px 16px;border-bottom:1px solid var(--line)}
+  .main .head .t{font-weight:600}
+  .main .head .s{color:var(--muted);font-size:12px}
+  .summary{margin:12px 16px 0;padding:10px 12px;background:#1b2130;border:1px solid var(--line);
+    border-radius:10px;color:#cdd6e6;font-size:13px}
+  .summary b{color:var(--accent)}
+  .feed{overflow:auto;padding:16px;display:flex;flex-direction:column;gap:10px;min-height:0;flex:1}
+  .msg{max-width:74%;padding:8px 12px;border-radius:12px;white-space:pre-wrap;word-wrap:break-word}
+  .role-user{align-self:flex-end;background:var(--user);border:1px solid var(--line)}
+  .role-assistant{align-self:flex-start;background:var(--bot);border:1px solid #1d3e5e}
+  .role-tool{align-self:center;background:var(--tool);border:1px solid var(--line);color:var(--muted);
+    font-size:12px;max-width:88%}
+  .who{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:3px}
+  .tools{margin-top:6px;display:flex;flex-wrap:wrap;gap:4px}
+  .tool-chip{font-size:11px;color:#bcd;background:#1b2638;border:1px solid #274058;border-radius:20px;padding:1px 8px}
+  .empty{color:var(--muted);margin:auto;text-align:center;padding:24px}
+  .note{color:var(--muted);font-size:11px;padding:6px 16px;border-top:1px solid var(--line)}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <header>
+      <h1>Чаты бота</h1>
+      <button class="btn" id="refresh" title="Обновить">⟳</button>
+    </header>
+    <div style="padding:10px 12px;border-bottom:1px solid var(--line)">
+      <input id="search" placeholder="Поиск по имени / id / каналу…" autocomplete="off">
+    </div>
+    <div class="list" id="list"><div class="empty">Загрузка…</div></div>
+  </aside>
+  <section class="main">
+    <div class="head"><div class="t" id="title">Выберите чат слева</div><div class="s" id="sub"></div></div>
+    <div id="summaryBox"></div>
+    <div class="feed" id="feed"><div class="empty">Здесь появится переписка</div></div>
+    <div class="note">У истории нет метки времени по каждому сообщению — показано время последней активности чата. Только чтение.</div>
+  </section>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+let chats = [];
+let active = null;
+
+function fmtTime(s){
+  if(!s) return '';
+  const d = new Date(s);
+  if (isNaN(d)) return String(s);
+  return d.toLocaleString('ru-RU', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+}
+function esc(s){ return String(s==null?'':s).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+async function loadChats(){
+  $('list').innerHTML = '<div class="empty">Загрузка…</div>';
+  try{
+    const r = await fetch('/api/chats'); const j = await r.json();
+    if(j.error){ $('list').innerHTML = '<div class="empty">Ошибка: '+esc(j.error)+'</div>'; return; }
+    chats = j.chats || [];
+    renderList();
+  }catch(e){ $('list').innerHTML = '<div class="empty">Не удалось загрузить: '+esc(e.message)+'</div>'; }
+}
+
+function renderList(){
+  const q = $('search').value.trim().toLowerCase();
+  const filtered = chats.filter(c=>{
+    if(!q) return true;
+    return [(c.name||''),c.chat_id,c.channel].join(' ').toLowerCase().includes(q);
+  });
+  if(!filtered.length){ $('list').innerHTML = '<div class="empty">Ничего не найдено</div>'; return; }
+  $('list').innerHTML = filtered.map(c=>{
+    const title = c.name || c.chat_id;
+    const lastTxt = c.last ? (c.last.role==='user'?'👤 ':(c.last.role==='assistant'?'🤖 ':'🔧 ')) + esc(c.last.text) : '—';
+    const key = c.channel+'|'+c.chat_id;
+    const act = active===key ? ' active':'';
+    return `<div class="chat${act}" data-key="${esc(key)}">
+      <div class="top"><span class="nm">${esc(title)}</span><span class="tm">${fmtTime(c.updated_at)}</span></div>
+      <div class="sub"><span class="badge">${esc(c.channel)}</span>${lastTxt}</div>
+    </div>`;
+  }).join('');
+  document.querySelectorAll('.chat').forEach(el=>{
+    el.onclick = ()=> openChat(el.dataset.key);
+  });
+}
+
+async function openChat(key){
+  active = key;
+  renderList();
+  const [channel, chat_id] = key.split('|');
+  $('feed').innerHTML = '<div class="empty">Загрузка…</div>';
+  $('summaryBox').innerHTML = '';
+  try{
+    const r = await fetch('/api/chat?channel='+encodeURIComponent(channel)+'&chat_id='+encodeURIComponent(chat_id));
+    const j = await r.json();
+    if(j.error){ $('feed').innerHTML = '<div class="empty">Ошибка: '+esc(j.error)+'</div>'; return; }
+    $('title').textContent = j.name || j.chat_id;
+    $('sub').textContent = j.channel + ' · ' + j.chat_id + ' · ' + fmtTime(j.updated_at);
+    if(j.summary && j.summary.trim()){
+      $('summaryBox').innerHTML = '<div class="summary"><b>Сводка памяти:</b> '+esc(j.summary)+'</div>';
+    }
+    const msgs = j.messages || [];
+    if(!msgs.length){ $('feed').innerHTML = '<div class="empty">Сообщений нет</div>'; return; }
+    $('feed').innerHTML = msgs.map(m=>{
+      const who = m.role==='user'?'клиент':(m.role==='assistant'?'бот':'инструмент');
+      const tools = (m.tools&&m.tools.length)
+        ? '<div class="tools">'+m.tools.map(t=>'<span class="tool-chip">🔧 '+esc(t)+'</span>').join('')+'</div>' : '';
+      const text = m.text ? esc(m.text) : (m.tools? '' : '<i style="color:var(--muted)">—</i>');
+      return `<div class="msg role-${m.role}"><div class="who">${who}</div>${text}${tools}</div>`;
+    }).join('');
+    $('feed').scrollTop = $('feed').scrollHeight;
+  }catch(e){ $('feed').innerHTML = '<div class="empty">Не удалось: '+esc(e.message)+'</div>'; }
+}
+
+$('refresh').onclick = ()=>{ loadChats(); if(active) openChat(active); };
+$('search').oninput = renderList;
+loadChats();
+</script>
+</body>
+</html>

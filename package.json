@@ -4,7 +4,8 @@
   "description": "Universal AI assistant core — WhatsApp + Telegram + Instagram, tool-calling agent",
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "viewer": "node viewer/server.js"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^7.0.0-rc13",
