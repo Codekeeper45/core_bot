@@ -5,11 +5,12 @@ const assert = require('node:assert/strict');
 // Общий мок mysql для фактов и личных задач/заметок.
 const db = { facts: [], items: [], nextId: 1 };
 const mysqlMock = {
-  addFact: async (ch, id, fact, cat) => {
-    const dup = db.facts.find((f) => f.fact.toLowerCase().trim() === String(fact).toLowerCase().trim());
-    if (dup) return { id: dup.id, duplicate: true };
-    const row = { id: db.nextId++, fact, category: cat };
-    db.facts.push(row); return { id: row.id, duplicate: false };
+  addFact: async (ch, id, fact, cat, scope = 'personal') => {
+    const sc = scope === 'global' ? 'global' : 'personal';
+    const dup = db.facts.find((f) => f.scope === sc && f.fact.toLowerCase().trim() === String(fact).toLowerCase().trim());
+    if (dup) return { id: dup.id, duplicate: true, scope: sc };
+    const row = { id: db.nextId++, fact, category: cat, scope: sc };
+    db.facts.push(row); return { id: row.id, duplicate: false, scope: sc };
   },
   listFacts: async () => db.facts.slice().reverse(),
   deleteFact: async (ch, id, { id: fid, match }) => {
@@ -54,6 +55,21 @@ describe('память-факты', () => {
     const forget = await byName(facts, 'forget_fact').handler({ match: 'пятниц' }, ctx);
     assert.equal(forget.deleted, 1);
     assert.equal((await byName(facts, 'list_facts').handler({}, ctx)).count, 0);
+  });
+
+  test('глобальное правило: scope=global, помечено как общее, видно в list', async () => {
+    db.facts = []; db.nextId = 1;
+    const remember = byName(facts, 'remember_fact');
+    const g = await remember.handler({ fact: 'Со всеми сотрудниками общаться коротко и по делу', scope: 'global' }, ctx);
+    assert.equal(g.success, true);
+    assert.equal(g.scope, 'global');
+    assert.match(g.note, /общее правило|для всех/i);
+    const p = await remember.handler({ fact: 'Любит кофе' }, ctx); // personal по умолчанию
+    assert.equal(p.scope, 'personal');
+    const list = await byName(facts, 'list_facts').handler({}, ctx);
+    assert.equal(list.count, 2);
+    const glob = list.facts.find((f) => f.scope === 'global');
+    assert.ok(glob && /коротко/.test(glob.fact));
   });
 });
 

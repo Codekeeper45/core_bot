@@ -219,6 +219,7 @@ async function initTables() {
       chat_id    VARCHAR(255) NOT NULL,
       fact       TEXT         NOT NULL,
       category   VARCHAR(64)  NULL,
+      scope      VARCHAR(10)  NOT NULL DEFAULT 'personal',
       created_at TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
       INDEX idx_facts_chat (channel, chat_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -263,6 +264,14 @@ async function initTables() {
     if (err && err.errno !== 1060) {
       console.error('[MySQL] summary column migration:', err.message);
     }
+  }
+
+  // Миграция: scope у фактов — 'personal' (по чату) | 'global' (правило для всех диалогов).
+  try {
+    await dbQuery("ALTER TABLE bot_memory_facts ADD COLUMN scope VARCHAR(10) NOT NULL DEFAULT 'personal'");
+    console.log('[MySQL] Migrated: bot_memory_facts.scope added');
+  } catch (err) {
+    if (err && err.errno !== 1060) console.error('[MySQL] facts scope migration:', err.message);
   }
 
   // Миграция: тайминги задач для метрик (completion time / overdue).
@@ -924,31 +933,35 @@ async function cleanupScheduleRuns(days = 90) {
 // ── Память-факты (bot_memory_facts) ─────────────────────────────────────────
 function normFact(s) { return String(s || '').trim().toLowerCase().replace(/\s+/g, ' '); }
 
-async function addFact(channel, chatId, fact, category) {
+async function addFact(channel, chatId, fact, category, scope = 'personal') {
   try {
-    // Дедуп: не дублировать факт с тем же нормализованным текстом у этого чата.
-    const existing = await dbQuery(
-      'SELECT id, fact FROM bot_memory_facts WHERE channel = ? AND chat_id = ?',
-      [String(channel), String(chatId)]
-    );
+    const sc = scope === 'global' ? 'global' : 'personal';
+    // Дедуп: глобальные — среди всех глобальных; личные — в пределах этого чата.
+    const existing = sc === 'global'
+      ? await dbQuery("SELECT id, fact FROM bot_memory_facts WHERE scope = 'global'")
+      : await dbQuery("SELECT id, fact FROM bot_memory_facts WHERE scope = 'personal' AND channel = ? AND chat_id = ?",
+        [String(channel), String(chatId)]);
     const norm = normFact(fact);
     const dup = existing.find((r) => normFact(r.fact) === norm);
-    if (dup) return { id: dup.id, duplicate: true };
+    if (dup) return { id: dup.id, duplicate: true, scope: sc };
     const res = await dbQuery(
-      'INSERT INTO bot_memory_facts (channel, chat_id, fact, category) VALUES (?,?,?,?)',
-      [String(channel), String(chatId), String(fact), category ? String(category).slice(0, 60) : null]
+      'INSERT INTO bot_memory_facts (channel, chat_id, fact, category, scope) VALUES (?,?,?,?,?)',
+      [String(channel), String(chatId), String(fact), category ? String(category).slice(0, 60) : null, sc]
     );
-    return { id: res.insertId, duplicate: false };
+    return { id: res.insertId, duplicate: false, scope: sc };
   } catch (err) {
     console.error('[MySQL] addFact:', err.message);
     throw dbError(err, 'addFact');
   }
 }
 
+// Личные факты ЭТОГО чата + ВСЕ глобальные правила (применяются в любом диалоге).
 async function listFacts(channel, chatId, limit = 50) {
   try {
     return await dbQuery(
-      'SELECT id, fact, category, created_at FROM bot_memory_facts WHERE channel = ? AND chat_id = ? ORDER BY id DESC LIMIT ?',
+      `SELECT id, fact, category, scope, created_at FROM bot_memory_facts
+       WHERE scope = 'global' OR (channel = ? AND chat_id = ?)
+       ORDER BY (scope = 'global') DESC, id DESC LIMIT ?`,
       [String(channel), String(chatId), Number(limit) || 50]
     );
   } catch (err) {
@@ -957,16 +970,19 @@ async function listFacts(channel, chatId, limit = 50) {
   }
 }
 
-// Удалить по id (в пределах чата) или по совпадению текста. Возвращает число удалённых.
+// Удалить по id или совпадению текста. Можно удалять СВОИ личные ИЛИ любые глобальные
+// (равные права); чужие личные факты не трогаем. Возвращает число удалённых.
 async function deleteFact(channel, chatId, { id, match } = {}) {
   try {
     if (id) {
-      const res = await dbQuery('DELETE FROM bot_memory_facts WHERE id = ? AND channel = ? AND chat_id = ?',
+      const res = await dbQuery(
+        "DELETE FROM bot_memory_facts WHERE id = ? AND (scope = 'global' OR (channel = ? AND chat_id = ?))",
         [id, String(channel), String(chatId)]);
       return res.affectedRows || 0;
     }
     if (match) {
-      const rows = await dbQuery('SELECT id, fact FROM bot_memory_facts WHERE channel = ? AND chat_id = ?',
+      const rows = await dbQuery(
+        "SELECT id, fact FROM bot_memory_facts WHERE scope = 'global' OR (channel = ? AND chat_id = ?)",
         [String(channel), String(chatId)]);
       const norm = normFact(match);
       const hit = rows.find((r) => normFact(r.fact).includes(norm) || norm.includes(normFact(r.fact)));

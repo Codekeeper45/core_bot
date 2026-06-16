@@ -74,13 +74,24 @@ ${taskLines}
     }
   } catch (_) { /* lookup некритичен — без него работаем как с боссом */ }
 
-  // Запомненные факты о пользователе (простая память) — подмешиваем в обоих режимах.
+  // Память: глобальные ПРАВИЛА (для всех диалогов) + личные факты этого чата.
   let factsContext = '';
   try {
     const facts = await listFacts(channel, chatId, 50);
-    if (facts.length) {
-      const lines = facts.map((f) => `- ${f.fact}${f.category ? ` [${f.category}]` : ''}`).join('\n');
-      factsContext = `
+    const globals = facts.filter((f) => f.scope === 'global');
+    const personal = facts.filter((f) => f.scope !== 'global');
+    if (globals.length) {
+      const lines = globals.map((f) => `- ${f.fact}${f.category ? ` [${f.category}]` : ''}`).join('\n');
+      factsContext += `
+
+=== ОБЩИЕ ПРАВИЛА (действуют во ВСЕХ диалогах, заданы командой) ===
+Соблюдай это всегда, с кем бы ни общался.
+${lines}
+=== КОНЕЦ ОБЩИХ ПРАВИЛ ===`;
+    }
+    if (personal.length) {
+      const lines = personal.map((f) => `- ${f.fact}${f.category ? ` [${f.category}]` : ''}`).join('\n');
+      factsContext += `
 
 === ЗАПОМНЕННЫЕ ФАКТЫ О ПОЛЬЗОВАТЕЛЕ ===
 Учитывай это в ответах. Если факт устарел — обнови (forget_fact + remember_fact).

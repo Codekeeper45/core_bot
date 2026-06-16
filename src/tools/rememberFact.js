@@ -10,16 +10,18 @@ const remember = {
     function: {
       name: 'remember_fact',
       description:
-        'Запомнить устойчивый факт или предпочтение пользователя (например «не работаю по пятницам»,'
-        + '«предпочитает короткие ответы», «компания — Neodrain, водоотведение», «жена — Айгуль»). '
-        + 'Факт сохранится навсегда и будет учитываться в будущих диалогах. Сохраняй сам, без '
-        + 'лишних вопросов, когда замечаешь стабильную информацию о человеке/бизнесе. НЕ запоминай '
-        + 'разовое/сиюминутное.',
+        'Запомнить устойчивый факт/предпочтение или ОБЩЕЕ ПРАВИЛО поведения. Сохраняется навсегда. '
+        + 'scope=personal (по умолчанию) — про ЭТОГО пользователя («не работает по пятницам», «жена — '
+        + 'Айгуль»), видно только в его чате. scope=global — ПРАВИЛО ДЛЯ ВСЕХ ДИАЛОГОВ («со всеми '
+        + 'сотрудниками общайся коротко и по делу», «после одного подтверждения не дёргать», «компания '
+        + '— Neodrain»); применяется в каждом чате. Глобальные правила может задавать любой. Сохраняй '
+        + 'сам, без лишних вопросов; НЕ запоминай разовое/сиюминутное.',
       parameters: {
         type: 'object',
         properties: {
-          fact: { type: 'string', description: 'Факт одной фразой, от третьего лица.' },
+          fact: { type: 'string', description: 'Факт/правило одной фразой, от третьего лица.' },
           category: { type: 'string', description: 'Категория: личное / бизнес / предпочтение / контакт (опц.).' },
+          scope: { type: 'string', enum: ['personal', 'global'], description: 'personal = про этого пользователя (умолч.); global = правило для ВСЕХ диалогов.' },
         },
         required: ['fact'],
       },
@@ -27,8 +29,11 @@ const remember = {
   },
   async handler(args, context = {}) {
     if (!args.fact) return { success: false, message: 'Нужен fact.' };
-    const r = await addFact(context.channel, context.chatId, args.fact, args.category);
-    return { success: true, id: r.id, duplicate: r.duplicate, note: r.duplicate ? 'Уже было запомнено.' : 'Запомнил.' };
+    const r = await addFact(context.channel, context.chatId, args.fact, args.category, args.scope);
+    return {
+      success: true, id: r.id, duplicate: r.duplicate, scope: r.scope,
+      note: r.duplicate ? 'Уже было запомнено.' : (r.scope === 'global' ? 'Запомнил как общее правило (для всех).' : 'Запомнил.'),
+    };
   },
 };
 
@@ -43,7 +48,7 @@ const list = {
   },
   async handler(args, context = {}) {
     const facts = await listFacts(context.channel, context.chatId, 50);
-    return { success: true, count: facts.length, facts: facts.map((f) => ({ id: f.id, fact: f.fact, category: f.category })) };
+    return { success: true, count: facts.length, facts: facts.map((f) => ({ id: f.id, fact: f.fact, category: f.category, scope: f.scope || 'personal' })) };
   },
 };
 
