@@ -188,6 +188,20 @@ function buildLLMMessages(systemPrompt, convoSummary, messages) {
   return [...head, ...messages];
 }
 
+// Кап вызовов инструмента за один прогон. Мутирует counts. Возвращает {capped, result?}.
+// Сверх лимита НЕ зовём инструмент реально, а просим модель остановиться (стоп зацикливанию).
+function capToolCall(name, counts, limits = {}) {
+  counts[name] = (counts[name] || 0) + 1;
+  const lim = limits[name];
+  if (lim && counts[name] > lim) {
+    return {
+      capped: true,
+      result: { success: false, note: `Лимит вызовов «${name}» за этот запрос исчерпан (${lim}). Хватит — ответь по тому, что уже нашёл, или честно скажи, что точных данных нет.` },
+    };
+  }
+  return { capped: false };
+}
+
 async function runAgent({ combinedMessage, channel, chatId, phone, clientName, role, emit, media }) {
   const context = {
     channel, chatId, phone, clientName, role: role || 'employee',
@@ -208,6 +222,7 @@ async function runAgent({ combinedMessage, channel, chatId, phone, clientName, r
 
   const systemPrompt = await getSystemPrompt(clientName, phone, channel, chatId);
   let replyText = '';
+  const toolCounts = {}; // счётчик вызовов по имени за этот прогон (для капа web_search)
   agentMetrics.total++;
 
   try {
@@ -261,12 +276,17 @@ async function runAgent({ combinedMessage, channel, chatId, phone, clientName, r
         for (const toolCall of choice.message.tool_calls) {
           let toolResult;
           const toolName = toolCall.function.name;
-          let toolArgs;
-          try {
-            toolArgs = JSON.parse(toolCall.function.arguments || '{}');
-            toolResult = await executeToolCall(toolName, toolArgs, context);
-          } catch (err) {
-            toolResult = { success: false, message: 'Tool execution error: ' + err.message };
+          let toolArgs = {};
+          try { toolArgs = JSON.parse(toolCall.function.arguments || '{}'); } catch (_) { /* частичный JSON */ }
+          const cap = capToolCall(toolName, toolCounts, { web_search: config.WEB_SEARCH_MAX_PER_RUN });
+          if (cap.capped) {
+            toolResult = cap.result; // лимит исчерпан — не зовём реально, просим остановиться
+          } else {
+            try {
+              toolResult = await executeToolCall(toolName, toolArgs, context);
+            } catch (err) {
+              toolResult = { success: false, message: 'Tool execution error: ' + err.message };
+            }
           }
           for (const hook of _toolCallHooks) {
             try { hook(toolName, toolArgs || {}, toolResult); } catch (_) {}
@@ -354,7 +374,7 @@ async function runAgent({ combinedMessage, channel, chatId, phone, clientName, r
 module.exports = {
   runAgent, onToolCall, getAgentMetrics, llmCreateWithFallback,
   _internals: {
-    dropDanglingToolTail, persistErrorHistory, classifyLlmError, FALLBACK_MESSAGES,
+    dropDanglingToolTail, persistErrorHistory, classifyLlmError, capToolCall, FALLBACK_MESSAGES,
     FALLBACK_AI, FALLBACK_BUSY, FALLBACK_NO_CREDITS, FALLBACK_MODEL_REJECTED,
     FALLBACK_RATE_LIMIT, FALLBACK_MODEL_EMPTY, FALLBACK_NETWORK, FALLBACK_NO_PROVIDER,
     FALLBACK_LLM_GENERIC, FALLBACK_INTERNAL,

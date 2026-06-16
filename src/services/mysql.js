@@ -475,6 +475,24 @@ async function getLatestProjectForEmployee(empId) {
   }
 }
 
+// Куда писать боссу, если у сотрудника нет активного проекта: директор/руководитель из реестра
+// (с контактом). Возвращает {channel, contact} или null. Fallback на BOSS_CONTACTS/MANAGER_* —
+// в самом инструменте.
+async function findBossRoute() {
+  try {
+    const rows = await dbQuery(
+      `SELECT channel, contact FROM orch_employees
+       WHERE active = 1 AND contact IS NOT NULL
+         AND (roles LIKE '%директор%' OR roles LIKE '%руковод%' OR roles LIKE '%босс%')
+       ORDER BY id ASC LIMIT 1`
+    );
+    return rows.length ? { channel: rows[0].channel || 'whatsapp', contact: rows[0].contact } : null;
+  } catch (err) {
+    console.error('[MySQL] findBossRoute:', err.message);
+    return null;
+  }
+}
+
 // ─── Управление штатом (босс правит список в чате) ───────────────────────────
 async function addEmployee({ name, roles, skills, channel, contact }) {
   try {
@@ -1385,7 +1403,7 @@ module.exports = {
   checkDailyCount, incrementDailyCount,
   // Оркестратор: сотрудники
   seedEmployees, listEmployees, findEmployeeByContact, getEmployeeById, getOpenTasksForEmployee,
-  getLatestProjectForEmployee, addEmployee, updateEmployee, deactivateEmployee, findEmployees,
+  getLatestProjectForEmployee, findBossRoute, addEmployee, updateEmployee, deactivateEmployee, findEmployees,
   getActiveEmployeeIdSet,
   // Оркестратор: проекты
   createProject, getProject, updateProjectPlan, setProjectStatus, recomputeProjectStatus,

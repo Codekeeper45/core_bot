@@ -349,6 +349,8 @@ async function processMessage(rawPayload) {
     await stopTypingLoop(chat_id);
     if (replyText) {
       replyText = sanitizeReply(replyText);
+    }
+    if (replyText && replyText.trim()) {
       await sendReply(channel, chat_id, replyText);
       // Авто-голос (safety net): если босс написал ГОЛОСОМ, а агент НЕ озвучил сам через
       // say_voice — озвучиваем текст ответа (без тегов). Instagram голос не поддерживает.
