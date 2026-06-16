@@ -74,9 +74,13 @@
 
   .scroll{overflow:auto;min-height:0;flex:1;display:flex;flex-direction:column}
   .feed{padding:18px 18px 8px;display:flex;flex-direction:column;gap:12px;max-width:980px;width:100%;margin:0 auto}
-  .summary{margin:14px auto 0;max-width:980px;width:calc(100% - 36px);padding:11px 13px;background:var(--panel2);
-    border:1px solid var(--line);border-radius:11px;color:var(--text);font-size:.92em}
-  .summary b{color:var(--accent)}
+  .summary{margin:12px auto 0;max-width:980px;width:calc(100% - 36px);background:var(--panel2);
+    border:1px solid var(--line);border-radius:11px;color:var(--text);font-size:.9em;overflow:hidden}
+  .sumhead{display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;color:var(--accent);font-weight:650}
+  .sumhead .chev{margin-left:auto;color:var(--muted);transition:.15s}
+  .summary.open .sumhead .chev{transform:rotate(90deg)}
+  .sumbody{display:none;padding:0 13px 12px;color:var(--text);max-height:42vh;overflow:auto;white-space:pre-wrap}
+  .summary.open .sumbody{display:block}
 
   .row{display:flex;flex-direction:column}
   .row.user{align-items:flex-end}
@@ -147,6 +151,7 @@
             <div class="tog" data-set="showTools"><span>Показывать вызовы инструментов</span><div class="sw" id="sw-showTools"></div></div>
             <div class="tog" data-set="showSys"><span>Показывать системные пометки</span><div class="sw" id="sw-showSys"></div></div>
             <div class="tog" data-set="showTime"><span>Время сообщений (из штампа)</span><div class="sw" id="sw-showTime"></div></div>
+            <div class="tog" data-set="showSummary"><span>Показывать сводку памяти</span><div class="sw" id="sw-showSummary"></div></div>
           </div>
         </div>
       </div>
@@ -162,7 +167,7 @@ const $ = (id) => document.getElementById(id);
 let chats = [], active = null, current = null;
 
 // ── настройки чтения (localStorage) ──
-const DEF = { theme:'dark', fs:15, width:'74ch', showTools:true, showSys:false, showTime:true };
+const DEF = { theme:'dark', fs:15, width:'74ch', showTools:true, showSys:false, showTime:true, showSummary:true };
 let cfg = load();
 function load(){ try{ return Object.assign({}, DEF, JSON.parse(localStorage.getItem('viewerCfg')||'{}')); }catch(_){ return {...DEF}; } }
 function save(){ localStorage.setItem('viewerCfg', JSON.stringify(cfg)); }
@@ -175,6 +180,7 @@ function applyCfg(){
   $('sw-showTools').classList.toggle('on', cfg.showTools);
   $('sw-showSys').classList.toggle('on', cfg.showSys);
   $('sw-showTime').classList.toggle('on', cfg.showTime);
+  $('sw-showSummary').classList.toggle('on', cfg.showSummary);
 }
 
 function esc(s){ return String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
@@ -248,8 +254,11 @@ async function openChat(key){
 
 function renderFeed(){
   if(!current) return;
-  if(current.summary && current.summary.trim()){
-    $('summaryBox').innerHTML='<div class="summary"><b>Сводка памяти бота:</b> '+esc(current.summary)+'</div>';
+  if(cfg.showSummary && current.summary && current.summary.trim()){
+    $('summaryBox').innerHTML='<div class="summary" id="sumBox"><div class="sumhead" id="sumHead">'
+      +'🧠 Сводка памяти бота <span class="chev">▸</span></div>'
+      +'<div class="sumbody">'+esc(current.summary)+'</div></div>';
+    $('sumHead').onclick=()=>$('sumBox').classList.toggle('open');
   } else $('summaryBox').innerHTML='';
   let msgs=current.messages||[];
   if(!cfg.showTools) msgs=msgs.filter(m=>m.role!=='tool');
