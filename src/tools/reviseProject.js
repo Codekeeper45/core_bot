@@ -111,7 +111,7 @@ async function handler(args, context) {
       const emp = await getEmployeeById(r.employee_id);
       if (task && emp) {
         const newStatus = await assignTask(r.task_id, r.employee_id);
-        result.reassigned.push({ task_id: r.task_id, employee: emp.name, status: newStatus });
+        result.reassigned.push({ task_id: r.task_id, task_title: task.title, employee: emp.name, status: newStatus });
       } else {
         result.warnings.push(`reassign: задача #${r.task_id} или сотрудник #${r.employee_id} не найдены`);
       }
@@ -124,7 +124,7 @@ async function handler(args, context) {
         title: e.title, description: e.description, expected: e.expected,
         priority: e.priority, deadline: e.deadline,
       });
-      if (ok) result.edited.push({ task_id: e.task_id });
+      if (ok) result.edited.push({ task_id: e.task_id, task_title: e.title || task.title });
       else result.warnings.push(`edit: для #${e.task_id} не передано ни одного поля`);
     }
 
@@ -133,7 +133,7 @@ async function handler(args, context) {
       if (!task) { result.warnings.push(`cancel: задача #${c.task_id} не найдена`); continue; }
       // Отмена = закрыть как done с пометкой (rollup и DAG это корректно учитывают).
       await updateTaskStatus(c.task_id, 'done', `Отменена: ${c.reason || 'не требуется'}`);
-      result.cancelled.push({ task_id: c.task_id });
+      result.cancelled.push({ task_id: c.task_id, task_title: task.title });
     }
 
     // Если правили/отменяли задачи — пересчитать статус плана.

@@ -37,6 +37,7 @@ async function handler(args) {
     return {
       success: true,
       task_id: args.task_id,
+      task_title: task.title, // называй задачу человеку по сути, не по номеру
       assignee: { id: emp.id, name: emp.name },
       status: newStatus,
       project_status: projectStatus,

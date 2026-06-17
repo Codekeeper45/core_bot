@@ -98,6 +98,7 @@ async function handler(args, context = {}) {
     return {
       success: true,
       task_id: args.task_id,
+      task_title: task.title, // чтобы боту было КАК назвать задачу человеку (не голым номером)
       status: args.status,
       project_id: task.project_id,
       project_status: projectStatus,

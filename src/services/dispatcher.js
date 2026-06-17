@@ -43,7 +43,7 @@ async function dispatchTaskById(taskId, message) {
   if (!emp.channel || !emp.contact) {
     await markDispatched(taskId, false);
     return {
-      success: true, task_id: taskId, dispatched: true, sent: false, employee: emp.name,
+      success: true, task_id: taskId, task_title: task.title, dispatched: true, sent: false, employee: emp.name,
       note: 'тестовый сотрудник — диспатч записан, сообщение не отправлено',
     };
   }
@@ -51,7 +51,7 @@ async function dispatchTaskById(taskId, message) {
   const ok = await deliver(emp.channel, emp.contact, fullMsg, null, { record: true });
   await markDispatched(taskId, ok);
   return {
-    success: true, task_id: taskId, dispatched: true, sent: ok, employee: emp.name,
+    success: true, task_id: taskId, task_title: task.title, dispatched: true, sent: ok, employee: emp.name,
     note: ok ? 'доставлено' : 'ошибка отправки (см. логи)',
   };
 }

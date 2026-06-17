@@ -46,6 +46,14 @@ describe('dispatcher (auto-DAG)', () => {
     assert.equal(delivered.length, 1);
   });
 
+  test('dispatchTaskById возвращает task_title (чтобы бот называл задачу по сути)', async () => {
+    delivered.length = 0; dispatched.length = 0;
+    tasks = [{ id: 9, project_id: 7, title: 'Отгрузка лотков ЖК Шабыт', status: 'todo', dispatched: 0, assignee_id: 11, depends_on: null }];
+    const r = await dispatchTaskById(9, 'Собрать и отгрузить');
+    assert.equal(r.success, true);
+    assert.equal(r.task_title, 'Отгрузка лотков ЖК Шабыт');
+  });
+
   test('не диспатчит задачу без исполнителя', async () => {
     delivered.length = 0; dispatched.length = 0;
     tasks = [
