@@ -55,6 +55,7 @@ function isFallbackReply(text) {
 }
 
 const { sanitizeReply } = require('./security/sanitizer');
+const { isSilentStub } = require('./utils/silentStub');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -395,7 +396,7 @@ async function sendReply(channel, chatId, text) {
 // Выполнить инструкцию ботом от имени владельца (для scheduledRunner): захватить лок чата,
 // прогнать обычный агентный цикл (role=boss), ответ отправить владельцу. Единый с processMessage
 // путь ответа в канал. Возвращает {ok, reason?, reply?}.
-async function deliverInstruction({ channel, chatId, phone, clientName, instruction }) {
+async function deliverInstruction({ channel, chatId, phone, clientName, instruction, silentToOwner }) {
   const locked = await acquireLock(channel, chatId);
   if (!locked) return { ok: false, reason: 'lock_busy' }; // босс сейчас пишет — повторим на след. tick
 
@@ -429,7 +430,10 @@ async function deliverInstruction({ channel, chatId, phone, clientName, instruct
     if (reply && isFallbackReply(reply)) {
       return { ok: false, reason: 'agent_error' };
     }
-    if (reply) {
+    // silentToOwner — прогон адресован НЕ боссу (сторож пишет сотруднику): боссу не шлём.
+    // isSilentStub — модель проговорила «пустой ответ / напоминание отправлено / проверено»
+    // вместо настоящей пустоты: это шум по таймеру, не отправляем (агент-цикл уже отработал).
+    if (reply && !silentToOwner && !isSilentStub(reply)) {
       const clean = sanitizeReply(reply);
       if (clean) await sendReply(channel, chatId, clean);
     }

@@ -69,7 +69,8 @@ function wrapWatchChase(row, task, emp, goal, k, max) {
     + `Задача #${task.id} «${task.title}» назначена: ${who}. Цель: сотрудник должен ${goalVerb(goal)} — `
     + `сейчас статус «${task.status}», цель НЕ достигнута.\n`
     + `Напиши НАПРЯМУЮ этому сотруднику короткое напоминание через message_employee `
-    + `(to=${task.assignee_id || who}). Боссу СЕЙЧАС не пиши — после отправки сотруднику верни ПУСТОЙ ответ.`;
+    + `(to=${task.assignee_id || who}). Боссу СЕЙЧАС ничего не пиши — заверши ход без ответа боссу `
+    + `(система его всё равно не отправит). Не пиши «отправлено», «напоминание отправлено», «пустой ответ».`;
 }
 
 // Доставляется боссу: попытки исчерпаны, сотрудник так и не реагирует.
@@ -107,7 +108,7 @@ let timer = null;
 let running = false;     // гард: одно исполнение tick за раз (агентный цикл долгий)
 let lastCleanupDay = ''; // журнал чистим раз в сутки (старше 90 дней)
 
-function deliverRow(row, instruction) {
+function deliverRow(row, instruction, extra = {}) {
   return deliverFn({
     channel: row.owner_channel,
     chatId: row.owner_chat_id,
@@ -115,6 +116,7 @@ function deliverRow(row, instruction) {
     clientName: 'boss',
     instruction,
     title: row.title,
+    ...extra,
   });
 }
 
@@ -296,7 +298,9 @@ async function runWatchPhase(row, now, prevNextRunAt) {
   }
 
   // Есть попытки — напоминаем СОТРУДНИКУ (боссу тихо), планируем следующую проверку.
-  const res = await deliverRow(row, wrapWatchChase(row, task, emp, goal, k, max));
+  // silentToOwner: ответ боссу не отправляем ВООБЩЕ (погоня адресована сотруднику) —
+  // даже если модель проговорит «отправлено/пустой ответ». message_employee уже ушёл.
+  const res = await deliverRow(row, wrapWatchChase(row, task, emp, goal, k, max), { silentToOwner: true });
   if (res && res.reason === 'lock_busy') {
     await setScheduleNextRun(row.id, prevNextRunAt);
     await touchScheduleStatus(row.id, 'lock_busy');
