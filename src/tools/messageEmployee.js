@@ -56,7 +56,7 @@ async function handler(args) {
     const targets = args.to_all ? withContact : [withContact[0]];
     const sent_to = [];
     for (const emp of targets) {
-      const ok = await notifier.deliver(emp.channel || 'whatsapp', emp.contact, message);
+      const ok = await notifier.deliver(emp.channel || 'whatsapp', emp.contact, message, null, { record: true });
       sent_to.push({ id: emp.id, name: emp.name, sent: ok });
     }
     const okCount = sent_to.filter((r) => r.sent).length;

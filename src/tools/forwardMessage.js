@@ -66,11 +66,11 @@ async function handler(args, context = {}) {
     for (const r of targets) {
       const ch = r.channel || 'whatsapp';
       let okAny = false;
-      if (text) okAny = (await notifier.deliver(ch, r.contact, text)) || okAny;
+      if (text) okAny = (await notifier.deliver(ch, r.contact, text, null, { record: true })) || okAny;
       for (const m of loaded) {
         const ok = await notifier.deliver(ch, r.contact, '', {
           kind: m.type, buffer: m.buffer, caption: '', fileName: m.fileName, mimetype: m.mimetype,
-        });
+        }, { record: true });
         okAny = ok || okAny;
         if (ch === 'instagram') igDropped = true;
       }

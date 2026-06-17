@@ -5,12 +5,29 @@
 const { getProject } = require('./mysql');
 const config = require('../config');
 
+// Короткое описание медиа для записи в историю, когда текста нет (пересылка файла/фото).
+function describeMedia(media) {
+  if (!media) return '';
+  if (media.kind === 'image') return '[фото]';
+  if (media.kind === 'document') return `[файл: ${media.fileName || 'документ'}]`;
+  if (media.kind === 'voice') return '[голосовое]';
+  return '[вложение]';
+}
+
 // Доставить текст и/или медиа в указанный чат канала.
 // media = { kind:'image'|'voice'|'document', buffer, caption?, fileName?, mimetype? } — опционально.
 // Instagram (Wazzup) медиа не поддерживает → шлём текст/подпись (graceful fallback).
-async function deliver(channel, contact, text, media = null) {
+// opts.record=true — записать это исходящее в историю получателя (чтобы бот «помнил»,
+// что сам отправил/переслал сотруднику). По умолчанию НЕ пишем (ops-алерты/группы/эхо).
+async function deliver(channel, contact, text, media = null, opts = {}) {
   const ch = String(channel || '').toLowerCase();
   if (!contact || (!text && !media)) return false;
+  // Адрес доставки = ключ истории получателя (для WA это JID, под ним же лежит входящая
+  // переписка сотрудника — см. normalize chat_id). Считаем один раз: и для отправки, и для записи.
+  const waJid = ch === 'whatsapp'
+    ? (String(contact).includes('@') ? String(contact) : `${String(contact).replace(/\D/g, '')}@s.whatsapp.net`)
+    : null;
+  const recordKey = waJid || String(contact);
   try {
     if (ch === 'telegram') {
       const tg = require('../channels/telegram');
@@ -19,7 +36,7 @@ async function deliver(channel, contact, text, media = null) {
       else if (media && media.kind === 'document') { if (text) await tg.sendMessage(String(contact), text); await tg.sendDocument(String(contact), media.buffer, media.fileName); }
       else await tg.sendMessage(String(contact), text);
     } else if (ch === 'whatsapp') {
-      const jid = String(contact).includes('@') ? contact : `${String(contact).replace(/\D/g, '')}@s.whatsapp.net`;
+      const jid = waJid;
       const wa = require('../services/baileys');
       if (media && media.kind === 'image') await wa.sendImage(jid, media.buffer, media.caption || text || '');
       else if (media && media.kind === 'voice') { if (text) await wa.sendMessage(jid, text); await wa.sendVoice(jid, media.buffer); }
@@ -30,6 +47,15 @@ async function deliver(channel, contact, text, media = null) {
       await require('../channels/instagram').sendMessage(String(contact), text || (media && media.caption) || '[медиа недоступно в Instagram]');
     } else {
       return false;
+    }
+    // Доставлено — при необходимости фиксируем в истории получателя.
+    if (opts && opts.record) {
+      const body = (text && String(text).trim()) ? String(text) : describeMedia(media);
+      if (body) {
+        try {
+          await require('../agent/memory').recordOutbound(ch, recordKey, body);
+        } catch (recErr) { console.error('[Notifier] record outbound:', recErr.message); }
+      }
     }
     return true;
   } catch (err) {

@@ -48,7 +48,7 @@ async function dispatchTaskById(taskId, message) {
     };
   }
 
-  const ok = await deliver(emp.channel, emp.contact, fullMsg);
+  const ok = await deliver(emp.channel, emp.contact, fullMsg, null, { record: true });
   await markDispatched(taskId, ok);
   return {
     success: true, task_id: taskId, dispatched: true, sent: ok, employee: emp.name,
