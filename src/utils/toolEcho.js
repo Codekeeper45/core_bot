@@ -37,6 +37,10 @@ function formatToolEcho(name, args = {}) {
         : `✉️ Пишу сотруднику: ${s(a.to, 40)}`;
     case 'manage_employees':
       return `🛠 Обновляю штат (${s(a.action || 'изменение', 24)})`;
+    case 'manage_stock': {
+      const act = { search: 'Смотрю остатки', list: 'Смотрю склад', adjust: 'Обновляю остаток', set: 'Обновляю остаток', add: 'Добавляю позицию', remove: 'Удаляю позицию', rename: 'Переименовываю позицию' }[a.action] || 'Работаю со складом';
+      return `📦 ${act}`;
+    }
     case 'get_current_time':
       return '🕐 Сверяю текущее время';
     default:

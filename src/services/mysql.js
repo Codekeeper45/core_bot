@@ -254,6 +254,24 @@ async function initTables() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
+  // Остатки склада: одна строка = товар на конкретном складе (location). norm_key —
+  // нормализованное наименование (см. utils/stockKey) для поиска/дедупа; UNIQUE
+  // (location, norm_key) → upsert по нему. qty DECIMAL: допускает метры/дробное.
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS orch_stock (
+      id         INT AUTO_INCREMENT PRIMARY KEY,
+      location   VARCHAR(32)   NOT NULL DEFAULT 'Нижний',
+      name       VARCHAR(255)  NOT NULL,
+      norm_key   VARCHAR(190)  NOT NULL,
+      qty        DECIMAL(12,3) NOT NULL DEFAULT 0,
+      unit       VARCHAR(16)   NOT NULL DEFAULT 'шт',
+      updated_at TIMESTAMP     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      updated_by VARCHAR(64)   NULL,
+      UNIQUE KEY uniq_loc_key (location, norm_key),
+      INDEX idx_stock_norm (norm_key)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
   // Миграция: добавить колонку сводки в уже существующие таблицы истории
   // (CREATE TABLE IF NOT EXISTS не добавит колонку к созданной ранее таблице).
   try {
@@ -1413,6 +1431,93 @@ async function listActiveQuiet() {
 }
 
 
+// ── Склад: остатки (orch_stock) ─────────────────────────────────────────────
+const { normKey, queryTokens } = require('../utils/stockKey');
+
+// Поиск по запросу: каждый токен должен встречаться в norm_key (AND). Без запроса —
+// последние позиции. location — опциональный фильтр склада.
+async function stockSearch(query, location = null, limit = 50) {
+  try {
+    const tokens = queryTokens(query);
+    const where = [];
+    const params = [];
+    if (location) { where.push('location = ?'); params.push(location); }
+    for (const t of tokens) { where.push('norm_key LIKE ?'); params.push(`%${t}%`); }
+    const sql = `SELECT id, location, name, qty, unit, updated_at FROM orch_stock`
+      + (where.length ? ` WHERE ${where.join(' AND ')}` : '')
+      + ` ORDER BY name ASC LIMIT ?`;
+    params.push(Number(limit) || 50);
+    return await dbQuery(sql, params);
+  } catch (err) {
+    console.error('[MySQL] stockSearch:', err.message);
+    return [];
+  }
+}
+
+async function stockList(location = null, limit = 50) {
+  return stockSearch('', location, limit);
+}
+
+async function stockGetById(id) {
+  try {
+    const rows = await dbQuery('SELECT * FROM orch_stock WHERE id = ?', [Number(id)]);
+    return rows.length ? rows[0] : null;
+  } catch (err) { console.error('[MySQL] stockGetById:', err.message); return null; }
+}
+
+async function stockGetByKey(location, key) {
+  try {
+    const rows = await dbQuery('SELECT * FROM orch_stock WHERE location = ? AND norm_key = ?', [location, key]);
+    return rows.length ? rows[0] : null;
+  } catch (err) { console.error('[MySQL] stockGetByKey:', err.message); return null; }
+}
+
+// Установить абсолютный остаток (создаёт позицию, если её не было). Возвращает
+// { id, created, qty }.
+async function stockUpsertSet(location, name, qty, unit = 'шт', by = null) {
+  const loc = location || 'Нижний';
+  const key = normKey(name);
+  const q = Number(qty);
+  await dbQuery(
+    `INSERT INTO orch_stock (location, name, norm_key, qty, unit, updated_by)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE qty = VALUES(qty), name = VALUES(name),
+       unit = VALUES(unit), updated_by = VALUES(updated_by)`,
+    [loc, String(name), key, q, unit || 'шт', by]
+  );
+  const row = await stockGetByKey(loc, key);
+  return { id: row ? row.id : null, created: !!row, qty: row ? Number(row.qty) : q };
+}
+
+// Приход(+)/расход(−) по существующей позиции. Остаток не уходит ниже 0 (clamp).
+// Возвращает { ok, old, qty, clamped } или { ok:false } если позиция не найдена.
+async function stockAdjust(row, delta, by = null) {
+  if (!row) return { ok: false };
+  const old = Number(row.qty);
+  let next = old + Number(delta);
+  let clamped = false;
+  if (next < 0) { next = 0; clamped = true; }
+  await dbQuery('UPDATE orch_stock SET qty = ?, updated_by = ? WHERE id = ?', [next, by, row.id]);
+  return { ok: true, old, qty: next, clamped };
+}
+
+async function stockRemove(id) {
+  try {
+    const res = await dbQuery('DELETE FROM orch_stock WHERE id = ?', [Number(id)]);
+    return res && (res.affectedRows || 0) > 0;
+  } catch (err) { console.error('[MySQL] stockRemove:', err.message); return false; }
+}
+
+async function stockRename(id, newName, by = null) {
+  try {
+    const res = await dbQuery(
+      'UPDATE orch_stock SET name = ?, norm_key = ?, updated_by = ? WHERE id = ?',
+      [String(newName), normKey(newName), by, Number(id)]
+    );
+    return res && (res.affectedRows || 0) > 0;
+  } catch (err) { console.error('[MySQL] stockRename:', err.message); return false; }
+}
+
 module.exports = {
   getPool, dbQuery, withTransaction, initTables,
   loadHistory, saveHistory, clearHistory,
@@ -1437,4 +1542,7 @@ module.exports = {
   createTasksBulk, getTask, listTasksForProject, assignTask, markDispatched, updateTaskStatus,
   updateTaskFields,
   setTaskDeadline,
+  // Склад: остатки
+  stockSearch, stockList, stockGetById, stockGetByKey, stockUpsertSet, stockAdjust,
+  stockRemove, stockRename,
 };
