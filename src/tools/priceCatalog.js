@@ -2,6 +2,7 @@
 
 const { priceGetBySku, priceSearch } = require('../services/mysql');
 const { handleToolDbError } = require('../utils/toolError');
+const { displayArticle } = require('../utils/priceDisplay');
 
 const definition = {
   type: 'function',
@@ -34,7 +35,7 @@ const definition = {
 
 function publicItem(item) {
   return {
-    sku: item.sku,
+    sku: displayArticle(item),
     source_sku: item.source_sku || null,
     series: item.series_name || item.series || null,
     load_class: item.load_class || null,

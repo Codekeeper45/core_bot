@@ -47,7 +47,9 @@ function col(map, name) {
 
 function syntheticSku(rawSku, rowNumber) {
   const sku = clean(rawSku);
-  if (!sku) return '';
+  // Пустой артикул — позиция без артикула; синтетический ключ для уникальности,
+  // наружу артикул показывается как «нет» (source_sku остаётся null).
+  if (!sku) return `AQ-NOART-R${String(rowNumber).padStart(3, '0')}`;
   if (sku.toLowerCase() !== 'новинка') return sku;
   return `AQ-NOVINKA-R${String(rowNumber).padStart(3, '0')}`;
 }
@@ -90,7 +92,9 @@ function parsePriceWorkbook(filePath) {
     const sku = syntheticSku(rawSku, rowNumber);
     const price = numeric(row[indexes.retailPrice]);
     const discountPrice = numeric(row[indexes.discountPrice]);
-    if (!sku || !name || price == null) continue;
+    // Импортируем и позиции без артикула (sku синтетический), важно лишь наличие
+    // наименования и розничной цены (колонка retail_price NOT NULL).
+    if (!name || price == null) continue;
     const item = {
       row_number: rowNumber,
       series: currentSection,
@@ -108,7 +112,7 @@ function parsePriceWorkbook(filePath) {
       discount_price: discountPrice,
       currency: 'KZT',
     };
-    item.norm_key = normKey([item.sku, item.source_sku, item.series, item.load_class, item.name, item.dn].filter(Boolean).join(' '));
+    item.norm_key = normKey([item.sku, item.source_sku, item.series, item.load_class, item.name, item.dn, item.pallet_qty].filter(Boolean).join(' '));
     items.push(item);
   }
   const unique = new Set(items.map((x) => x.sku));
@@ -122,10 +126,10 @@ function parsePriceWorkbook(filePath) {
   };
 }
 
-async function importPriceWorkbook(filePath) {
+async function importPriceWorkbook(filePath, opts = {}) {
   const parsed = parsePriceWorkbook(filePath);
   const mysql = require('./mysql');
-  return mysql.importPriceCatalog(parsed);
+  return mysql.importPriceCatalog(parsed, opts);
 }
 
 module.exports = { numeric, parsePriceWorkbook, importPriceWorkbook };
