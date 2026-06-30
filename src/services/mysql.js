@@ -2125,16 +2125,21 @@ function normalizeSku(sku) {
     .replace(/Х/g, 'X');
 }
 
-async function importPriceCatalog(parsed) {
+async function importPriceCatalog(parsed, opts = {}) {
   return withTransaction(async (q) => {
     const existing = await q(
       'SELECT id, row_count FROM orch_price_imports WHERE source_hash = ? AND status = ? LIMIT 1',
       [parsed.source_hash, 'ready']
     );
-    if (existing.length) {
+    if (existing.length && !opts.force) {
       await q('UPDATE orch_price_items SET active = 0 WHERE active = 1');
       await q('UPDATE orch_price_items SET active = 1 WHERE import_id = ?', [existing[0].id]);
       return { imported: false, import_id: existing[0].id, row_count: existing[0].row_count, activated: true };
+    }
+    if (existing.length && opts.force) {
+      // Тот же файл, но новый парсер: сносим старый снимок и вставляем заново.
+      await q('DELETE FROM orch_price_items WHERE import_id = ?', [existing[0].id]);
+      await q('DELETE FROM orch_price_imports WHERE id = ?', [existing[0].id]);
     }
 
     const head = await q(
@@ -2276,7 +2281,7 @@ async function priceAddItem(data = {}, actor = {}) {
       const loadClass = data.load_class || null;
       const dn = data.dn || null;
       const sourceSku = data.source_sku || null;
-      const key = normKey([sku, sourceSku, series, loadClass, name, dn].filter(Boolean).join(' '));
+      const key = normKey([sku, sourceSku, series, loadClass, name, dn, data.pallet_qty].filter(Boolean).join(' '));
       const res = await q(
         `INSERT INTO orch_price_items
          (import_id, active, row_number, series_name, sku, source_sku, sku_norm, load_class, name, dn,

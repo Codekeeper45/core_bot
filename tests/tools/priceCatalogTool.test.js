@@ -8,6 +8,8 @@ const items = [
   { sku: '11005', name: 'Лоток водоотводный пластиковый ЛВП Norma DN100 H55', dn: 'DN100', load_class: 'А, В, С', retail_price: 3600, discount_price: 3060, currency: 'KZT', source_file: 'aquastok.xlsx', price_date: '2026-01-01' },
   { sku: '11007', name: 'Лоток водоотводный пластиковый ЛВП Norma DN100 H70', dn: 'DN100', load_class: 'А, В, С', retail_price: 4300, discount_price: 3655, currency: 'KZT', source_file: 'aquastok.xlsx', price_date: '2026-01-01' },
   { sku: '31513С', name: 'Решетка чугунная щелевая РЧЩ Norma DN150 C250', dn: 'DN150', load_class: 'А, В, С', retail_price: 17000, discount_price: 14450, currency: 'KZT', source_file: 'aquastok.xlsx', price_date: '2026-01-01' },
+  { sku: 'AQ-NOVINKA-R031', source_sku: 'новинка', name: 'Решетка пластиковая косичка РПК Norma DN100', dn: 'DN100', retail_price: 5000, discount_price: 4250, currency: 'KZT', source_file: 'aquastok.xlsx', price_date: '2026-01-01' },
+  { sku: 'AQ-NOART-R118', source_sku: null, name: 'Крепящий якорь к бордюру Кантри', retail_price: 900, discount_price: 765, currency: 'KZT', source_file: 'aquastok.xlsx', price_date: '2026-01-01' },
 ];
 function normalizeSku(sku) {
   return String(sku || '').trim().toUpperCase().replace(/С/g, 'C');
@@ -51,7 +53,7 @@ test('price_catalog не угадывает неоднозначную пози�
   const result = await handler({ action: 'calculate', lines: [{ query: 'DN100', qty: 1 }] });
   assert.equal(result.success, false);
   assert.equal(result.reason, 'ambiguous');
-  assert.equal(result.candidates.length, 2);
+  assert.equal(result.candidates.length, 3);
 });
 
 test('price_catalog search находит кириллическую С по латинской C', async () => {
@@ -60,4 +62,17 @@ test('price_catalog search находит кириллическую С по л�
   assert.equal(result.count, 1);
   assert.equal(result.items[0].sku, '31513С');
   assert.equal(result.items[0].discount_price, 14450);
+});
+
+test('артикул в выдаче: новинка → «новинка», без артикула → null, обычный → как есть', async () => {
+  const novelty = await handler({ action: 'search', query: 'косичка' });
+  assert.equal(novelty.success, true);
+  assert.equal(novelty.items[0].sku, 'новинка', 'синтетический AQ-NOVINKA не должен утекать наружу');
+
+  const noart = await handler({ action: 'search', query: 'якорь к бордюру' });
+  assert.equal(noart.success, true);
+  assert.equal(noart.items[0].sku, null, 'позиция без артикула → sku null, не AQ-NOART');
+
+  const normal = await handler({ action: 'search', query: '11005' });
+  assert.equal(normal.items[0].sku, '11005');
 });

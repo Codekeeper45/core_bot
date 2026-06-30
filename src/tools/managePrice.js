@@ -7,10 +7,11 @@ const {
   priceSetPrice, priceSetDiscountPrice, priceAddItem, priceRemove, priceRename, priceListChanges,
 } = require('../services/mysql');
 const { handleToolDbError } = require('../utils/toolError');
+const { displayArticle } = require('../utils/priceDisplay');
 
 function publicItem(item) {
   return {
-    sku: item.sku,
+    sku: displayArticle(item),
     source_sku: item.source_sku || null,
     series: item.series_name || item.series || null,
     load_class: item.load_class || null,

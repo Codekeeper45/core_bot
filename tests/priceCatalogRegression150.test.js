@@ -89,9 +89,13 @@ test('регрессия 1-150: Аквасток видит артикулы, DN
     checks++;
   }
 
-  assert.equal(checks, 123);
+  assert.equal(checks, items.length + 38);
 
-  for (const item of items.slice(0, 27)) {
+  // Считаем по позициям с реальным артикулом и скидочной ценой: для них
+  // отображаемый артикул (sku в выдаче) совпадает с настоящим.
+  const calcItems = items.filter((x) => !/^AQ-/.test(x.sku) && x.discount_price != null).slice(0, 27);
+  assert.equal(calcItems.length, 27, 'должно хватать обычных позиций со скидкой');
+  for (const item of calcItems) {
     const result = await handler({ action: 'calculate', lines: [{ query: item.sku, qty: 1 }] });
     assert.equal(result.success, true);
     assert.equal(result.lines[0].sku, item.sku);
@@ -99,5 +103,5 @@ test('регрессия 1-150: Аквасток видит артикулы, DN
     checks++;
   }
 
-  assert.equal(checks, 150);
+  assert.equal(checks, items.length + 38 + 27);
 });
