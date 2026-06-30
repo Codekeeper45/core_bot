@@ -36,6 +36,8 @@ test('safeTrimHistory: чистый массив не меняется', () => {
 // Shrink thresholds for deterministic tests (config is a shared object).
 config.CONTEXT_SUMMARY_CHAR_LIMIT = 200;
 config.CONTEXT_KEEP_RECENT_MSGS = 3;
+config.CONTEXT_SUMMARY_MIN_MESSAGES = 5;
+config.CONTEXT_SUMMARY_HARD_CHAR_LIMIT = 100000;
 
 const okClient = (calls) => ({
   chat: { completions: { create: async (args) => { calls.push(args); return { choices: [{ message: { content: 'СВОДКА ДИАЛОГА' } }] }; } } },
@@ -93,6 +95,31 @@ test('over limit → summarized, kept window valid, LLM called once', async () =
   // kept chunk must start at a clean turn-start (user or assistant w/o tool_calls)
   const first = r.messages[0];
   assert.ok(first.role === 'user' || (first.role === 'assistant' && !first.tool_calls));
+});
+
+test('floor сообщений: не сжимаем, пока сообщений меньше порога (даже сверх мягкого лимита)', async () => {
+  const calls = [];
+  const savedMin = config.CONTEXT_SUMMARY_MIN_MESSAGES;
+  config.CONTEXT_SUMMARY_MIN_MESSAGES = 50; // порог выше, чем число сообщений
+  const messages = bigMsgs(12); // объём > мягкого лимита 200, но 12 < 50
+  const r = await summarizeIfNeeded({ messages, summary: '', openai: okClient(calls), model: 'm' });
+  config.CONTEXT_SUMMARY_MIN_MESSAGES = savedMin;
+  assert.strictEqual(r.changed, false, 'до порога сообщений не сжимаем');
+  assert.strictEqual(calls.length, 0, 'LLM не вызывался');
+});
+
+test('аварийный потолок: сжимаем даже ниже floor, если объём огромный', async () => {
+  const calls = [];
+  const savedMin = config.CONTEXT_SUMMARY_MIN_MESSAGES;
+  const savedHard = config.CONTEXT_SUMMARY_HARD_CHAR_LIMIT;
+  config.CONTEXT_SUMMARY_MIN_MESSAGES = 50;   // floor высокий
+  config.CONTEXT_SUMMARY_HARD_CHAR_LIMIT = 200; // но объём пробивает аварийный потолок
+  const messages = bigMsgs(12); // ~768 > 200
+  const r = await summarizeIfNeeded({ messages, summary: '', openai: okClient(calls), model: 'm' });
+  config.CONTEXT_SUMMARY_MIN_MESSAGES = savedMin;
+  config.CONTEXT_SUMMARY_HARD_CHAR_LIMIT = savedHard;
+  assert.strictEqual(r.changed, true, 'аварийный потолок форсирует сжатие');
+  assert.strictEqual(calls.length, 1);
 });
 
 test('previous summary is merged into the LLM input', async () => {

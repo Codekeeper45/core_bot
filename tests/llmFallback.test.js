@@ -46,6 +46,32 @@ test('both models fail → error propagates (caller escalates)', async () => {
   assert.deepStrictEqual(calls, ['primary/model', 'qwen/qwen3.6-plus']);
 });
 
+test('ответ 200 без choices (бесплатная модель/лимит) → трактуется как сбой, fallback', async () => {
+  // primary отдаёт HTTP 200, но тело без choices (часто { error: {...} }) — раньше это
+  // ломало агента в unexpected_error; теперь считается сбоем провайдера.
+  const calls = [];
+  const c = {
+    chat: { completions: { create: async (params) => {
+      calls.push(params.model);
+      if (params.model === 'primary/model') return { error: { message: 'rate limited' } };
+      return { choices: [{ message: { content: `ok from ${params.model}` } }] };
+    } } },
+  };
+  const r = await llmCreateWithFallback((model) => ({ model }), NO_DELAY, c);
+  assert.strictEqual(r.choices[0].message.content, 'ok from qwen/qwen3.6-plus');
+  assert.deepStrictEqual(calls, ['primary/model', 'qwen/qwen3.6-plus']);
+});
+
+test('оба провайдера вернули тело без choices → ошибка пробрасывается (caller → FALLBACK_BUSY)', async () => {
+  const c = {
+    chat: { completions: { create: async () => ({ error: { message: 'no endpoints' } }) } },
+  };
+  await assert.rejects(
+    () => llmCreateWithFallback((model) => ({ model }), NO_DELAY, c),
+    /некорректный ответ|no endpoints/
+  );
+});
+
 test('no fallback configured → primary error propagates, no second attempt', async () => {
   const saved = config.OPENROUTER_FALLBACK_MODEL;
   config.OPENROUTER_FALLBACK_MODEL = '';

@@ -69,6 +69,17 @@ async function sendVoice(chatId, buffer, caption = '') {
   }
 }
 
+// Отправить документ/файл-вложение (буфер) с именем файла.
+async function sendDocument(chatId, buffer, fileName = 'файл') {
+  try {
+    await getBot().telegram.sendDocument(chatId, { source: buffer, filename: fileName });
+    return true;
+  } catch (err) {
+    console.error('[TG] sendDocument error:', err.message);
+    return false;
+  }
+}
+
 async function sendChatAction(chatId, action = 'typing') {
   try {
     await getBot().telegram.sendChatAction(chatId, action);
@@ -97,4 +108,4 @@ async function deleteMessage(chatId, messageId) {
   try { await getBot().telegram.deleteMessage(chatId, messageId); } catch {}
 }
 
-module.exports = { getBot, sendMessage, sendPhoto, sendVoice, splitForTelegram, sendChatAction, downloadFile, getFileUrl, deleteMessage };
+module.exports = { getBot, sendMessage, sendPhoto, sendVoice, sendDocument, splitForTelegram, sendChatAction, downloadFile, getFileUrl, deleteMessage };

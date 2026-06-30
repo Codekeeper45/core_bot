@@ -22,9 +22,9 @@ const definition = {
   },
 };
 
-async function handler(args) {
+async function handler(args, context = {}) {
   try {
-    return await dispatchTaskById(args.task_id, args.message);
+    return await dispatchTaskById(args.task_id, args.message, context);
   } catch (err) {
     return handleToolDbError(err);
   }

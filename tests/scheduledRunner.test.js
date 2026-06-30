@@ -16,8 +16,10 @@ const mysqlMock = {
   setScheduleEnabled: async (id, on) => calls.push(['setEnabled', id, on]),
   logScheduleRun: async (id, title, status, detail) => journal.push({ id, status, detail }),
   cleanupScheduleRuns: async () => 0,
+  listActiveQuiet: async () => mysqlMock._quiet,
   _rows: [],
   _claimResult: true,
+  _quiet: [],
 };
 
 const Module = require('module');
@@ -64,6 +66,18 @@ describe('tick', () => {
     const mark = calls.find((c) => c[0] === 'markRun');
     assert.deepEqual(mark.slice(0, 3), ['markRun', 1, 'ok']);
     assert.equal(mark[3], '2026-06-09 04:00:00'); // завтра 9:00 локально
+  });
+
+  test('тихий режим владельца → созревшее расписание держим (нет claim, нет доставки)', async () => {
+    mysqlMock._rows = [row({ id: 7, kind: 'daily', at_hour: 9, at_minute: 0, next_run_at: '2026-06-08 04:00:00' })];
+    mysqlMock._quiet = [{ owner_channel: 'whatsapp', owner_chat_id: 'a', owner_phone: '7707' }];
+    calls.length = 0;
+    let delivered = false;
+    setDeliver(async () => { delivered = true; return { ok: true }; });
+    await tick(utc(2026, 6, 8, 4, 0));
+    assert.equal(delivered, false, 'в тихом режиме первым не пишем');
+    assert.equal(calls.find((c) => c[0] === 'claim'), undefined, 'расписание не захватывается — держим до снятия тишины');
+    mysqlMock._quiet = [];
   });
 
   test('успех once → markRun(next=null) + выключение (завершено)', async () => {

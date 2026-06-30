@@ -1,6 +1,6 @@
 'use strict';
-// Визуализация: Mermaid-код → PNG через публичный kroki.io → картинка в чат босса.
-// Без ключей. Режим босса (BOSS_ONLY).
+// Визуализация: Mermaid-код → PNG через публичный kroki.io → картинка в чат.
+// Без ключей. Доступен боссу и сотруднику.
 const { deflateSync } = require('node:zlib');
 const notifier = require('../services/notifier');
 
@@ -9,10 +9,10 @@ const definition = {
   function: {
     name: 'render_diagram',
     description:
-      'Нарисовать диаграмму по Mermaid-коду и отправить боссу картинкой. Используй, когда нужно '
+      'Нарисовать диаграмму по Mermaid-коду и отправить картинкой в чат. Используй, когда нужно '
       + 'визуализировать процесс, структуру, план, таймлайн, оргсхему, воронку. Поддерживает '
       + 'flowchart, sequence, class, mindmap, timeline, gantt, er, pie. Передавай КОРРЕКТНЫЙ '
-      + 'Mermaid-код. После отправки кратко подтверди боссу.',
+      + 'Mermaid-код. После отправки кратко подтверди.',
     parameters: {
       type: 'object',
       properties: {

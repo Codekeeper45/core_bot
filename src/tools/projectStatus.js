@@ -51,7 +51,7 @@ async function handler(args) {
       byStatus[t.status] = (byStatus[t.status] || 0) + 1;
       if (t.status === 'blocked') blocked.push(t.id);
       const unmet = unmetDeps(t, tasks); // единый источник истины с dispatch_task
-      if (unmet.length && t.status !== 'done') unmetDependencies.push({ task_id: t.id, waiting_on: unmet });
+      if (unmet.length && t.status !== 'done' && t.status !== 'cancelled') unmetDependencies.push({ task_id: t.id, waiting_on: unmet });
     }
 
     return {

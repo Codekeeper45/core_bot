@@ -32,6 +32,10 @@ const definition = {
               description: { type: 'string', description: 'Что именно сделать.' },
               expected: { type: 'string', description: 'Ожидаемый результат / definition of done.' },
               priority: { type: 'integer', description: 'Приоритет 1 (высший) .. 5 (низший).' },
+              deadline: {
+                type: 'string',
+                description: 'Срок выполнения в формате ISO 8601 (YYYY-MM-DDTHH:mm:ss).',
+              },
               depends_on: {
                 type: 'array',
                 items: { type: 'string' },
@@ -61,7 +65,7 @@ async function handler(args, context) {
       context.channel,
       context.chatId
     );
-    const created = await createTasksBulk(projectId, tasks);
+    const created = await createTasksBulk(projectId, tasks, context);
     const warnings = created.warnings || [];
 
     // План создан, но НЕ разослан: ждём утверждения босса (approval-first).

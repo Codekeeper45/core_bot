@@ -69,13 +69,23 @@ describe('manage_schedule: create', () => {
 
   test('interval: не сразу, а через interval_min; меньше минимума → ошибка', async () => {
     reset();
-    const r = await handler({ action: 'create', title: 'X', instruction: 'y', kind: 'interval', interval_min: 30 }, ctx);
+    const r = await handler({ action: 'create', title: 'X', instruction: 'y', kind: 'interval', interval_min: 30, max_runs: 3 }, ctx);
     assert.equal(r.success, true);
     const next = new Date(String(created[0].next_run_at).replace(' ', 'T') + 'Z');
     assert.ok(next.getTime() > Date.now() + 25 * 60000, 'первый запуск не раньше чем через interval');
-    const bad = await handler({ action: 'create', title: 'X', instruction: 'y', kind: 'interval', interval_min: 1 }, ctx);
+    const bad = await handler({ action: 'create', title: 'X', instruction: 'y', kind: 'interval', interval_min: 1, max_runs: 3 }, ctx);
     assert.equal(bad.success, false);
     assert.match(bad.message, /interval_min/);
+  });
+
+  test('interval БЕЗ лимита (нет max_runs/until_date) → отказ', async () => {
+    reset();
+    const r = await handler({ action: 'create', title: 'X', instruction: 'y', kind: 'interval', interval_min: 30 }, ctx);
+    assert.equal(r.success, false);
+    assert.match(r.message, /лимит|max_runs|бесконечно/i);
+    // с until_date — проходит (лимит по дате)
+    const ok = await handler({ action: 'create', title: 'X', instruction: 'y', kind: 'interval', interval_min: 30, until_date: '2090-01-01' }, ctx);
+    assert.equal(ok.success, true);
   });
 
   test('delay_minutes: «через час» → run_at = now+60м UTC, без арифметики у LLM', async () => {
@@ -293,6 +303,61 @@ describe('manage_schedule: будильник/календарь (create с но
     const r = await handler({ action: 'create', title: 'X', instruction: 'y', kind: 'once', delay_minutes: 30, nag_interval_min: 1 }, ctx);
     assert.equal(r.success, false);
     assert.match(r.message, /nag_interval_min/);
+  });
+});
+
+describe('manage_schedule: контроль исполнения (watchdog)', () => {
+  test('валидный once-контроль создаётся, watch_goal по умолчанию done', async () => {
+    reset();
+    const r = await handler({
+      action: 'create', title: 'Контроль доставки', instruction: 'проследи', kind: 'once',
+      delay_minutes: 30, watch_task_id: 7, nag_interval_min: 10, nag_max: 3,
+    }, ctx);
+    assert.equal(r.success, true);
+    assert.equal(created[0].watch_task_id, 7);
+    assert.equal(created[0].watch_goal, 'done');
+    assert.match(r.when, /контроль задачи #7/);
+    assert.match(r.when, /эскалирую боссу/);
+  });
+
+  test('watch_goal accepted сохраняется', async () => {
+    reset();
+    const r = await handler({
+      action: 'create', title: 'X', instruction: 'y', kind: 'once', delay_minutes: 30,
+      watch_task_id: 7, watch_goal: 'accepted', nag_interval_min: 10,
+    }, ctx);
+    assert.equal(r.success, true);
+    assert.equal(created[0].watch_goal, 'accepted');
+  });
+
+  test('watch_task_id на не-once → отказ', async () => {
+    reset();
+    const r = await handler({
+      action: 'create', title: 'X', instruction: 'y', kind: 'daily', at_hour: 9,
+      watch_task_id: 7, nag_interval_min: 10,
+    }, ctx);
+    assert.equal(r.success, false);
+    assert.match(r.message, /once/i);
+    assert.equal(created.length, 0);
+  });
+
+  test('контроль без nag_interval_min → отказ', async () => {
+    reset();
+    const r = await handler({
+      action: 'create', title: 'X', instruction: 'y', kind: 'once', delay_minutes: 30, watch_task_id: 7,
+    }, ctx);
+    assert.equal(r.success, false);
+    assert.match(r.message, /nag_interval_min/);
+  });
+
+  test('watch_goal вне enum → отказ', async () => {
+    reset();
+    const r = await handler({
+      action: 'create', title: 'X', instruction: 'y', kind: 'once', delay_minutes: 30,
+      watch_task_id: 7, watch_goal: 'maybe', nag_interval_min: 10,
+    }, ctx);
+    assert.equal(r.success, false);
+    assert.match(r.message, /watch_goal/);
   });
 });
 

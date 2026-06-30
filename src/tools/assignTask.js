@@ -21,7 +21,7 @@ const definition = {
   },
 };
 
-async function handler(args) {
+async function handler(args, context = {}) {
   try {
     const task = await getTask(args.task_id);
     if (!task) return { success: false, message: `Задача ${args.task_id} не найдена.` };
@@ -29,7 +29,7 @@ async function handler(args) {
     if (!emp) return { success: false, message: `Сотрудник ${args.employee_id} не найден.` };
 
     // Переназначение сбрасывает диспатч и при необходимости возвращает задачу в очередь.
-    const newStatus = await assignTask(args.task_id, args.employee_id);
+    const newStatus = await assignTask(args.task_id, args.employee_id, context);
     // Пересчитываем статус проекта (например, был done → снова active после reopen).
     const projectStatus = await recomputeProjectStatus(task.project_id);
 
@@ -37,6 +37,7 @@ async function handler(args) {
     return {
       success: true,
       task_id: args.task_id,
+      task_title: task.title, // называй задачу человеку по сути, не по номеру
       assignee: { id: emp.id, name: emp.name },
       status: newStatus,
       project_status: projectStatus,

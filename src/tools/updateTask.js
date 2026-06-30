@@ -56,7 +56,8 @@ async function handler(args, context = {}) {
       }
     }
 
-    await updateTaskStatus(args.task_id, args.status, args.result);
+    const changed = await updateTaskStatus(args.task_id, args.status, args.result, context);
+    if (!changed) return { success: false, reason: 'not_found', message: `Задача ${args.task_id} не найдена.` };
 
     // Статус проекта — один агрегат (без гонки read-modify-write).
     const projectStatus = await recomputeProjectStatus(task.project_id);
@@ -98,6 +99,7 @@ async function handler(args, context = {}) {
     return {
       success: true,
       task_id: args.task_id,
+      task_title: task.title, // чтобы боту было КАК назвать задачу человеку (не голым номером)
       status: args.status,
       project_id: task.project_id,
       project_status: projectStatus,

@@ -18,10 +18,11 @@ const MAX_CACHE_SIZE = 10000;
  * Check if a message has already been processed.
  * Returns true if the message is a duplicate (should be skipped).
  */
-function isDuplicate(channel, chatId, content) {
+function isDuplicate(channel, chatId, content, messageId = '') {
   // Full composite string key — no 32-bit hash, so distinct messages can't collide
   // and get silently dropped.
-  const key = `${channel}:${chatId}:${content}`;
+  const discriminator = messageId ? `id:${messageId}` : `content:${content}`;
+  const key = `${channel}:${chatId}:${discriminator}`;
   const now = Date.now();
 
   const seenAt = recentMessages.get(key);
@@ -40,4 +41,6 @@ function isDuplicate(channel, chatId, content) {
   return false;
 }
 
-module.exports = { isDuplicate };
+function _resetForTests() { recentMessages.clear(); }
+
+module.exports = { isDuplicate, _resetForTests };

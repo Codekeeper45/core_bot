@@ -37,16 +37,25 @@ const { acquireLock, enqueue, releaseLockAndProcessQueue } = require('./middlewa
 const { checkRateLimit } = require('./middleware/rateLimit');
 const { isDuplicate } = require('./middleware/deduplication');
 const { isAllowedSender } = require('./middleware/access');
-const { clearHistory, initTables } = require('./services/mysql');
+const { clearHistory, initTables, setQuiet, clearQuiet, getQuiet } = require('./services/mysql');
 const { startTypingLoop, stopTypingLoop } = require('./middleware/typing');
 
 const { transcribeVoice } = require('./media/voice');
 const { analyzeImages, checkDailyImageLimit, incrementDailyImageCount } = require('./media/image');
 const { processDocument } = require('./media/document');
 
-const { runAgent } = require('./agent/agent');
+const { runAgent, _internals: agentInternals } = require('./agent/agent');
+
+// Аварийные ответы агента (любой сбой LLM / пустой ответ / внутренняя ошибка):
+// по расписанию их не доставляем (иначе босс ловит ошибку по таймеру), но в
+// интерактивном чате — показываем честно. Набор всех таких сообщений — из agent.
+const FALLBACK_REPLIES = agentInternals.FALLBACK_MESSAGES || new Set();
+function isFallbackReply(text) {
+  return FALLBACK_REPLIES.has(String(text || '').trim());
+}
 
 const { sanitizeReply } = require('./security/sanitizer');
+const { isSilentStub } = require('./utils/silentStub');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -148,6 +157,13 @@ async function processMessage(rawPayload) {
   // Неизвестный при выключенном фильтре = наименьшие права (не босс).
   const senderRole = access.role || 'employee';
 
+  // Дедуп по идентификатору провайдера делаем до буферизации: одинаковые тексты
+  // с разными message_id являются разными сообщениями. Для старых payload без ID
+  // остаётся короткий content-fallback.
+  if (isDuplicate(channel, chat_id, n.message_text_for_buffer || n.message || '', n.message_id)) {
+    return;
+  }
+
   // Шаг 1.5: Команды управления
   const rawCmd = (n.message || '').trim().toLowerCase();
   // Очистка истории диалога — «начать новую задачу с чистого листа».
@@ -158,6 +174,56 @@ async function processMessage(rawPayload) {
     await sendReply(channel, chat_id,
       'История диалога очищена. Можно ставить новую задачу с чистого листа. '
       + '(Планы и задачи сохранены.)');
+    return;
+  }
+
+  // Тихий режим — «не пиши мне первым». ПРЯМЫЕ команды (без участия ИИ — работают
+  // даже когда LLM недоступен). /stop [минуты] — замолчать (проактивные напоминания/
+  // проверки/сводки молчат, на сообщения бот отвечает); /start — снова на связи.
+  // Персонально по (channel, chat_id) — каждый глушит только себя.
+  const STOP_CMDS = new Set(['/stop', '/стоп', '/quiet', '/mute', '/тихо']);
+  const START_CMDS = new Set(['/start', '/старт', '/resume', '/unmute', '/продолжай']);
+  const cmdWord = rawCmd.split(/\s+/)[0];
+  if (STOP_CMDS.has(cmdWord)) {
+    const m = parseInt(rawCmd.split(/\s+/)[1], 10);
+    const digits = String(phone || '').replace(/\D/g, '') || null;
+    let untilUtc = null;
+    if (Number.isInteger(m) && m > 0) {
+      const mins = Math.min(m, 7 * 24 * 60); // потолок — неделя
+      untilUtc = new Date(Date.now() + mins * 60000).toISOString().slice(0, 19).replace('T', ' ');
+    }
+    try { await setQuiet(channel, chat_id, digits, untilUtc); } catch (_) {}
+    await sendReply(channel, chat_id,
+      (untilUtc
+        ? `Тихий режим включён на ${Math.min(m, 7 * 24 * 60)} мин. `
+        : 'Тихий режим включён. ')
+      + 'Первым не пишу — напоминания, проверки и сводки молчат. Контроль-сторож по задачам '
+      + 'продолжит эскалировать критичное (сотрудник не вышел/не сделал). На сообщения отвечаю '
+      + 'как обычно. Команда /start — снять.');
+    return;
+  }
+  if (START_CMDS.has(cmdWord)) {
+    let had = false;
+    try { had = await clearQuiet(channel, chat_id); } catch (_) {}
+    await sendReply(channel, chat_id,
+      had ? 'Тихий режим снят — снова пишу по расписанию.'
+        : 'Тихий режим и так был выключен — пишу по расписанию.');
+    return;
+  }
+  // /status — прямая команда: текущее состояние тихого режима (без участия ИИ).
+  const STATUS_CMDS = new Set(['/status', '/статус']);
+  if (STATUS_CMDS.has(cmdWord)) {
+    let q = null;
+    try { q = await getQuiet(channel, chat_id); } catch (_) {}
+    const active = !!(q && Number(q.active));
+    let msg;
+    if (!active) msg = 'Тихий режим: ВЫКЛ — пишу по расписанию. Команды: /stop — замолчать, /stop 60 — на 60 мин.';
+    else if (q.quiet_until) {
+      const local = new Date(new Date(String(q.quiet_until).replace(' ', 'T') + 'Z').getTime() + config.SCHEDULER_TZ_OFFSET_MIN * 60000)
+        .toISOString().slice(0, 16).replace('T', ' ');
+      msg = `Тихий режим: ВКЛ до ${local}. Первым не пишу. /start — снять сейчас.`;
+    } else msg = 'Тихий режим: ВКЛ (бессрочно). Первым не пишу. /start — снять.';
+    await sendReply(channel, chat_id, msg);
     return;
   }
 
@@ -175,13 +241,28 @@ async function processMessage(rawPayload) {
   let messageContent = n.message || '';
   let imgRef = null;
   let baileysMediaObj = null;
+  // Дескриптор входящего медиа для пересылки (forward_message): ссылки/идентификаторы,
+  // по которым медиа можно ПОВТОРНО скачать в момент пересылки (см. media/incomingMedia.js).
+  let mediaDescriptor = null;
 
   if (message_type === 'voice') {
     messageContent = await transcribeVoice(n);
+    mediaDescriptor = {
+      type: 'voice', channel,
+      file_id: n.voice_file_id || null,
+      source_url: n.voice_source_url || null,
+      baileys_media_obj: n.baileys_media_obj || null,
+      file_name: 'voice.ogg', mime: n.voice_mime_type || null,
+    };
   } else if (message_type === 'image') {
     imgRef = n.image_source || n.image_url || '';
     baileysMediaObj = n.baileys_media_obj || null;
     messageContent = n.image_caption || '';
+    mediaDescriptor = {
+      type: 'image', channel, ref: imgRef,
+      baileys_media_obj: baileysMediaObj,
+      file_name: 'photo.jpg', mime: 'image/jpeg',
+    };
   } else if (message_type === 'document') {
     const docResult = await processDocument(n);
     if (docResult.error) {
@@ -189,6 +270,13 @@ async function processMessage(rawPayload) {
       return;
     }
     messageContent = docResult.text;
+    mediaDescriptor = {
+      type: 'document', channel,
+      file_id: n.document_file_id || null,
+      source_url: n.document_source_url || null,
+      baileys_media_obj: n.baileys_media_obj || null,
+      file_name: n.document_file_name || 'файл', mime: n.document_mime_type || null,
+    };
   }
 
   // Шаг 4: Буферизация
@@ -197,6 +285,7 @@ async function processMessage(rawPayload) {
     content: messageContent,
     img_url: imgRef,
     baileys_media_obj: baileysMediaObj,
+    media: mediaDescriptor,
   };
 
   // Key the buffer by channel:chat_id (like every other middleware) so two
@@ -205,16 +294,12 @@ async function processMessage(rawPayload) {
   if (!buffered) return;
 
   let { combined_message, buffered_images, has_buffered_images } = buffered;
+  const buffered_media = buffered.buffered_media || [];
 
   // Шаг 5.5: Rate limit check (before concurrency lock to avoid holding locks for rate-limited messages)
   const rateLimitResult = checkRateLimit(channel, chat_id);
   if (rateLimitResult.limited) {
     await sendReply(channel, chat_id, rateLimitResult.message);
-    return;
-  }
-
-  // Шаг 5.6: Deduplication check (before concurrency lock to avoid holding locks for duplicates)
-  if (isDuplicate(channel, chat_id, combined_message)) {
     return;
   }
 
@@ -253,18 +338,23 @@ async function processMessage(rawPayload) {
         phone,
         clientName: client_name,
         role: senderRole,
+        media: buffered_media, // входящие вложения текущего батча — для forward_message
+
         // Авто-эхо: бот шлёт в чат короткие строки о вызываемых тулах в реальном времени.
         emit: (text) => sendReply(channel, chat_id, text),
       });
     } catch (err) {
       console.error('[Main] Agent error:', err.message);
-      replyText = 'Произошла ошибка при обработке сообщения. Пожалуйста, повторите запрос чуть позже.';
+      // Честно: называем причину по сути ошибки (баланс/модель/сеть), а не «повторите позже».
+      replyText = agentInternals.classifyLlmError(err.message);
     }
 
     // Шаг 10: Остановить typing, отправить ответ
     await stopTypingLoop(chat_id);
     if (replyText) {
       replyText = sanitizeReply(replyText);
+    }
+    if (replyText && replyText.trim()) {
       await sendReply(channel, chat_id, replyText);
       // Авто-голос (safety net): если босс написал ГОЛОСОМ, а агент НЕ озвучил сам через
       // say_voice — озвучиваем текст ответа (без тегов). Instagram голос не поддерживает.
@@ -293,26 +383,39 @@ const { systemTimestamp } = require('./utils/localTime');
 // =====================================================================
 async function sendReply(channel, chatId, text) {
   try {
+    let delivered;
     if (channel === 'telegram') {
-      await tgChannel.sendMessage(chatId, text);
+      delivered = await tgChannel.sendMessage(chatId, text);
     } else if (channel === 'instagram') {
-      await igChannel.sendMessage(chatId, text);
+      delivered = await igChannel.sendMessage(chatId, text);
     } else {
-      await waChannel.sendMessage(chatId, text);
+      delivered = await waChannel.sendMessage(chatId, text);
     }
+    if (delivered === false) {
+      require('./services/developerFeedback').reportDeveloperError('Исходящее сообщение не доставлено', { channel, chatId, includeHistory: true }).catch(() => {});
+      return false;
+    }
+    return true;
   } catch (err) {
     console.error('[SendReply] Error:', err.message);
+    require('./services/developerFeedback').reportDeveloperError(`Ошибка исходящей доставки: ${err.message}`, { channel, chatId, includeHistory: true }).catch(() => {});
+    return false;
   }
 }
 
 // Выполнить инструкцию ботом от имени владельца (для scheduledRunner): захватить лок чата,
 // прогнать обычный агентный цикл (role=boss), ответ отправить владельцу. Единый с processMessage
 // путь ответа в канал. Возвращает {ok, reason?, reply?}.
-async function deliverInstruction({ channel, chatId, phone, clientName, instruction }) {
+async function deliverInstruction({ channel, chatId, phone, clientName, instruction, silentToOwner }) {
   const locked = await acquireLock(channel, chatId);
   if (!locked) return { ok: false, reason: 'lock_busy' }; // босс сейчас пишет — повторим на след. tick
 
   try {
+    // Роль владельца расписания вычисляем по факту (босс vs сотрудник): личное
+    // расписание сотрудника должно исполняться под ЕГО ролью, без боссовых тулов.
+    // Неизвестный отправитель (например удалён из реестра) → employee, без эскалации.
+    const access = await isAllowedSender(channel, chatId, phone);
+    const role = access.role || 'employee';
     const combinedMessage = `${systemTimestamp()}\n${instruction}`;
     let reply;
     try {
@@ -321,18 +424,30 @@ async function deliverInstruction({ channel, chatId, phone, clientName, instruct
         channel,
         chatId,
         phone,
-        clientName: clientName || 'boss',
-        role: 'boss',
+        clientName: clientName || (role === 'boss' ? 'boss' : ''),
+        role,
+        // Прогон по расписанию — короче интерактивного: отдельный меньший потолок итераций.
+        maxIterations: config.AI_MAX_ITERATIONS_SCHEDULED,
         emit: (text) => sendReply(channel, chatId, text),
       });
     } catch (err) {
       console.error('[Deliver] Agent error:', err.message);
       return { ok: false, reason: 'agent_error' };
     }
-    // ИИ сам решает, есть ли что сообщить (промпт). Пустой ответ — молчим.
-    if (reply) {
+    // ИИ сам решает, есть ли что сообщить (промпт). Пустой ответ — молчим. Заглушки
+    // (FALLBACK_* при кратком сбое LLM) по расписанию НЕ шлём — иначе босс получает
+    // «Наши системы загружены» по таймеру. Считаем это мягким сбоем → ретрай.
+    if (reply && isFallbackReply(reply)) {
+      return { ok: false, reason: 'agent_error' };
+    }
+    // silentToOwner — прогон адресован НЕ боссу (сторож пишет сотруднику): боссу не шлём.
+    // isSilentStub — модель проговорила «пустой ответ / напоминание отправлено / проверено»
+    // вместо настоящей пустоты: это шум по таймеру, не отправляем (агент-цикл уже отработал).
+    if (reply && !silentToOwner && !isSilentStub(reply)) {
       const clean = sanitizeReply(reply);
-      if (clean) await sendReply(channel, chatId, clean);
+      if (clean && !(await sendReply(channel, chatId, clean))) {
+        return { ok: false, reason: 'delivery_error', reply };
+      }
     }
     return { ok: true, reply };
   } finally {
@@ -398,6 +513,8 @@ app.get('/health', async (req, res) => {
 async function startServer() {
   // Init MySQL tables
   await initTables();
+  require('./services/developerFeedback').start();
+  require('./services/embeddingWorker').start();
 
   // Предупреждение: фильтр доступа включён, но боссы не заданы → босс не сможет писать.
   if (config.RESTRICT_TO_KNOWN_SENDERS && !config.BOSS_CONTACTS.length) {
@@ -511,7 +628,10 @@ async function startServer() {
   process.once('SIGTERM', () => shutdown('SIGTERM'));
 }
 
-startServer().catch(err => {
+startServer().catch(async err => {
   console.error('[Startup] Fatal error:', err.message);
+  if (config.DEVELOPER_WA) {
+    try { await notifier.deliver('whatsapp', config.DEVELOPER_WA, `[BOT FATAL] Ошибка запуска: ${String(err.message).slice(0, 1000)}`); } catch (_) {}
+  }
   process.exit(1);
 });

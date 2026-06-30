@@ -27,6 +27,13 @@ module.exports = {
   DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY || '',
   DEEPSEEK_BASE_URL: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
   DEEPSEEK_MODEL: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
+  // Потолок длины ответа LLM (output tokens). ВАЖНО: без явного лимита OpenRouter
+  // резервирует полный лимит модели (напр. 65536) и требует баланс под него → 402
+  // «requires more credits». Явный потолок снимает 402 и удешевляет ответы. 32768 —
+  // большой запас на длинные планы/отчёты; всё ещё вдвое меньше 65536. Переопределяется.
+  // ПРИМЕЧАНИЕ: при почти пустом балансе OpenRouter даже этот лимит может дать 402 —
+  // тогда нужно пополнить баланс, а не уменьшать лимит.
+  LLM_MAX_TOKENS: parseInt(process.env.LLM_MAX_TOKENS || '32768', 10),
 
   // STT (распознавание речи) и Vision (распознавание картинок) через OpenRouter.
   // У каждого есть primary + fallback: если primary падает после ретраев —
@@ -95,6 +102,8 @@ module.exports = {
   // Client-facing manager contact (free-form: phone, https://wa.me/..., @username).
   // Shown to the client on escalation so they can reach out themselves.
   MANAGER_PUBLIC_CONTACT: process.env.MANAGER_PUBLIC_CONTACT || '',
+  // Отдельный технический маршрут: ошибки и ручные отзывы пользователей.
+  DEVELOPER_WA: (process.env.DEVELOPER_WA || '').replace(/\D/g, ''),
 
   // Bot constants
   BLOCKED_PHONES: (process.env.BLOCKED_PHONES || '').split(',').map(s => s.trim()).filter(Boolean),
@@ -104,15 +113,43 @@ module.exports = {
   DAILY_IMAGE_LIMIT: 10,
   DAILY_DOC_LIMIT: 10,
   DOCUMENT_CHAR_LIMIT: 20000,
-  CHAT_MEMORY_WINDOW: 100,
-  // Rolling context summarization: when the whole history exceeds this many
-  // characters, the oldest part is compressed into a running summary and the
-  // last CONTEXT_KEEP_RECENT_MSGS messages are kept verbatim.
-  CONTEXT_SUMMARY_CHAR_LIMIT: 50000,
+  // Сколько последних сообщений держим в активной истории (bot_chat_history).
+  // ВСЯ переписка дополнительно архивируется в bot_message_archive (не режется),
+  // и бот ищет по ней инструментом recall — так «помнит всё», а не только окно.
+  CHAT_MEMORY_WINDOW: parseInt(process.env.CHAT_MEMORY_WINDOW || '1000', 10),
+  // Сворачивание контекста в сводку. Срабатывает ТОЛЬКО когда сообщений стало
+  // больше CONTEXT_SUMMARY_MIN_MESSAGES И их суммарный объём превысил CHAR_LIMIT
+  // (не по времени — по факту переполнения). HARD_CHAR_LIMIT — аварийный потолок:
+  // сжимаем раньше 1000 сообщений, лишь если объём уже грозит переполнить контекст
+  // модели (защита от «залипания» на гигантских сообщениях).
+  CONTEXT_SUMMARY_MIN_MESSAGES: parseInt(process.env.CONTEXT_SUMMARY_MIN_MESSAGES || '1000', 10),
+  CONTEXT_SUMMARY_CHAR_LIMIT: parseInt(process.env.CONTEXT_SUMMARY_CHAR_LIMIT || '50000', 10),
+  CONTEXT_SUMMARY_HARD_CHAR_LIMIT: parseInt(process.env.CONTEXT_SUMMARY_HARD_CHAR_LIMIT || '160000', 10),
   CONTEXT_KEEP_RECENT_MSGS: 20,
-  AI_MAX_ITERATIONS: 20,
-  // Авто-эхо вызовов инструментов в чат (видно, что делает бот). Выкл: ECHO_TOOL_CALLS=0
-  ECHO_TOOL_CALLS: process.env.ECHO_TOOL_CALLS !== '0' && process.env.ECHO_TOOL_CALLS !== 'false',
+
+  // Семантический поиск по архиву (RAG). Эмбеддим чанки по EMBEDDING_CHUNK_SIZE
+  // сообщений моделью EMBEDDING_MODEL через OpenRouter, усекаем вектор до
+  // EMBEDDING_DIMENSIONS (Matryoshka) и нормализуем. Включается при наличии
+  // OPENROUTER_API_KEY; EMBEDDING_ENABLED=0 принудительно выключает (тогда recall
+  // работает по ключевым словам, как раньше).
+  EMBEDDING_ENABLED: process.env.EMBEDDING_ENABLED !== '0' && process.env.EMBEDDING_ENABLED !== 'false',
+  EMBEDDING_MODEL: process.env.EMBEDDING_MODEL || 'qwen/qwen3-embedding-8b',
+  EMBEDDING_DIMENSIONS: parseInt(process.env.EMBEDDING_DIMENSIONS || '1024', 10),
+  EMBEDDING_CHUNK_SIZE: parseInt(process.env.EMBEDDING_CHUNK_SIZE || '10', 10),
+  EMBEDDING_WORKER_INTERVAL_MS: parseInt(process.env.EMBEDDING_WORKER_INTERVAL_MS || '60000', 10),
+  EMBEDDING_BATCH: parseInt(process.env.EMBEDDING_BATCH || '32', 10),
+  EMBEDDING_SEARCH_CANDIDATES: parseInt(process.env.EMBEDDING_SEARCH_CANDIDATES || '5000', 10),
+
+  AI_MAX_ITERATIONS: parseInt(process.env.AI_MAX_ITERATIONS || '30', 10),
+  // Прогоны по расписанию (nag/watch/interval/daily) — почти всегда 1–3 тул-раунда,
+  // полные 30 итераций им не нужны. Меньший потолок режет токены на регулярных тиках.
+  AI_MAX_ITERATIONS_SCHEDULED: parseInt(process.env.AI_MAX_ITERATIONS_SCHEDULED || '12', 10),
+  // Потолок вызовов web_search за ОДИН прогон агента — защита от зацикливания на ненаходимом
+  // (напр. курс банка). Сверх лимита поиск не выполняется, агенту возвращается «хватит искать».
+  WEB_SEARCH_MAX_PER_RUN: parseInt(process.env.WEB_SEARCH_MAX_PER_RUN || '10', 10),
+  // Авто-эхо вызовов инструментов в чат («Смотрю список…» перед тулом). По умолчанию
+  // ВЫКЛ — раздражает в проде. Вкл: ECHO_TOOL_CALLS=1.
+  ECHO_TOOL_CALLS: process.env.ECHO_TOOL_CALLS === '1' || process.env.ECHO_TOOL_CALLS === 'true',
   // Обслуживать только сотрудников и боссов (BOSS_CONTACTS), прочих игнорировать.
   // Выкл: RESTRICT_TO_KNOWN_SENDERS=0. ВНИМАНИЕ: при включённом — задайте BOSS_CONTACTS.
   RESTRICT_TO_KNOWN_SENDERS: process.env.RESTRICT_TO_KNOWN_SENDERS !== '0' && process.env.RESTRICT_TO_KNOWN_SENDERS !== 'false',
@@ -154,8 +191,10 @@ module.exports = {
   GOOGLE_GENAI_API_KEYS: (process.env.GOOGLE_GENAI_API_KEYS || '').split(',').map((s) => s.trim()).filter(Boolean),
   TTS_MODEL: process.env.TTS_MODEL || 'gemini-3.1-flash-tts-preview',
   TTS_VOICE: process.env.TTS_VOICE || 'Leda',
-  // Озвучивать ответ голосом, если входящее было голосом (и явная просьба). Выкл: TTS_ENABLED=0.
-  TTS_ENABLED: process.env.TTS_ENABLED !== '0' && process.env.TTS_ENABLED !== 'false',
+  // Голосовые ОТВЕТЫ бота (TTS). По умолчанию ВЫКЛ (босс просил только текст). Когда
+  // выключено: нет авто-голоса и тулы say_voice/list_voices скрыты от LLM. Вкл: TTS_ENABLED=1.
+  // На входящие голосовые (STT, распознавание) это НЕ влияет.
+  TTS_ENABLED: process.env.TTS_ENABLED === '1' || process.env.TTS_ENABLED === 'true',
   // Fallback-TTS через OpenRouter (если все Google-ключи не ответили). Использует
   // OPENROUTER_API_KEY. Модель/голос можно переопределить (id зависит от каталога OpenRouter).
   OPENROUTER_TTS_MODEL: process.env.OPENROUTER_TTS_MODEL || 'google/gemini-3.1-flash-tts-preview',

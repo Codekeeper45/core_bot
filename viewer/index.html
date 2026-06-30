@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Чаты бота — читалка</title>
+<style>
+  :root{
+    --fs:15px; --bubble:74ch;
+    --bg:#0e1014; --panel:#161922; --panel2:#1b1f2a; --line:#272d3a; --muted:#8a93a6;
+    --text:#e7ebf3; --user:#222a3a; --user-line:#33405a; --bot:#15324e; --bot-line:#27567f;
+    --tool:#191d27; --accent:#4f9cf9; --sysbg:#1a1d27; --sys:#7c879c;
+  }
+  [data-theme="light"]{
+    --bg:#f3f5f9; --panel:#ffffff; --panel2:#f0f3f8; --line:#dfe4ee; --muted:#667085;
+    --text:#1a2030; --user:#e8edf6; --user-line:#cfd9ea; --bot:#dcebff; --bot-line:#b9d4f5;
+    --tool:#eef1f6; --accent:#2f6fd6; --sysbg:#eef1f6; --sys:#7a849a;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
+    font:var(--fs)/1.55 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  .app{display:grid;grid-template-columns:340px 1fr;height:100vh}
+
+  /* ── левая панель ── */
+  .side{border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0;background:var(--bg)}
+  .side header{padding:12px 14px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center}
+  .side header h1{font-size:1em;margin:0;font-weight:700;flex:1;letter-spacing:.01em}
+  .srow{padding:10px 12px;border-bottom:1px solid var(--line)}
+  .side input{width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:9px;
+    background:var(--panel);color:var(--text);outline:none;font-size:.92em}
+  .side input:focus{border-color:var(--accent)}
+  .btn{background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:9px;
+    padding:7px 10px;cursor:pointer;font-size:.9em;line-height:1}
+  .btn:hover{border-color:var(--accent)}
+  .btn.sm{padding:5px 9px}
+  .list{overflow:auto;min-height:0;flex:1}
+  .chat{padding:11px 14px;border-bottom:1px solid var(--line);cursor:pointer}
+  .chat:hover{background:var(--panel)}
+  .chat.active{background:var(--panel);border-left:3px solid var(--accent);padding-left:11px}
+  .chat .top{display:flex;justify-content:space-between;gap:8px;align-items:baseline}
+  .chat .nm{font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .chat .tm{color:var(--muted);font-size:.72em;white-space:nowrap}
+  .chat .sub{color:var(--muted);font-size:.84em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
+  .badge{display:inline-block;font-size:.66em;padding:1px 7px;border:1px solid var(--line);
+    border-radius:20px;color:var(--muted);margin-right:6px;vertical-align:middle}
+  .cnt{color:var(--muted);font-size:.7em;margin-left:4px}
+
+  /* ── правая панель ── */
+  .main{display:flex;flex-direction:column;min-height:0;background:var(--bg)}
+  .main .head{padding:12px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px}
+  .main .head .ttl{min-width:0;flex:1}
+  .main .head .t{font-weight:700;font-size:1.05em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .main .head .s{color:var(--muted);font-size:.8em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+  /* настройки чтения */
+  .gear{position:relative}
+  .settings{position:absolute;right:0;top:42px;z-index:20;background:var(--panel);border:1px solid var(--line);
+    border-radius:12px;padding:12px;width:268px;box-shadow:0 12px 34px rgba(0,0,0,.35);display:none}
+  .settings.open{display:block}
+  .settings .grp{margin-bottom:12px}
+  .settings .grp:last-child{margin-bottom:0}
+  .settings .lbl{font-size:.78em;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}
+  .seg{display:flex;gap:6px;flex-wrap:wrap}
+  .seg button{flex:1;min-width:54px;padding:6px 8px;border:1px solid var(--line);background:var(--bg);
+    color:var(--text);border-radius:8px;cursor:pointer;font-size:.85em}
+  .seg button.on{border-color:var(--accent);background:var(--bot);color:var(--text)}
+  .tog{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 0;cursor:pointer}
+  .tog span{font-size:.92em}
+  .sw{width:38px;height:22px;border-radius:20px;background:var(--line);position:relative;transition:.15s;flex:none}
+  .sw::after{content:"";position:absolute;width:18px;height:18px;border-radius:50%;background:#fff;top:2px;left:2px;transition:.15s}
+  .sw.on{background:var(--accent)}
+  .sw.on::after{left:18px}
+
+  .scroll{overflow:auto;min-height:0;flex:1;display:flex;flex-direction:column}
+  .feed{padding:18px 18px 8px;display:flex;flex-direction:column;gap:12px;max-width:980px;width:100%;margin:0 auto}
+  .summary{margin:12px auto 0;max-width:980px;width:calc(100% - 36px);background:var(--panel2);
+    border:1px solid var(--line);border-radius:11px;color:var(--text);font-size:.9em;overflow:hidden}
+  .sumhead{display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;color:var(--accent);font-weight:650}
+  .sumhead .chev{margin-left:auto;color:var(--muted);transition:.15s}
+  .summary.open .sumhead .chev{transform:rotate(90deg)}
+  .sumbody{display:none;padding:0 13px 12px;color:var(--text);max-height:42vh;overflow:auto;white-space:pre-wrap}
+  .summary.open .sumbody{display:block}
+
+  .row{display:flex;flex-direction:column}
+  .row.user{align-items:flex-end}
+  .row.assistant{align-items:flex-start}
+  .row.tool{align-items:center}
+  .who{font-size:.66em;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:0 4px 3px}
+  .msg{max-width:var(--bubble);padding:9px 13px;border-radius:14px;white-space:pre-wrap;
+    word-wrap:break-word;overflow-wrap:anywhere}
+  .role-user{background:var(--user);border:1px solid var(--user-line);border-bottom-right-radius:5px}
+  .role-assistant{background:var(--bot);border:1px solid var(--bot-line);border-bottom-left-radius:5px}
+  .role-tool{background:var(--tool);border:1px solid var(--line);color:var(--muted);font-size:.86em;max-width:60ch;text-align:center}
+  .systag{display:inline-block;font-size:.72em;color:var(--sys);background:var(--sysbg);border:1px solid var(--line);
+    border-radius:7px;padding:2px 7px;margin:0 4px 4px 0}
+  .mtime{font-size:.68em;color:var(--muted);margin:3px 6px 0}
+  .tools{margin-top:7px;display:flex;flex-wrap:wrap;gap:5px}
+  .tool-chip{font-size:.78em;color:var(--accent);background:var(--sysbg);border:1px solid var(--line);
+    border-radius:20px;padding:2px 9px}
+  .empty{color:var(--muted);margin:auto;text-align:center;padding:30px}
+  .note{color:var(--muted);font-size:.74em;padding:7px 18px;border-top:1px solid var(--line);text-align:center}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:var(--line);border-radius:8px}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <header>
+      <h1>Чаты бота</h1>
+      <button class="btn sm" id="refresh" title="Обновить">⟳</button>
+    </header>
+    <div class="srow"><input id="search" placeholder="Поиск по имени / id / каналу…" autocomplete="off"></div>
+    <div class="list" id="list"><div class="empty">Загрузка…</div></div>
+  </aside>
+
+  <section class="main">
+    <div class="head">
+      <div class="ttl">
+        <div class="t" id="title">Выберите чат слева</div>
+        <div class="s" id="sub"></div>
+      </div>
+      <div class="gear">
+        <button class="btn sm" id="gearBtn" title="Настройки чтения">⚙ Чтение</button>
+        <div class="settings" id="settings">
+          <div class="grp">
+            <div class="lbl">Тема</div>
+            <div class="seg" data-set="theme">
+              <button data-v="dark">Тёмная</button>
+              <button data-v="light">Светлая</button>
+            </div>
+          </div>
+          <div class="grp">
+            <div class="lbl">Размер текста</div>
+            <div class="seg">
+              <button id="fsMinus">A−</button>
+              <button id="fsReset">сброс</button>
+              <button id="fsPlus">A+</button>
+            </div>
+          </div>
+          <div class="grp">
+            <div class="lbl">Ширина сообщений</div>
+            <div class="seg" data-set="width">
+              <button data-v="58ch">Узкие</button>
+              <button data-v="74ch">Средние</button>
+              <button data-v="100ch">Широкие</button>
+            </div>
+          </div>
+          <div class="grp">
+            <div class="tog" data-set="showTools"><span>Показывать вызовы инструментов</span><div class="sw" id="sw-showTools"></div></div>
+            <div class="tog" data-set="showSys"><span>Показывать системные пометки</span><div class="sw" id="sw-showSys"></div></div>
+            <div class="tog" data-set="showTime"><span>Время сообщений (из штампа)</span><div class="sw" id="sw-showTime"></div></div>
+            <div class="tog" data-set="showSummary"><span>Показывать сводку памяти</span><div class="sw" id="sw-showSummary"></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="summaryBox"></div>
+    <div class="scroll" id="scroll"><div class="feed" id="feed"><div class="empty">Здесь появится переписка</div></div></div>
+    <div class="note" id="note">У истории нет метки времени по каждому сообщению — у реплик клиента время берётся из системного штампа, у бота времени нет. Только чтение.</div>
+  </section>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let chats = [], active = null, current = null;
+
+// ── настройки чтения (localStorage) ──
+const DEF = { theme:'dark', fs:15, width:'74ch', showTools:true, showSys:false, showTime:true, showSummary:true };
+let cfg = load();
+function load(){ try{ return Object.assign({}, DEF, JSON.parse(localStorage.getItem('viewerCfg')||'{}')); }catch(_){ return {...DEF}; } }
+function save(){ localStorage.setItem('viewerCfg', JSON.stringify(cfg)); }
+function applyCfg(){
+  document.documentElement.setAttribute('data-theme', cfg.theme);
+  document.documentElement.style.setProperty('--fs', cfg.fs+'px');
+  document.documentElement.style.setProperty('--bubble', cfg.width);
+  document.querySelectorAll('.seg[data-set="theme"] button').forEach(b=>b.classList.toggle('on', b.dataset.v===cfg.theme));
+  document.querySelectorAll('.seg[data-set="width"] button').forEach(b=>b.classList.toggle('on', b.dataset.v===cfg.width));
+  $('sw-showTools').classList.toggle('on', cfg.showTools);
+  $('sw-showSys').classList.toggle('on', cfg.showSys);
+  $('sw-showTime').classList.toggle('on', cfg.showTime);
+  $('sw-showSummary').classList.toggle('on', cfg.showSummary);
+}
+
+function esc(s){ return String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function fmtTime(s){ if(!s) return ''; const d=new Date(s); if(isNaN(d)) return String(s);
+  return d.toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}); }
+
+// Разбор системных пометок в начале текста: [СИСТЕМА: …], [АВТО-ЗАДАЧА …], [ПОВТОР …], [КОНТРОЛЬ …] и т.п.
+// → { tags:[...], time:localStr|null, body }
+const SYS_RE = /^\s*\[(СИСТЕМА|АВТО-ЗАДАЧА|ПРЕД-НАПОМИНАНИЕ|ПОВТОР|КОНТРОЛЬ|ЭСКАЛАЦИЯ)[^\]]*\]/i;
+function parseContent(text){
+  let body = String(text||''); const tags=[]; let time=null;
+  let m;
+  while((m = body.match(SYS_RE))){
+    const tag = m[0].trim();
+    // вытащить время компании (UTC+5) из штампа
+    const t = tag.match(/(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})(?:[^)]*\(UTC\+5\)|[^]]*по времени компании)/i)
+           || tag.match(/(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})/);
+    if(t && !time) time = t[1].slice(8,10)+'.'+t[1].slice(5,7)+' '+t[2];
+    tags.push(shortTag(tag));
+    body = body.slice(m[0].length).replace(/^\s*\n?/,'');
+  }
+  return { tags, time, body };
+}
+function shortTag(t){
+  if(/СИСТЕМА/i.test(t)) return 'системный штамп';
+  if(/АВТО-ЗАДАЧА/i.test(t)) return 'по расписанию';
+  if(/ПРЕД-НАПОМИНАНИЕ/i.test(t)) return 'пред-напоминание';
+  if(/ПОВТОР/i.test(t)) return 'будильник';
+  if(/КОНТРОЛЬ/i.test(t)) return 'контроль';
+  if(/ЭСКАЛАЦИЯ/i.test(t)) return 'эскалация';
+  return 'система';
+}
+
+async function loadChats(){
+  $('list').innerHTML='<div class="empty">Загрузка…</div>';
+  try{
+    const j = await (await fetch('/api/chats')).json();
+    if(j.error){ $('list').innerHTML='<div class="empty">Ошибка: '+esc(j.error)+'</div>'; return; }
+    chats = j.chats||[]; renderList();
+  }catch(e){ $('list').innerHTML='<div class="empty">Не удалось загрузить: '+esc(e.message)+'</div>'; }
+}
+function renderList(){
+  const q = $('search').value.trim().toLowerCase();
+  const f = chats.filter(c=> !q || [(c.name||''),c.chat_id,c.channel].join(' ').toLowerCase().includes(q));
+  if(!f.length){ $('list').innerHTML='<div class="empty">Ничего не найдено</div>'; return; }
+  $('list').innerHTML = f.map(c=>{
+    const title=c.name||c.chat_id;
+    const last=c.last?((c.last.role==='user'?'👤 ':c.last.role==='assistant'?'🤖 ':'🔧 ')+esc(parseContent(c.last.text).body||c.last.text)):'—';
+    const key=c.channel+'|'+c.chat_id, act=active===key?' active':'';
+    return `<div class="chat${act}" data-key="${esc(key)}">
+      <div class="top"><span class="nm">${esc(title)}</span><span class="tm">${fmtTime(c.updated_at)}</span></div>
+      <div class="sub"><span class="badge">${esc(c.channel)}</span>${last}<span class="cnt">· ${c.count}</span></div>
+    </div>`;
+  }).join('');
+  document.querySelectorAll('.chat').forEach(el=> el.onclick=()=>openChat(el.dataset.key));
+}
+
+async function openChat(key){
+  active=key; renderList();
+  const [channel, chat_id]=key.split('|');
+  $('feed').innerHTML='<div class="empty">Загрузка…</div>'; $('summaryBox').innerHTML='';
+  try{
+    const j = await (await fetch('/api/chat?channel='+encodeURIComponent(channel)+'&chat_id='+encodeURIComponent(chat_id))).json();
+    if(j.error){ $('feed').innerHTML='<div class="empty">Ошибка: '+esc(j.error)+'</div>'; return; }
+    current=j;
+    $('title').textContent=j.name||j.chat_id;
+    $('sub').textContent=j.channel+' · '+j.chat_id+' · посл. активность '+fmtTime(j.updated_at);
+    renderFeed();
+  }catch(e){ $('feed').innerHTML='<div class="empty">Не удалось: '+esc(e.message)+'</div>'; }
+}
+
+function renderFeed(){
+  if(!current) return;
+  if(cfg.showSummary && current.summary && current.summary.trim()){
+    $('summaryBox').innerHTML='<div class="summary" id="sumBox"><div class="sumhead" id="sumHead">'
+      +'🧠 Сводка памяти бота <span class="chev">▸</span></div>'
+      +'<div class="sumbody">'+esc(current.summary)+'</div></div>';
+    $('sumHead').onclick=()=>$('sumBox').classList.toggle('open');
+  } else $('summaryBox').innerHTML='';
+  let msgs=current.messages||[];
+  if(!cfg.showTools) msgs=msgs.filter(m=>m.role!=='tool');
+  if(!msgs.length){ $('feed').innerHTML='<div class="empty">Сообщений нет</div>'; return; }
+  $('feed').innerHTML = msgs.map(m=>{
+    const who = m.role==='user'?'клиент':(m.role==='assistant'?'бот':'инструмент');
+    const p = parseContent(m.text);
+    const sys = (cfg.showSys && p.tags.length)? p.tags.map(t=>'<span class="systag">⚙ '+esc(t)+'</span>').join('') : '';
+    let bodyText = p.body;
+    const tools = (cfg.showTools && m.tools && m.tools.length)
+      ? '<div class="tools">'+m.tools.map(t=>'<span class="tool-chip">🔧 '+esc(t)+'</span>').join('')+'</div>' : '';
+    const body = bodyText ? esc(bodyText) : (tools||sys ? '' : '<i style="color:var(--muted)">—</i>');
+    const time = (cfg.showTime && m.role==='user' && p.time)? '<div class="mtime">'+esc(p.time)+'</div>' : '';
+    return `<div class="row ${m.role}"><div class="who">${who}</div>`+
+      `<div class="msg role-${m.role}">${sys?('<div>'+sys+'</div>'):''}${body}${tools}</div>${time}</div>`;
+  }).join('');
+  const sc=$('scroll'); sc.scrollTop=sc.scrollHeight;
+}
+
+// ── события настроек ──
+$('gearBtn').onclick=(e)=>{ e.stopPropagation(); $('settings').classList.toggle('open'); };
+document.addEventListener('click',(e)=>{ if(!$('settings').contains(e.target) && e.target!==$('gearBtn')) $('settings').classList.remove('open'); });
+document.querySelectorAll('.seg[data-set] button').forEach(b=>{
+  b.onclick=()=>{ const set=b.parentElement.dataset.set; cfg[set]=b.dataset.v; save(); applyCfg(); renderFeed(); };
+});
+$('fsMinus').onclick=()=>{ cfg.fs=Math.max(12,cfg.fs-1); save(); applyCfg(); };
+$('fsPlus').onclick=()=>{ cfg.fs=Math.min(22,cfg.fs+1); save(); applyCfg(); };
+$('fsReset').onclick=()=>{ cfg.fs=DEF.fs; save(); applyCfg(); };
+document.querySelectorAll('.tog[data-set]').forEach(t=>{
+  t.onclick=()=>{ const k=t.dataset.set; cfg[k]=!cfg[k]; save(); applyCfg(); renderFeed(); };
+});
+$('refresh').onclick=()=>{ loadChats(); if(active) openChat(active); };
+$('search').oninput=renderList;
+
+applyCfg(); loadChats();
+</script>
+</body>
+</html>

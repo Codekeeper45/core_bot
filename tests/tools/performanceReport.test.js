@@ -18,7 +18,7 @@ delete require.cache[require.resolve('../../src/tools/performanceReport')];
 const { handler, definition, _internals } = require('../../src/tools/performanceReport');
 Module.prototype.require = orig;
 
-const { monthBoundsUtc, weakPoints, buildChart } = _internals;
+const { monthBoundsUtc, weakPoints, strongPoints, buildChart } = _internals;
 
 describe('performance_report: границы месяца (локальный пояс UTC+5)', () => {
   const now = new Date(Date.UTC(2026, 5, 12, 10, 0)); // 12.06.2026 15:00 локально
@@ -73,6 +73,10 @@ describe('performance_report: проценты и слабые места', () =
     // Курбан в слабые места не попал
     assert.ok(!r.weak_points.some((w) => /Курбан/.test(w)));
 
+    // сильные стороны: Курбан (90%, всё в срок) есть; Аслан (38%) — нет
+    assert.ok(r.strong_points.some((w) => /Курбан/.test(w)));
+    assert.ok(!r.strong_points.some((w) => /Аслан/.test(w)));
+
     // без задач → idle, не в основном списке
     assert.deepEqual(r.idle_employees, ['Мария']);
     assert.equal(r.employees.find((e) => e.name === 'Мария'), undefined);
@@ -88,7 +92,18 @@ describe('performance_report: проценты и слабые места', () =
     assert.equal(r.success, true);
     assert.equal(r.suggested_chart_mermaid, null);
     assert.deepEqual(r.weak_points, []);
+    assert.deepEqual(r.strong_points, []);
     assert.equal(r.totals.completion_pct, null);
+  });
+
+  test('strongPoints: отличник (>=90%, всё в срок, быстрый) — учтён; мало задач (<3) — нет', () => {
+    const star = strongPoints([{ name: 'Звезда', assigned: 5, assigned_done: 5, completion_pct: 100, done_late: 0, open_overdue: 0, blocked_now: 0, avg_completion_days: 0.5 }]);
+    assert.ok(star.some((w) => /Звезда.*100%/.test(w)));
+    assert.ok(star.some((w) => /в срок/.test(w)));
+    assert.ok(star.some((w) => /быстро/.test(w)));
+    // мало данных (assigned<3) → не хвалим, чтобы похвала была заслуженной
+    const few = strongPoints([{ name: 'Новичок', assigned: 1, assigned_done: 1, completion_pct: 100, done_late: 0, open_overdue: 0, blocked_now: 0, avg_completion_days: 0.2 }]);
+    assert.deepEqual(few, []);
   });
 
   test('мало задач (<3) и низкий % → НЕ считается слабым местом (мало данных)', () => {

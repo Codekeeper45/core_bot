@@ -81,3 +81,20 @@ test('buildMorningSummary: пусто и спокойно', () => {
   );
   assert.ok(text.includes('Блокеров и зависших нет.'));
 });
+
+test('buildMorningSummary: показывает сроки, отсутствие отчёта, загрузку и склад', () => {
+  const now = utc(2026, 6, 10, 4);
+  const tasks = [
+    { id: 1, title: 'Просрочено', status: 'in_progress', assignee_id: 1,
+      updated_at: now, deadline: utc(2026, 6, 9, 4), last_report_at: null },
+    { id: 2, title: 'Сегодня', status: 'dispatched', assignee_id: 1,
+      updated_at: now, deadline: utc(2026, 6, 10, 12), last_report_at: utc(2026, 6, 10, 3) },
+  ];
+  const text = buildMorningSummary(tasks, [{ id: 1, name: 'Юрин Владимир' }], now,
+    [{ id: 5, name: 'Лоток DN100', qty: 10, reserved_qty: 10, available_qty: 0, unit: 'шт' }]);
+  assert.match(text, /Просроченные:/);
+  assert.match(text, /Срок сегодня:/);
+  assert.match(text, /Без свежего отчёта:/);
+  assert.match(text, /Загрузка:/);
+  assert.match(text, /Склад:/);
+});

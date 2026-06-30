@@ -2,8 +2,37 @@
 // A3: история агента обязана сохраняться и на аварийных путях выхода —
 // инструменты предыдущих итераций могли уже выполниться (БД изменена,
 // сообщения отправлены), потеря хода ведёт к дублям действий.
-const { test, describe } = require('node:test');
+const { test, describe, after } = require('node:test');
 const assert = require('node:assert/strict');
+const Module = require('module');
+
+const saved = [];
+const origRequire = Module.prototype.require;
+Module.prototype.require = function (id) {
+  if (id === './memory') {
+    return {
+      loadChatHistory: async () => ({ messages: [], summary: '' }),
+      saveChatHistory: async (channel, chatId, messages, summary) => { saved.push({ channel, chatId, messages, summary }); },
+    };
+  }
+  if (id === './systemPrompt') {
+    return { getSystemPrompt: async () => 'test system prompt' };
+  }
+  if (id === '../services/mysql') {
+    return {
+      archiveMessage: async () => {},
+      logBotEvent: async () => {},
+    };
+  }
+  if (id === '../services/notifier') {
+    return { alertManager: async () => false };
+  }
+  if (id === '../services/developerFeedback') {
+    return { reportDeveloperError: async () => ({ ok: true }) };
+  }
+  return origRequire.apply(this, arguments);
+};
+after(() => { Module.prototype.require = origRequire; });
 
 describe('dropDanglingToolTail', () => {
   const { _internals } = require('../src/agent/agent');
@@ -36,23 +65,40 @@ describe('dropDanglingToolTail', () => {
   });
 });
 
+describe('classifyLlmError — честные сообщения по сути ошибки', () => {
+  const { _internals } = require('../src/agent/agent');
+  const c = _internals.classifyLlmError;
+
+  test('402/баланс → про средства; 429 → про лимит', () => {
+    assert.equal(c('402 This request requires more credits, or fewer max_tokens'), _internals.FALLBACK_NO_CREDITS);
+    assert.equal(c('can only afford 100 tokens'), _internals.FALLBACK_NO_CREDITS);
+    assert.equal(c('429 rate limit exceeded'), _internals.FALLBACK_RATE_LIMIT);
+  });
+
+  test('400/нет endpoints → модель отклонила; пустой ответ → модель пустая', () => {
+    assert.equal(c('400 Provider returned error'), _internals.FALLBACK_MODEL_REJECTED);
+    assert.equal(c('no endpoints found for model'), _internals.FALLBACK_MODEL_REJECTED);
+    assert.equal(c('провайдер вернул некорректный ответ (ответ без choices)'), _internals.FALLBACK_MODEL_EMPTY);
+  });
+
+  test('сеть/таймаут → про связь; нет провайдера; иначе общий', () => {
+    assert.equal(c('connect ETIMEDOUT'), _internals.FALLBACK_NETWORK);
+    assert.equal(c('No LLM provider configured (set DEEPSEEK_API_KEY or OPENROUTER_API_KEY)'), _internals.FALLBACK_NO_PROVIDER);
+    assert.equal(c('какая-то неведомая ошибка'), _internals.FALLBACK_LLM_GENERIC);
+  });
+
+  test('все сообщения распознаются как аварийные (FALLBACK_MESSAGES)', () => {
+    assert.ok(_internals.FALLBACK_MESSAGES.has(_internals.FALLBACK_NO_CREDITS));
+    assert.ok(_internals.FALLBACK_MESSAGES.has(_internals.FALLBACK_INTERNAL));
+    assert.ok(!_internals.FALLBACK_MESSAGES.has('обычный ответ бота'));
+  });
+});
+
 describe('runAgent: llm_error сохраняет историю', () => {
   test('все провайдеры недоступны → user + fallback-assistant записаны в историю', async () => {
-    const Module = require('module');
-    const orig = Module.prototype.require;
-    const saved = [];
-    Module.prototype.require = function (id) {
-      if (id === './memory') {
-        return {
-          loadChatHistory: async () => ({ messages: [], summary: '' }),
-          saveChatHistory: async (channel, chatId, messages, summary) => { saved.push({ channel, chatId, messages, summary }); },
-        };
-      }
-      return orig.apply(this, arguments);
-    };
+    saved.length = 0;
     delete require.cache[require.resolve('../src/agent/agent')];
     const { runAgent, _internals } = require('../src/agent/agent');
-    Module.prototype.require = orig;
 
     // Пустая цепочка провайдеров → llmCreateWithFallback бросает → путь llm_error.
     const config = require('../src/config');
@@ -64,13 +110,14 @@ describe('runAgent: llm_error сохраняет историю', () => {
         combinedMessage: 'тестовое сообщение',
         channel: 'telegram', chatId: '42', phone: '7777', clientName: 'Босс', role: 'boss',
       });
-      assert.equal(reply, _internals.FALLBACK_BUSY);
+      // Нет ключей → «No LLM provider configured» → честное сообщение про провайдера.
+      assert.equal(reply, _internals.FALLBACK_NO_PROVIDER);
       assert.equal(saved.length, 1);
       const msgs = saved[0].messages;
       assert.equal(msgs[msgs.length - 2].role, 'user');
       assert.match(msgs[msgs.length - 2].content, /тестовое сообщение/);
       assert.equal(msgs[msgs.length - 1].role, 'assistant');
-      assert.equal(msgs[msgs.length - 1].content, _internals.FALLBACK_BUSY);
+      assert.equal(msgs[msgs.length - 1].content, _internals.FALLBACK_NO_PROVIDER);
     } finally {
       config.DEEPSEEK_API_KEY = savedKeys.ds;
       config.OPENROUTER_API_KEY = savedKeys.or;

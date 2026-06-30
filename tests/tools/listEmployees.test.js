@@ -45,4 +45,19 @@ describe('list_employees open_tasks', () => {
     const r = await handler();
     assert.equal(r.employees[0].open_tasks.length, 10);
   });
+
+  test('включает телефон (phone) и помечает безномерных как is_test', async () => {
+    employees = [
+      { id: 1, name: 'С телефоном', roles: 'монтаж', contact: '77071234567', open_task_count: 0 },
+      { id: 2, name: 'Без телефона', roles: 'офис', contact: null, open_task_count: 0 },
+    ];
+    openTasks = [];
+    const r = await handler();
+    const withPhone = r.employees.find((e) => e.id === 1);
+    assert.equal(withPhone.phone, '77071234567');
+    assert.equal(withPhone.is_test, false);
+    const noPhone = r.employees.find((e) => e.id === 2);
+    assert.equal(noPhone.phone, null);
+    assert.equal(noPhone.is_test, true);
+  });
 });

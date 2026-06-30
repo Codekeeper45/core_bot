@@ -12,13 +12,18 @@ function parseDeps(dependsOn) {
     .filter((n) => Number.isFinite(n));
 }
 
-// Возвращает id зависимостей задачи, которые ещё НЕ выполнены (не в статусе done).
+// Возвращает id зависимостей задачи, которые ещё НЕ закрыты. Закрытой считается
+// задача в статусе done ИЛИ cancelled: отменённая задача не выполнится, но и
+// держать преемников в вечной блокировке нельзя (план тихо зависнет) — поэтому
+// она снимает зависимость наравне с done.
 // task: { depends_on }, siblings: [{ id, status }] — задачи того же проекта.
 function unmetDeps(task, siblings) {
   const deps = parseDeps(task && task.depends_on);
   if (!deps.length) return [];
   const doneIds = new Set(
-    (siblings || []).filter((t) => t.status === 'done').map((t) => Number(t.id))
+    (siblings || [])
+      .filter((t) => t.status === 'done' || t.status === 'cancelled')
+      .map((t) => Number(t.id))
   );
   return deps.filter((d) => !doneIds.has(d));
 }

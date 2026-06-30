@@ -13,7 +13,8 @@
 const {
   listEnabledSchedules, markScheduleRun, touchScheduleStatus, bumpScheduleFail,
   claimSchedule, setScheduleNextRun, setScheduleEnabled, updateSchedule,
-  logScheduleRun, cleanupScheduleRuns,
+  logScheduleRun, cleanupScheduleRuns, listActiveQuiet,
+  getTask, getEmployeeById,
 } = require('./mysql');
 const { computeNextRunAt, computeNextFire, toUtc, fmtUtc } = require('../utils/scheduleTime');
 const config = require('../config');
@@ -44,6 +45,47 @@ function wrapNag(row, k, max, nagN) {
     + `Иначе напомни ещё раз и добавь в конец: «(повторю через ${nagN} мин — ответьте „ок“, чтобы я перестал)».`;
 }
 
+// ── Сторож исполнения (watchdog) ────────────────────────────────────────────
+// Цель достигнута? accepted = сотрудник взял задачу в работу (статус ушёл с todo/
+// dispatched); done = отчитался/сдал. Чистая функция.
+const ACCEPTED_STATUSES = ['in_progress', 'blocked', 'done'];
+function isGoalMet(goal, status) {
+  if (goal === 'accepted') return ACCEPTED_STATUSES.includes(status);
+  return status === 'done'; // goal === 'done' (дефолт)
+}
+// Стеречь нечего: задачи нет, её переназначают, либо она уже закрыта
+// (done/cancelled). Отменённая задача никогда не достигнет цели 'done', поэтому
+// без этого условия сторож гонял бы её и эскалировал бесконечно.
+function isWatchTerminalStop(task) {
+  return !task || task.status === 'reassign'
+    || task.status === 'cancelled' || task.status === 'done';
+}
+
+function goalVerb(goal) {
+  return goal === 'accepted' ? 'принять задачу в работу' : 'отчитаться о выполнении';
+}
+
+// Доставляется в чат ВЛАДЕЛЬЦА (босса), но велит писать СОТРУДНИКУ; боссу — тишина.
+function wrapWatchChase(row, task, emp, goal, k, max) {
+  const who = emp ? `${emp.name} (id=${task.assignee_id})` : `сотрудник id=${task.assignee_id || '?'}`;
+  return `[КОНТРОЛЬ «${row.title}» (#${row.id}), напоминание ${k}/${max}]\n`
+    + `Задача #${task.id} «${task.title}» назначена: ${who}. Цель: сотрудник должен ${goalVerb(goal)} — `
+    + `сейчас статус «${task.status}», цель НЕ достигнута.\n`
+    + `Напиши НАПРЯМУЮ этому сотруднику короткое напоминание через message_employee `
+    + `(to=${task.assignee_id || who}). Боссу СЕЙЧАС ничего не пиши — заверши ход без ответа боссу `
+    + `(система его всё равно не отправит). Не пиши «отправлено», «напоминание отправлено», «пустой ответ».`;
+}
+
+// Доставляется боссу: попытки исчерпаны, сотрудник так и не реагирует.
+function wrapWatchEscalate(row, task, emp, goal, max) {
+  const who = emp ? `${emp.name} (id=${task.assignee_id})` : `сотрудник id=${task.assignee_id || '?'}`;
+  return `[ЭСКАЛАЦИЯ «${row.title}» (#${row.id})]\n`
+    + `${who} за ${max} напоминаний так и не ${goal === 'accepted' ? 'принял задачу в работу' : 'отчитался'} `
+    + `по задаче #${task.id} «${task.title}» (текущий статус «${task.status}»).\n`
+    + `Сообщи боссу (это сообщение идёт БОССУ): кто, какая задача, что не реагирует, и предложи следующий шаг `
+    + `(переназначить, позвонить, снять задачу). Коротко и по делу.`;
+}
+
 // Следующий МОМЕНТ ОСНОВНОГО запуска строкой для БД (или null).
 function nextFor(row, now) {
   const d = computeNextRunAt(row, now);
@@ -69,7 +111,7 @@ let timer = null;
 let running = false;     // гард: одно исполнение tick за раз (агентный цикл долгий)
 let lastCleanupDay = ''; // журнал чистим раз в сутки (старше 90 дней)
 
-function deliverRow(row, instruction) {
+function deliverRow(row, instruction, extra = {}) {
   return deliverFn({
     channel: row.owner_channel,
     chatId: row.owner_chat_id,
@@ -77,6 +119,7 @@ function deliverRow(row, instruction) {
     clientName: 'boss',
     instruction,
     title: row.title,
+    ...extra,
   });
 }
 
@@ -213,8 +256,76 @@ async function runNagPhase(row, now, prevNextRunAt) {
   return status;
 }
 
+// ── Сторож исполнения: проверка статуса задачи, погоня сотрудника, эскалация ──
+// Только kind=once (валидируется в manage_schedule). Один обработчик и для первого
+// срабатывания (fire_phase main), и для повторов-напоминаний (fire_phase watch):
+// каждый раз читаем АКТУАЛЬНЫЙ статус задачи из БД и решаем кодом.
+async function runWatchPhase(row, now, prevNextRunAt) {
+  const goal = row.watch_goal || 'done';
+  const task = await getTask(row.watch_task_id);
+
+  // Цель достигнута ИЛИ стеречь нечего (задача удалена/переназначается) — тихо снять контроль.
+  if (isWatchTerminalStop(task) || isGoalMet(goal, task.status)) {
+    const stopStatus = isWatchTerminalStop(task) ? 'watch_stopped' : 'watch_done';
+    const detail = !task ? 'задача не найдена'
+      : (task.status === 'reassign' ? 'задача переназначается' : `цель «${goal}» достигнута (${task.status})`);
+    await markScheduleRun(row.id, now, stopStatus, null, { bumpRunCount: true });
+    await setScheduleEnabled(row.id, false);
+    await logScheduleRun(row.id, row.title, stopStatus, detail);
+    return stopStatus;
+  }
+
+  const { nagN, max } = nagParams(row);
+  const k = (Number(row.nag_count) || 0) + 1;
+  const emp = task.assignee_id ? await getEmployeeById(task.assignee_id) : null;
+
+  // Попытки исчерпаны — эскалация боссу (в чат владельца).
+  if (k > max) {
+    const res = await deliverRow(row, wrapWatchEscalate(row, task, emp, goal, max));
+    if (res && res.reason === 'lock_busy') {
+      await setScheduleNextRun(row.id, prevNextRunAt);
+      await touchScheduleStatus(row.id, 'lock_busy');
+      return 'lock_busy';
+    }
+    if (!res || !res.ok) {
+      const status = (res && res.reason) || 'agent_error';
+      await setScheduleNextRun(row.id, prevNextRunAt);
+      await bumpScheduleFail(row.id, status);
+      await logScheduleRun(row.id, row.title, status, 'эскалация: ретрай, после 3 неудач отключится');
+      return status;
+    }
+    await markScheduleRun(row.id, now, 'watch_escalated', null, { nagCount: k });
+    await setScheduleEnabled(row.id, false);
+    await logScheduleRun(row.id, row.title, 'watch_escalated', `${max} напоминаний без результата — боссу`);
+    return 'watch_escalated';
+  }
+
+  // Есть попытки — напоминаем СОТРУДНИКУ (боссу тихо), планируем следующую проверку.
+  // silentToOwner: ответ боссу не отправляем ВООБЩЕ (погоня адресована сотруднику) —
+  // даже если модель проговорит «отправлено/пустой ответ». message_employee уже ушёл.
+  const res = await deliverRow(row, wrapWatchChase(row, task, emp, goal, k, max), { silentToOwner: true });
+  if (res && res.reason === 'lock_busy') {
+    await setScheduleNextRun(row.id, prevNextRunAt);
+    await touchScheduleStatus(row.id, 'lock_busy');
+    return 'lock_busy';
+  }
+  if (!res || !res.ok) {
+    const status = (res && res.reason) || 'agent_error';
+    await setScheduleNextRun(row.id, prevNextRunAt);
+    await bumpScheduleFail(row.id, status);
+    await logScheduleRun(row.id, row.title, status, 'контроль: ретрай, после 3 неудач отключится');
+    return status;
+  }
+  await markScheduleRun(row.id, now, 'watch', fmtUtc(new Date(now.getTime() + nagN * 60000)),
+    { firePhase: 'watch', nagCount: k });
+  await logScheduleRun(row.id, row.title, 'watch', `напоминание ${k} из ${max} сотруднику`);
+  return 'watch';
+}
+
 // Выполнить одно захваченное расписание согласно его фазе.
 async function runSchedule(row, now, prevNextRunAt) {
+  // Сторож исполнения перехватывает любую фазу: и первый запуск, и повторы.
+  if (row.watch_task_id) return runWatchPhase(row, now, prevNextRunAt);
   const phase = row.fire_phase || 'main';
   if (phase === 'pre') return runPrePhase(row, now, prevNextRunAt);
   if (phase === 'nag') return runNagPhase(row, now, prevNextRunAt);
@@ -262,8 +373,18 @@ async function tick(now = new Date()) {
     }
 
     const rows = await listEnabledSchedules();
+    // Тихий режим: владельцы, которым сейчас нельзя писать первым. Их созревшие
+    // расписания держим (next_run_at не трогаем) — сработают, когда режим снимут.
+    // Долгий простой recurring потом подчистит окно catch-up как обычно.
+    const quiet = new Set(
+      (await listActiveQuiet()).map((q) => `${q.owner_channel}|${q.owner_chat_id}`)
+    );
     for (const row of rows) {
       try {
+        // Тихий режим уважают напоминания/сводки боссу. Сторож исполнения (watch_task_id)
+        // — исключение: его погоня пишет СОТРУДНИКУ (не боссу), а эскалация — это
+        // критичный алерт, который босс сам себе настроил; такое /stop не глушит.
+        if (!row.watch_task_id && quiet.has(`${row.owner_channel}|${row.owner_chat_id}`)) continue;
         if (!row.next_run_at) { await rearmSchedule(row, now); continue; }
         if (!isDue(row, now)) continue;
         // Атомарный claim: между снимком rows и этим местом расписание могли отменить
@@ -313,5 +434,8 @@ function start({ deliver } = {}) {
 module.exports = {
   start,
   // для тестов
-  _internals: { isDue, wrapInstruction, tick, runSchedule, setDeliver: (f) => { deliverFn = f; } },
+  _internals: {
+    isDue, wrapInstruction, tick, runSchedule, isGoalMet, isWatchTerminalStop, runWatchPhase,
+    setDeliver: (f) => { deliverFn = f; },
+  },
 };

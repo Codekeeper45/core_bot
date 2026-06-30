@@ -94,14 +94,14 @@ async function handler(args, context) {
       success: true, project_id: args.project_id, plan_updated: false,
       added: [], reassigned: [], edited: [], cancelled: [], warnings: [],
     };
+    const belongsToProject = (task) => task && Number(task.project_id) === Number(args.project_id);
 
     if (args.plan) {
-      await updateProjectPlan(args.project_id, args.plan);
-      result.plan_updated = true;
+      result.plan_updated = await updateProjectPlan(args.project_id, args.plan);
     }
 
     if (Array.isArray(args.add_tasks) && args.add_tasks.length) {
-      const added = await createTasksBulk(args.project_id, args.add_tasks);
+      const added = await createTasksBulk(args.project_id, args.add_tasks, context);
       result.added = added.map((t) => ({ ref: t.ref, id: t.id, title: t.title }));
       if (added.warnings && added.warnings.length) result.warnings.push(...added.warnings);
     }
@@ -109,9 +109,11 @@ async function handler(args, context) {
     for (const r of (Array.isArray(args.reassign) ? args.reassign : [])) {
       const task = await getTask(r.task_id);
       const emp = await getEmployeeById(r.employee_id);
-      if (task && emp) {
-        const newStatus = await assignTask(r.task_id, r.employee_id);
-        result.reassigned.push({ task_id: r.task_id, employee: emp.name, status: newStatus });
+      if (task && !belongsToProject(task)) {
+        result.warnings.push(`reassign: задача #${r.task_id} принадлежит другому плану`);
+      } else if (task && emp) {
+        const newStatus = await assignTask(r.task_id, r.employee_id, context);
+        result.reassigned.push({ task_id: r.task_id, task_title: task.title, employee: emp.name, status: newStatus });
       } else {
         result.warnings.push(`reassign: задача #${r.task_id} или сотрудник #${r.employee_id} не найдены`);
       }
@@ -120,20 +122,22 @@ async function handler(args, context) {
     for (const e of (Array.isArray(args.edit_tasks) ? args.edit_tasks : [])) {
       const task = await getTask(e.task_id);
       if (!task) { result.warnings.push(`edit: задача #${e.task_id} не найдена`); continue; }
+      if (!belongsToProject(task)) { result.warnings.push(`edit: задача #${e.task_id} принадлежит другому плану`); continue; }
       const ok = await updateTaskFields(e.task_id, {
         title: e.title, description: e.description, expected: e.expected,
         priority: e.priority, deadline: e.deadline,
-      });
-      if (ok) result.edited.push({ task_id: e.task_id });
+      }, context);
+      if (ok) result.edited.push({ task_id: e.task_id, task_title: e.title || task.title });
       else result.warnings.push(`edit: для #${e.task_id} не передано ни одного поля`);
     }
 
     for (const c of (Array.isArray(args.cancel_tasks) ? args.cancel_tasks : [])) {
       const task = await getTask(c.task_id);
       if (!task) { result.warnings.push(`cancel: задача #${c.task_id} не найдена`); continue; }
-      // Отмена = закрыть как done с пометкой (rollup и DAG это корректно учитывают).
-      await updateTaskStatus(c.task_id, 'done', `Отменена: ${c.reason || 'не требуется'}`);
-      result.cancelled.push({ task_id: c.task_id });
+      if (!belongsToProject(task)) { result.warnings.push(`cancel: задача #${c.task_id} принадлежит другому плану`); continue; }
+      const changed = await updateTaskStatus(c.task_id, 'cancelled', `Отменена: ${c.reason || 'не требуется'}`, context);
+      if (changed) result.cancelled.push({ task_id: c.task_id, task_title: task.title });
+      else result.warnings.push(`cancel: задача #${c.task_id} не изменена`);
     }
 
     // Если правили/отменяли задачи — пересчитать статус плана.

@@ -24,6 +24,12 @@ describe('isAllowedSender', () => {
     assert.equal(r.role, 'boss');
   });
 
+  test('BOSS_CONTACTS имеет приоритет, даже если тот же номер есть у сотрудника', async () => {
+    employeeRow = { id: 1, name: 'Директор' };
+    const r = await isAllowedSender('whatsapp', '77075301259');
+    assert.equal(r.role, 'boss');
+  });
+
   test('registered employee is allowed (role=employee)', async () => {
     employeeRow = { id: 12, name: 'Тимур' };
     const r = await isAllowedSender('whatsapp', '77070000000');

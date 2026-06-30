@@ -44,9 +44,29 @@ function stripMarkdown(text) {
     .trim();
 }
 
+// Вырезает служебную разметку вызова инструментов, если модель напечатала её как ТЕКСТ:
+// <｜｜DSML｜｜tool_calls>…invoke name=…parameter name=…, а также [Вызов: …]/[Tool …].
+// Полноширинный пайп ｜ (U+FF5C) и обычный | оба учтены.
+function stripToolMarkup(text) {
+  let t = String(text);
+  // Всё от первого DSML-маркера до конца — это сырой хвост вызова модели.
+  t = t.replace(/<\s*[｜|]{1,3}\s*DSML[\s\S]*$/i, '');
+  // Одиночные служебные теги вида <｜｜…｜｜>.
+  t = t.replace(/<\s*[｜|]{2,}[\s\S]*?[｜|]{2,}\s*>/g, '');
+  // Строки-описания вызова в прозе.
+  t = t.replace(/^\s*(invoke|parameter)\s+name\s*=.*$/gim, '');
+  // Пометки [Вызов: …] / [Tool …] (без \b — он не работает перед кириллицей в JS).
+  t = t.replace(/\[\s*(вызов|tool)[^\]]*\]/gi, '');
+  return t;
+}
+
 function sanitizeReply(text = '') {
   if (!text) return text;
-  let result = flattenTables(text);
+  const had = String(text).trim().length > 0;
+  let result = stripToolMarkup(text);
+  // Если после удаления разметки не осталось содержимого — вернуть пусто (вызывающий не отправит).
+  if (had && !result.trim()) return '';
+  result = flattenTables(result);
   result = stripMarkdown(result);
   result = result.replace(/\b(\d{4})\d{8}(\d{4})\b/g, '$1****$2');
   result = result.replace(/\b(\d{4})\d{4}(\d{4})\b/g, (match, p1, p2) => {
@@ -65,4 +85,4 @@ function sanitizeLog(text = '') {
   return result;
 }
 
-module.exports = { sanitizeReply, sanitizeLog };
+module.exports = { sanitizeReply, sanitizeLog, stripToolMarkup };

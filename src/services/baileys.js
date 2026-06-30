@@ -13,6 +13,14 @@ const qrcode = require('qrcode-terminal');
 const fs = require('fs');
 const config = require('../config');
 
+function inboundBatch(messages) {
+  return (Array.isArray(messages) ? messages : []).filter((msg) => msg
+    && msg.message
+    && msg.key
+    && msg.key.remoteJid !== 'status@broadcast'
+    && !msg.key.fromMe);
+}
+
 class BaileysService extends EventEmitter {
   constructor() {
     super();
@@ -51,14 +59,12 @@ class BaileysService extends EventEmitter {
 
     this.sock.ev.on('messages.upsert', async ({ messages, type }) => {
       if (type !== 'notify') return;
-      const msg = messages[0];
-      if (!msg || !msg.message) return;
-      if (msg.key.remoteJid === 'status@broadcast') return;
-      if (msg.key.fromMe) return;
-      if (msg.key.remoteJid.endsWith('@g.us')) {
-        console.log(`[Baileys] Группа: ${msg.key.remoteJid} | ${msg.pushName}: ${msg.message?.conversation || ''}`);
+      for (const msg of inboundBatch(messages)) {
+        if (msg.key.remoteJid.endsWith('@g.us')) {
+          console.log(`[Baileys] Группа: ${msg.key.remoteJid} | ${msg.pushName}: ${msg.message?.conversation || ''}`);
+        }
+        this.emit('message', msg);
       }
-      this.emit('message', msg);
     });
 
     this.sock.ev.on('connection.update', (update) => {
@@ -181,6 +187,13 @@ class BaileysService extends EventEmitter {
     return true;
   }
 
+  // Документ/файл-вложение. buffer — содержимое файла.
+  async sendDocument(jid, buffer, fileName = 'файл', mimetype = 'application/octet-stream') {
+    if (!this.sock) throw new Error('[Baileys] Сокет не инициализирован');
+    await this.sock.sendMessage(jid, { document: buffer, fileName, mimetype });
+    return true;
+  }
+
   async sendTyping(jid) {
     if (!this.sock) return;
     try {
@@ -198,4 +211,6 @@ class BaileysService extends EventEmitter {
   }
 }
 
-module.exports = new BaileysService();
+const service = new BaileysService();
+service._inboundBatch = inboundBatch;
+module.exports = service;

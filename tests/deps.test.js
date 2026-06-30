@@ -29,3 +29,11 @@ test('unmetDeps empty when no deps', () => {
   assert.deepStrictEqual(unmetDeps({ id: 1, depends_on: '' }, []), []);
   assert.deepStrictEqual(unmetDeps({ id: 1 }, []), []);
 });
+
+test('unmetDeps treats cancelled predecessor as satisfied (не блокирует преемника)', () => {
+  const siblings = [
+    { id: 1, status: 'cancelled' },
+    { id: 2, status: 'done' },
+  ];
+  assert.deepStrictEqual(unmetDeps({ id: 3, depends_on: '1,2' }, siblings), []);
+});
