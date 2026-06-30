@@ -3,7 +3,8 @@
 Прокси между Wazzup24 и нашим ботом, чтобы обойти бан `*.trycloudflare.com`
 в анти-фрод листах Wazzup. Worker сидит на стабильном `*.workers.dev`
 (Cloudflare его не банит), принимает webhook'и от Wazzup в KV-очередь, и
-отдаёт их боту через GET `/poll/<secret>`.
+отдаёт их боту через GET `/poll/<secret>`. Запись удаляется только после
+`POST /ack/<secret>` от бота; ошибки повторяются до 10 раз, затем уходят в dead-letter.
 
 ## Что развернуть
 
@@ -103,6 +104,10 @@ WAZZUP_WORKER_URL=https://wazzup-proxy.<subdomain>.workers.dev
    ```
    [WazzupPoll] получено 1 payload'ов из Worker'а
    ```
+
+Если обработка или ACK оборвались, тот же payload придёт повторно. Бот удалит дубль
+по upstream message ID. После 10 неудачных выдач Worker переносит запись в ключ
+`dead_letter`, поэтому проблемный webhook не блокирует очередь бесконечно.
 
 ## Лимиты бесплатного плана Cloudflare
 

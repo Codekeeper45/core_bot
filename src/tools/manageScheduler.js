@@ -14,6 +14,7 @@ const definition = {
       + 'Действия: status — текущее состояние; enable/disable — включить/выключить; '
       + 'set_times — поменять часы (morning_hour и/или evening_hour, 0–23, локальное время); '
       + 'run_morning_now — отправить сводку боссу прямо сейчас; '
+      + 'get_summary — вернуть актуальную сводку в текущий чат без отдельной рассылки; '
       + 'run_evening_now — разослать сотрудникам напоминания прямо сейчас. '
       + 'Изменения сохраняются и переживают перезапуск.',
     parameters: {
@@ -21,7 +22,7 @@ const definition = {
       properties: {
         action: {
           type: 'string',
-          enum: ['status', 'enable', 'disable', 'set_times', 'run_morning_now', 'run_evening_now'],
+          enum: ['status', 'enable', 'disable', 'set_times', 'get_summary', 'run_morning_now', 'run_evening_now'],
           description: 'Что сделать с планировщиком.',
         },
         morning_hour: { type: 'integer', description: 'Час утренней сводки боссу (0–23), для set_times.' },
@@ -53,6 +54,8 @@ async function handler(args, context = {}) {
         const r = await scheduler.runMorningSummary();
         return { success: r.sent > 0 || r.total === 0, ...r, note: `сводка отправлена ${r.sent}/${r.total}` };
       }
+      case 'get_summary':
+        return { success: true, summary: await scheduler.getMorningSummary() };
       case 'run_evening_now': {
         const r = await scheduler.runEveningReminders();
         return { success: true, ...r, note: `напоминаний отправлено ${r.sent}/${r.total}` };

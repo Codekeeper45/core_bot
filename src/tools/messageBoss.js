@@ -1,5 +1,5 @@
 'use strict';
-const { findEmployeeByContact, getLatestProjectForEmployee, findBossRoute } = require('../services/mysql');
+const { findEmployeeByContact, getTask, getProject, findBossRoute } = require('../services/mysql');
 const notifier = require('../services/notifier');
 const config = require('../config');
 
@@ -21,6 +21,8 @@ const definition = {
           enum: ['question', 'problem', 'objection', 'request'],
           description: 'Тип обращения.',
         },
+        task_id: { type: 'integer', description: 'ID задачи, если обращение относится к конкретной задаче.' },
+        project_id: { type: 'integer', description: 'ID плана, если обращение относится к плану целиком.' },
       },
       required: ['message'],
     },
@@ -35,9 +37,24 @@ async function handler(args, context = {}) {
 
   const kindRu = { question: 'Вопрос', problem: 'Проблема', objection: 'Возражение', request: 'Просьба' }[args.kind] || 'Сообщение';
 
-  // Маршрут: (1) владелец последнего проекта сотрудника → (2) директор из реестра →
+  // Никогда не угадываем контекст по «последнему» проекту: он часто не тот.
+  // Точный маршрут появляется только из явного task_id/project_id; общий вопрос
+  // сразу идёт директору/контактам босса.
+  let proj = null;
+  if (args.task_id != null) {
+    const task = await getTask(args.task_id);
+    if (!task) return { success: false, reason: 'task_not_found', message: `Задача #${args.task_id} не найдена.` };
+    if (args.project_id != null && Number(args.project_id) !== Number(task.project_id)) {
+      return { success: false, reason: 'context_mismatch', message: 'task_id и project_id относятся к разным планам.' };
+    }
+    proj = await getProject(task.project_id);
+  } else if (args.project_id != null) {
+    proj = await getProject(args.project_id);
+    if (!proj) return { success: false, reason: 'project_not_found', message: `План #${args.project_id} не найден.` };
+  }
+
+  // Маршрут: (1) владелец явно указанного проекта → (2) директор из реестра →
   // (3) BOSS_CONTACTS → (4) MANAGER_*. Пробуем по очереди, пока доставка не пройдёт.
-  const proj = await getLatestProjectForEmployee(emp.id);
   const routes = [];
   if (proj && proj.owner_chat_id) {
     routes.push({ channel: proj.owner_channel, contact: proj.owner_chat_id, label: `по плану «${proj.title}»` });

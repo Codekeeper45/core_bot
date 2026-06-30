@@ -102,6 +102,8 @@ module.exports = {
   // Client-facing manager contact (free-form: phone, https://wa.me/..., @username).
   // Shown to the client on escalation so they can reach out themselves.
   MANAGER_PUBLIC_CONTACT: process.env.MANAGER_PUBLIC_CONTACT || '',
+  // Отдельный технический маршрут: ошибки и ручные отзывы пользователей.
+  DEVELOPER_WA: (process.env.DEVELOPER_WA || '').replace(/\D/g, ''),
 
   // Bot constants
   BLOCKED_PHONES: (process.env.BLOCKED_PHONES || '').split(',').map(s => s.trim()).filter(Boolean),
@@ -111,12 +113,33 @@ module.exports = {
   DAILY_IMAGE_LIMIT: 10,
   DAILY_DOC_LIMIT: 10,
   DOCUMENT_CHAR_LIMIT: 20000,
-  CHAT_MEMORY_WINDOW: 100,
-  // Rolling context summarization: when the whole history exceeds this many
-  // characters, the oldest part is compressed into a running summary and the
-  // last CONTEXT_KEEP_RECENT_MSGS messages are kept verbatim.
-  CONTEXT_SUMMARY_CHAR_LIMIT: 50000,
+  // Сколько последних сообщений держим в активной истории (bot_chat_history).
+  // ВСЯ переписка дополнительно архивируется в bot_message_archive (не режется),
+  // и бот ищет по ней инструментом recall — так «помнит всё», а не только окно.
+  CHAT_MEMORY_WINDOW: parseInt(process.env.CHAT_MEMORY_WINDOW || '1000', 10),
+  // Сворачивание контекста в сводку. Срабатывает ТОЛЬКО когда сообщений стало
+  // больше CONTEXT_SUMMARY_MIN_MESSAGES И их суммарный объём превысил CHAR_LIMIT
+  // (не по времени — по факту переполнения). HARD_CHAR_LIMIT — аварийный потолок:
+  // сжимаем раньше 1000 сообщений, лишь если объём уже грозит переполнить контекст
+  // модели (защита от «залипания» на гигантских сообщениях).
+  CONTEXT_SUMMARY_MIN_MESSAGES: parseInt(process.env.CONTEXT_SUMMARY_MIN_MESSAGES || '1000', 10),
+  CONTEXT_SUMMARY_CHAR_LIMIT: parseInt(process.env.CONTEXT_SUMMARY_CHAR_LIMIT || '50000', 10),
+  CONTEXT_SUMMARY_HARD_CHAR_LIMIT: parseInt(process.env.CONTEXT_SUMMARY_HARD_CHAR_LIMIT || '160000', 10),
   CONTEXT_KEEP_RECENT_MSGS: 20,
+
+  // Семантический поиск по архиву (RAG). Эмбеддим чанки по EMBEDDING_CHUNK_SIZE
+  // сообщений моделью EMBEDDING_MODEL через OpenRouter, усекаем вектор до
+  // EMBEDDING_DIMENSIONS (Matryoshka) и нормализуем. Включается при наличии
+  // OPENROUTER_API_KEY; EMBEDDING_ENABLED=0 принудительно выключает (тогда recall
+  // работает по ключевым словам, как раньше).
+  EMBEDDING_ENABLED: process.env.EMBEDDING_ENABLED !== '0' && process.env.EMBEDDING_ENABLED !== 'false',
+  EMBEDDING_MODEL: process.env.EMBEDDING_MODEL || 'qwen/qwen3-embedding-8b',
+  EMBEDDING_DIMENSIONS: parseInt(process.env.EMBEDDING_DIMENSIONS || '1024', 10),
+  EMBEDDING_CHUNK_SIZE: parseInt(process.env.EMBEDDING_CHUNK_SIZE || '10', 10),
+  EMBEDDING_WORKER_INTERVAL_MS: parseInt(process.env.EMBEDDING_WORKER_INTERVAL_MS || '60000', 10),
+  EMBEDDING_BATCH: parseInt(process.env.EMBEDDING_BATCH || '32', 10),
+  EMBEDDING_SEARCH_CANDIDATES: parseInt(process.env.EMBEDDING_SEARCH_CANDIDATES || '5000', 10),
+
   AI_MAX_ITERATIONS: parseInt(process.env.AI_MAX_ITERATIONS || '30', 10),
   // Прогоны по расписанию (nag/watch/interval/daily) — почти всегда 1–3 тул-раунда,
   // полные 30 итераций им не нужны. Меньший потолок режет токены на регулярных тиках.

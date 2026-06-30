@@ -32,9 +32,11 @@ async function pollOnce(processMessage) {
 
     console.log(`[WazzupPoll] получено ${payloads.length} payload'ов из Worker'а`);
 
+    const ackIds = [];
     for (const p of payloads) {
       const body = p?.body;
       if (!body) continue;
+      let payloadOk = true;
 
       // createContact — пришёл через fallback. Wazzup уже не ждёт ответа
       // (poll был ПОЗЖЕ оригинального POST'а) — просто логируем.
@@ -42,6 +44,7 @@ async function pollOnce(processMessage) {
         const c = body.createContact;
         const cd = (Array.isArray(c.contactData) && c.contactData[0]) || {};
         console.log(`[WazzupPoll] createContact (via queue): ${cd.chatType}:${cd.chatId} name=${c.name}`);
+        ackIds.push(p.key);
         continue;
       }
 
@@ -52,8 +55,19 @@ async function pollOnce(processMessage) {
           await processMessage({ __wazzup: true, wazzupMsg: m });
         } catch (err) {
           console.error('[WazzupPoll] processMessage error:', err.message);
+          payloadOk = false;
         }
       }
+      if (payloadOk && p.key) ackIds.push(p.key);
+    }
+    if (ackIds.length) {
+      const ackUrl = `${config.WAZZUP_WORKER_URL.replace(/\/$/, '')}/ack/${encodeURIComponent(config.WAZZUP_WEBHOOK_SECRET)}`;
+      const ack = await fetch(ackUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ids: ackIds }),
+      });
+      if (!ack.ok) console.error(`[WazzupPoll] ACK ${ack.status}; payload будет доставлен повторно`);
     }
   } catch (err) {
     console.error('[WazzupPoll] fetch error:', err.message);

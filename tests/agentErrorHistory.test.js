@@ -2,8 +2,37 @@
 // A3: история агента обязана сохраняться и на аварийных путях выхода —
 // инструменты предыдущих итераций могли уже выполниться (БД изменена,
 // сообщения отправлены), потеря хода ведёт к дублям действий.
-const { test, describe } = require('node:test');
+const { test, describe, after } = require('node:test');
 const assert = require('node:assert/strict');
+const Module = require('module');
+
+const saved = [];
+const origRequire = Module.prototype.require;
+Module.prototype.require = function (id) {
+  if (id === './memory') {
+    return {
+      loadChatHistory: async () => ({ messages: [], summary: '' }),
+      saveChatHistory: async (channel, chatId, messages, summary) => { saved.push({ channel, chatId, messages, summary }); },
+    };
+  }
+  if (id === './systemPrompt') {
+    return { getSystemPrompt: async () => 'test system prompt' };
+  }
+  if (id === '../services/mysql') {
+    return {
+      archiveMessage: async () => {},
+      logBotEvent: async () => {},
+    };
+  }
+  if (id === '../services/notifier') {
+    return { alertManager: async () => false };
+  }
+  if (id === '../services/developerFeedback') {
+    return { reportDeveloperError: async () => ({ ok: true }) };
+  }
+  return origRequire.apply(this, arguments);
+};
+after(() => { Module.prototype.require = origRequire; });
 
 describe('dropDanglingToolTail', () => {
   const { _internals } = require('../src/agent/agent');
@@ -67,21 +96,9 @@ describe('classifyLlmError — честные сообщения по сути �
 
 describe('runAgent: llm_error сохраняет историю', () => {
   test('все провайдеры недоступны → user + fallback-assistant записаны в историю', async () => {
-    const Module = require('module');
-    const orig = Module.prototype.require;
-    const saved = [];
-    Module.prototype.require = function (id) {
-      if (id === './memory') {
-        return {
-          loadChatHistory: async () => ({ messages: [], summary: '' }),
-          saveChatHistory: async (channel, chatId, messages, summary) => { saved.push({ channel, chatId, messages, summary }); },
-        };
-      }
-      return orig.apply(this, arguments);
-    };
+    saved.length = 0;
     delete require.cache[require.resolve('../src/agent/agent')];
     const { runAgent, _internals } = require('../src/agent/agent');
-    Module.prototype.require = orig;
 
     // Пустая цепочка провайдеров → llmCreateWithFallback бросает → путь llm_error.
     const config = require('../src/config');

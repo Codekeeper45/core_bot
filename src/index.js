@@ -157,6 +157,13 @@ async function processMessage(rawPayload) {
   // Неизвестный при выключенном фильтре = наименьшие права (не босс).
   const senderRole = access.role || 'employee';
 
+  // Дедуп по идентификатору провайдера делаем до буферизации: одинаковые тексты
+  // с разными message_id являются разными сообщениями. Для старых payload без ID
+  // остаётся короткий content-fallback.
+  if (isDuplicate(channel, chat_id, n.message_text_for_buffer || n.message || '', n.message_id)) {
+    return;
+  }
+
   // Шаг 1.5: Команды управления
   const rawCmd = (n.message || '').trim().toLowerCase();
   // Очистка истории диалога — «начать новую задачу с чистого листа».
@@ -296,11 +303,6 @@ async function processMessage(rawPayload) {
     return;
   }
 
-  // Шаг 5.6: Deduplication check (before concurrency lock to avoid holding locks for duplicates)
-  if (isDuplicate(channel, chat_id, combined_message)) {
-    return;
-  }
-
   // Шаг 6: Антифлуд — Concurrency Guard
   const locked = await acquireLock(channel, chat_id);
   if (!locked) {
@@ -381,15 +383,23 @@ const { systemTimestamp } = require('./utils/localTime');
 // =====================================================================
 async function sendReply(channel, chatId, text) {
   try {
+    let delivered;
     if (channel === 'telegram') {
-      await tgChannel.sendMessage(chatId, text);
+      delivered = await tgChannel.sendMessage(chatId, text);
     } else if (channel === 'instagram') {
-      await igChannel.sendMessage(chatId, text);
+      delivered = await igChannel.sendMessage(chatId, text);
     } else {
-      await waChannel.sendMessage(chatId, text);
+      delivered = await waChannel.sendMessage(chatId, text);
     }
+    if (delivered === false) {
+      require('./services/developerFeedback').reportDeveloperError('Исходящее сообщение не доставлено', { channel, chatId, includeHistory: true }).catch(() => {});
+      return false;
+    }
+    return true;
   } catch (err) {
     console.error('[SendReply] Error:', err.message);
+    require('./services/developerFeedback').reportDeveloperError(`Ошибка исходящей доставки: ${err.message}`, { channel, chatId, includeHistory: true }).catch(() => {});
+    return false;
   }
 }
 
@@ -435,7 +445,9 @@ async function deliverInstruction({ channel, chatId, phone, clientName, instruct
     // вместо настоящей пустоты: это шум по таймеру, не отправляем (агент-цикл уже отработал).
     if (reply && !silentToOwner && !isSilentStub(reply)) {
       const clean = sanitizeReply(reply);
-      if (clean) await sendReply(channel, chatId, clean);
+      if (clean && !(await sendReply(channel, chatId, clean))) {
+        return { ok: false, reason: 'delivery_error', reply };
+      }
     }
     return { ok: true, reply };
   } finally {
@@ -501,6 +513,8 @@ app.get('/health', async (req, res) => {
 async function startServer() {
   // Init MySQL tables
   await initTables();
+  require('./services/developerFeedback').start();
+  require('./services/embeddingWorker').start();
 
   // Предупреждение: фильтр доступа включён, но боссы не заданы → босс не сможет писать.
   if (config.RESTRICT_TO_KNOWN_SENDERS && !config.BOSS_CONTACTS.length) {
@@ -614,7 +628,10 @@ async function startServer() {
   process.once('SIGTERM', () => shutdown('SIGTERM'));
 }
 
-startServer().catch(err => {
+startServer().catch(async err => {
   console.error('[Startup] Fatal error:', err.message);
+  if (config.DEVELOPER_WA) {
+    try { await notifier.deliver('whatsapp', config.DEVELOPER_WA, `[BOT FATAL] Ошибка запуска: ${String(err.message).slice(0, 1000)}`); } catch (_) {}
+  }
   process.exit(1);
 });

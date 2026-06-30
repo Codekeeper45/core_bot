@@ -9,6 +9,8 @@ const mysqlMock = {
   _boss: null,
   findEmployeeByContact: async () => mysqlMock._emp,
   getLatestProjectForEmployee: async () => mysqlMock._proj,
+  getTask: async (id) => (id === 44 ? { id: 44, project_id: 7, assignee_id: 26 } : null),
+  getProject: async (id) => (id === 7 ? mysqlMock._proj : null),
   findBossRoute: async () => mysqlMock._boss,
 };
 const delivered = [];
@@ -51,12 +53,22 @@ describe('message_boss: маршрутизация', () => {
     assert.equal(delivered[0].contact, '77770000001');
   });
 
-  test('есть проект → уходит владельцу проекта с пометкой плана', async () => {
+  test('явный task_id → уходит владельцу точного проекта с пометкой плана', async () => {
     reset();
     mysqlMock._proj = { title: 'Раздача базы', owner_channel: 'whatsapp', owner_chat_id: '77775477227' };
-    const r = await handler({ message: 'опоздал', kind: 'problem' }, ctx);
+    const r = await handler({ message: 'опоздал', kind: 'problem', task_id: 44 }, ctx);
     assert.equal(r.success, true);
     assert.match(delivered[0].text, /Раздача базы/);
+  });
+
+  test('без task_id/project_id не угадывает маршрут по последнему проекту', async () => {
+    reset();
+    mysqlMock._proj = { title: 'Случайный старый план', owner_channel: 'whatsapp', owner_chat_id: '70000000000' };
+    mysqlMock._boss = { channel: 'whatsapp', contact: '77775477227' };
+    const r = await handler({ message: 'общий вопрос', kind: 'question' }, ctx);
+    assert.equal(r.success, true);
+    assert.equal(delivered[0].contact, '77775477227');
+    assert.doesNotMatch(delivered[0].text, /Случайный старый план/);
   });
 
   test('ни одного маршрута / доставка провалилась → success:false, без вранья «передал»', async () => {

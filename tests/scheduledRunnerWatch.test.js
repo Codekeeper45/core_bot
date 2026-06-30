@@ -35,7 +35,7 @@ Module.prototype.require = function (id) {
 const runner = require('../src/services/scheduledRunner');
 Module.prototype.require = originalRequire;
 
-const { tick, isGoalMet, setDeliver } = runner._internals;
+const { tick, isGoalMet, isWatchTerminalStop, setDeliver } = runner._internals;
 const utc = (y, mo, d, h, mi = 0) => new Date(Date.UTC(y, mo - 1, d, h, mi));
 
 function watchRow(extra) {
@@ -56,6 +56,24 @@ describe('isGoalMet (чистая функция)', () => {
   test('done: только done', () => {
     assert.equal(isGoalMet('done', 'done'), true);
     for (const s of ['in_progress', 'blocked', 'dispatched', 'todo']) assert.equal(isGoalMet('done', s), false, s);
+  });
+});
+
+describe('isWatchTerminalStop (чистая функция)', () => {
+  test('стоп при отсутствии задачи, переназначении и закрытии (done/cancelled)', () => {
+    assert.equal(isWatchTerminalStop(null), true);
+    for (const s of ['reassign', 'cancelled', 'done']) {
+      assert.equal(isWatchTerminalStop({ status: s }), true, s);
+    }
+  });
+  test('продолжаем стеречь активные статусы', () => {
+    for (const s of ['todo', 'dispatched', 'in_progress', 'blocked']) {
+      assert.equal(isWatchTerminalStop({ status: s }), false, s);
+    }
+  });
+  test('cancelled: цель done НЕ достигнута, но сторож завершается по terminal-stop', () => {
+    assert.equal(isGoalMet('done', 'cancelled'), false);
+    assert.equal(isWatchTerminalStop({ status: 'cancelled' }), true);
   });
 });
 

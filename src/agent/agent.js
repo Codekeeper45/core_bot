@@ -167,11 +167,11 @@ function dropDanglingToolTail(messages) {
 // отправлены) — потеря этого хода означает дубли действий в следующем ходе.
 // Дописываем assistant с фактически отправленным fallback-текстом, чтобы модель
 // видела, чем закончился ход.
-async function persistErrorHistory(channel, chatId, messages, convoSummary, sentText) {
+async function persistErrorHistory(channel, chatId, messages, convoSummary, sentText, historyVersion = null) {
   try {
     const msgs = dropDanglingToolTail(messages);
     msgs.push({ role: 'assistant', content: sentText });
-    await saveChatHistory(channel, chatId, msgs, convoSummary);
+    await saveChatHistory(channel, chatId, msgs, convoSummary, historyVersion);
   } catch (err) {
     console.error('[Agent] Save history (error path):', err.message);
   }
@@ -218,13 +218,17 @@ async function runAgent({ combinedMessage, channel, chatId, phone, clientName, r
 
   let messages = [];
   let convoSummary = '';
+  let historyVersion = 0;
   try {
     const hist = await loadChatHistory(channel, chatId);
     messages = hist.messages || [];
     convoSummary = hist.summary || '';
+    historyVersion = Number(hist.version) || 0;
   } catch { messages = []; convoSummary = ''; }
 
   messages.push({ role: 'user', content: combinedMessage });
+  // Долгая память: входящее сообщение пишем в полный архив (не режется, ищется recall).
+  try { require('../services/mysql').archiveMessage(channel, chatId, 'user', combinedMessage, clientName); } catch (_) {}
 
   const systemPrompt = await getSystemPrompt(clientName, phone, channel, chatId);
   let replyText = '';
@@ -257,7 +261,10 @@ async function runAgent({ combinedMessage, channel, chatId, phone, clientName, r
         } catch (notifyErr) {
           console.error('[Agent] alertManager error:', notifyErr.message);
         }
-        await persistErrorHistory(channel, chatId, messages, convoSummary, honest);
+        require('../services/developerFeedback').reportDeveloperError(llmErr.message, {
+          channel: context.channel, chatId: context.chatId, actorName: context.clientName, includeHistory: true,
+        }).catch(() => {});
+        await persistErrorHistory(channel, chatId, messages, convoSummary, honest, historyVersion);
         return honest;
       }
 
@@ -292,11 +299,29 @@ async function runAgent({ combinedMessage, channel, chatId, phone, clientName, r
               toolResult = await executeToolCall(toolName, toolArgs, context);
             } catch (err) {
               toolResult = { success: false, message: 'Tool execution error: ' + err.message };
+              require('../services/developerFeedback').reportDeveloperError(`Инструмент ${toolName}: ${err.message}`, {
+                channel: context.channel, chatId: context.chatId, actorName: context.clientName, includeHistory: true,
+              }).catch(() => {});
             }
+          }
+          if (toolResult && toolResult.success === false && toolResult.error === 'db') {
+            require('../services/developerFeedback').reportDeveloperError(`Сбой БД в инструменте ${toolName}`, {
+              channel: context.channel, chatId: context.chatId, actorName: context.clientName, includeHistory: true,
+            }).catch(() => {});
           }
           for (const hook of _toolCallHooks) {
             try { hook(toolName, toolArgs || {}, toolResult); } catch (_) {}
           }
+          // Журнал действий бота (долгая память): что сделал, кто инициатор, итог.
+          try {
+            require('../services/mysql').logBotEvent({
+              channel: context.channel, chatId: context.chatId,
+              actorName: context.clientName, actorRole: context.role,
+              tool: toolName, action: toolArgs && toolArgs.action,
+              success: !(toolResult && toolResult.success === false),
+              summary: (toolResult && (toolResult.note || toolResult.message)) || '',
+            });
+          } catch (_) {}
           messages.push({
             role: 'tool',
             tool_call_id: toolCall.id,
@@ -313,7 +338,10 @@ async function runAgent({ combinedMessage, channel, chatId, phone, clientName, r
   } catch (err) {
     agentMetrics.unexpected_error++;
     console.error('[Agent] Unexpected error:', err.message);
-    await persistErrorHistory(channel, chatId, messages, convoSummary, FALLBACK_AI);
+    require('../services/developerFeedback').reportDeveloperError(err.message, {
+      channel: context.channel, chatId: context.chatId, actorName: context.clientName, includeHistory: true,
+    }).catch(() => {});
+    await persistErrorHistory(channel, chatId, messages, convoSummary, FALLBACK_AI, historyVersion);
     return FALLBACK_AI;
   }
 
@@ -339,7 +367,7 @@ async function runAgent({ combinedMessage, channel, chatId, phone, clientName, r
       // Честно: если финальный вызов упал (402/400/сеть) — назвать причину; если просто
       // вернул пусто — значит модель не дала текст (не подходит).
       const honest = _emptyReplyErr ? classifyLlmError(_emptyReplyErr.message) : FALLBACK_MODEL_EMPTY;
-      await persistErrorHistory(channel, chatId, messages, convoSummary, honest);
+      await persistErrorHistory(channel, chatId, messages, convoSummary, honest, historyVersion);
       return honest;
     }
     agentMetrics.fallback_recovered++;
@@ -369,10 +397,13 @@ async function runAgent({ combinedMessage, channel, chatId, phone, clientName, r
   }
 
   try {
-    await saveChatHistory(channel, chatId, messages, convoSummary);
+    await saveChatHistory(channel, chatId, messages, convoSummary, historyVersion);
   } catch (err) {
     console.error('[Agent] Save history error:', err.message);
   }
+
+  // Долгая память: ответ бота тоже в полный архив (чтобы recall видел обе стороны).
+  try { require('../services/mysql').archiveMessage(channel, chatId, 'assistant', replyText, 'Бот'); } catch (_) {}
 
   return replyText;
 }

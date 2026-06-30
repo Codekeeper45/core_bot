@@ -17,7 +17,7 @@ function briefFromTask(task) {
 
 // Отправить одну задачу назначенному исполнителю. message — готовый бриф.
 // Возвращает структуру результата (как у инструмента dispatch_task).
-async function dispatchTaskById(taskId, message) {
+async function dispatchTaskById(taskId, message, actor = {}) {
   const task = await getTask(taskId);
   if (!task) return { success: false, message: `Задача ${taskId} не найдена.` };
   if (!task.assignee_id) {
@@ -39,20 +39,25 @@ async function dispatchTaskById(taskId, message) {
 
   const fullMsg = `Задача #${task.id}: ${task.title}\n${message}`;
 
-  // Тестовый сотрудник (нет канала/контакта) — только запись.
+  // Без реального контакта нельзя подтверждать диспатч.
   if (!emp.channel || !emp.contact) {
-    await markDispatched(taskId, false);
     return {
-      success: true, task_id: taskId, task_title: task.title, dispatched: true, sent: false, employee: emp.name,
-      note: 'тестовый сотрудник — диспатч записан, сообщение не отправлено',
+      success: false, task_id: taskId, task_title: task.title, dispatched: false, sent: false,
+      employee: emp.name, reason: 'no_contact', note: 'У сотрудника нет канала или контакта.',
     };
   }
 
   const ok = await deliver(emp.channel, emp.contact, fullMsg, null, { record: true });
-  await markDispatched(taskId, ok);
+  if (!ok) {
+    return {
+      success: false, task_id: taskId, task_title: task.title, dispatched: false,
+      sent: false, employee: emp.name, reason: 'delivery_failed', note: 'Сообщение не доставлено; задача оставлена для повторной отправки.',
+    };
+  }
+  await markDispatched(taskId, true, actor);
   return {
-    success: true, task_id: taskId, task_title: task.title, dispatched: true, sent: ok, employee: emp.name,
-    note: ok ? 'доставлено' : 'ошибка отправки (см. логи)',
+    success: true, task_id: taskId, task_title: task.title, dispatched: true, sent: true, employee: emp.name,
+    note: 'доставлено',
   };
 }
 

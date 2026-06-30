@@ -85,6 +85,7 @@ async function initTables() {
       chat_id     VARCHAR(255) NOT NULL,
       messages    LONGTEXT     NOT NULL,
       summary     LONGTEXT     NULL,
+      version     INT          NOT NULL DEFAULT 0,
       updated_at  TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       PRIMARY KEY (channel, chat_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -271,6 +272,241 @@ async function initTables() {
       INDEX idx_stock_norm (norm_key)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS orch_stock_movements (
+      id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+      stock_id      INT           NOT NULL,
+      movement_type VARCHAR(16)   NOT NULL,
+      qty_delta     DECIMAL(12,3) NOT NULL,
+      balance_after DECIMAL(12,3) NOT NULL,
+      object_ref    VARCHAR(255)  NULL,
+      project_id    INT           NULL,
+      task_id       INT           NULL,
+      actor_name    VARCHAR(120)  NULL,
+      note          TEXT          NULL,
+      created_at    TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_stock_move_item (stock_id, id),
+      INDEX idx_stock_move_date (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS orch_stock_reservations (
+      id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+      stock_id    INT           NOT NULL,
+      qty         DECIMAL(12,3) NOT NULL,
+      status      VARCHAR(16)   NOT NULL DEFAULT 'active',
+      object_ref  VARCHAR(255)  NULL,
+      project_id  INT           NULL,
+      task_id     INT           NULL,
+      actor_name  VARCHAR(120)  NULL,
+      note        TEXT          NULL,
+      created_at  TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+      updated_at  TIMESTAMP     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_stock_res_active (stock_id, status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  try {
+    await dbQuery('ALTER TABLE orch_stock ADD COLUMN catalog_item_id INT NULL');
+  } catch (err) {
+    if (err && err.errno !== 1060) console.error('[MySQL] stock catalog link migration:', err.message);
+  }
+  await dbQuery(
+    `INSERT INTO orch_stock_movements (stock_id, movement_type, qty_delta, balance_after, note, created_at)
+     SELECT s.id, 'opening', s.qty, s.qty, 'Начальный остаток до журнала движений', s.updated_at
+       FROM orch_stock s
+      WHERE NOT EXISTS (SELECT 1 FROM orch_stock_movements m WHERE m.stock_id = s.id)`
+  );
+
+  // Версионированный каталог розничных цен. Активным является только последний
+  // успешно импортированный снимок; исходный XLSX в рантайме не читается.
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS orch_price_imports (
+      id          INT AUTO_INCREMENT PRIMARY KEY,
+      source_file VARCHAR(255) NOT NULL,
+      source_hash CHAR(64)     NOT NULL,
+      sheet_name  VARCHAR(120) NOT NULL,
+      price_date  DATE         NULL,
+      row_count   INT          NOT NULL DEFAULT 0,
+      status      VARCHAR(16)  NOT NULL DEFAULT 'ready',
+      created_at  TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_price_hash (source_hash)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS orch_price_items (
+      id           INT AUTO_INCREMENT PRIMARY KEY,
+      import_id    INT           NOT NULL,
+      active       TINYINT(1)    NOT NULL DEFAULT 1,
+      row_number   INT           NOT NULL,
+      series_name  VARCHAR(120)  NULL,
+      sku          VARCHAR(64)   NOT NULL,
+      source_sku   VARCHAR(64)   NULL,
+      sku_norm     VARCHAR(64)   NOT NULL DEFAULT '',
+      load_class   VARCHAR(32)   NULL,
+      name         TEXT          NOT NULL,
+      dn           VARCHAR(32)   NULL,
+      length_mm    DECIMAL(12,3) NULL,
+      width_mm     DECIMAL(12,3) NULL,
+      height_mm    DECIMAL(12,3) NULL,
+      weight_kg    DECIMAL(12,3) NULL,
+      pallet_qty   VARCHAR(32)   NULL,
+      retail_price DECIMAL(14,2) NOT NULL,
+      discount_price DECIMAL(14,2) NULL,
+      currency     CHAR(3)       NOT NULL DEFAULT 'KZT',
+      norm_key     TEXT          NOT NULL,
+      created_at   TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_price_import_sku (import_id, sku),
+      INDEX idx_price_active_sku_norm (active, sku_norm),
+      INDEX idx_price_active_sku (active, sku)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  // Неизменяемый журнал ручных правок прайса (кто/когда/старая→новая цена/имя).
+  // Аналог orch_stock_movements для склада. Re-import нового файла начинает новый
+  // снимок и в журнал не пишет — журнал только про ручные правки боссом/сотрудником.
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS orch_price_changes (
+      id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+      price_item_id INT           NULL,
+      sku           VARCHAR(64)   NOT NULL,
+      change_type   VARCHAR(16)   NOT NULL,
+      old_price     DECIMAL(14,2) NULL,
+      new_price     DECIMAL(14,2) NULL,
+      old_discount_price DECIMAL(14,2) NULL,
+      new_discount_price DECIMAL(14,2) NULL,
+      old_name      TEXT          NULL,
+      new_name      TEXT          NULL,
+      actor_name    VARCHAR(120)  NULL,
+      note          TEXT          NULL,
+      created_at    TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_price_changes_sku (sku, id),
+      INDEX idx_price_changes_date (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  // Технические события и ручная обратная связь. Запись создаётся до попытки
+  // доставки разработчику, поэтому сбой WhatsApp не теряет сообщение.
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS bot_ops_events (
+      id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+      kind            VARCHAR(32)  NOT NULL,
+      severity        VARCHAR(16)  NOT NULL DEFAULT 'info',
+      fingerprint     CHAR(64)     NOT NULL,
+      source_channel  VARCHAR(20)  NULL,
+      source_chat_id  VARCHAR(255) NULL,
+      actor_name      VARCHAR(120) NULL,
+      message         TEXT         NOT NULL,
+      context_text    LONGTEXT     NULL,
+      delivery_status VARCHAR(16)  NOT NULL DEFAULT 'pending',
+      attempts        INT          NOT NULL DEFAULT 0,
+      next_attempt_at DATETIME     NULL,
+      delivered_at    DATETIME     NULL,
+      created_at      TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_ops_pending (delivery_status, next_attempt_at),
+      INDEX idx_ops_fingerprint (fingerprint, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  // Долгая память: ПОЛНЫЙ архив всей переписки (входящие/исходящие/пересылки).
+  // В отличие от bot_chat_history (последнее окно + сводка) — НЕ режется, бот ищет
+  // по нему инструментом recall. Это «база знаний», по которой можно поднять любую
+  // прошлую переписку («что писали про решётки», «переписка с бухгалтером»).
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS bot_message_archive (
+      id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+      channel     VARCHAR(20)  NOT NULL,
+      chat_id     VARCHAR(255) NOT NULL,
+      role        VARCHAR(16)  NOT NULL,
+      actor_name  VARCHAR(120) NULL,
+      content     MEDIUMTEXT   NOT NULL,
+      created_at  TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_archive_chat (channel, chat_id, id),
+      INDEX idx_archive_date (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  // Журнал ВСЕХ действий бота (вызовов инструментов): что сделал, кто инициатор,
+  // успех/ошибка, краткая суть. Бот может поднять «когда и что я делал».
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS bot_events (
+      id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+      channel     VARCHAR(20)  NULL,
+      chat_id     VARCHAR(255) NULL,
+      actor_name  VARCHAR(120) NULL,
+      actor_role  VARCHAR(20)  NULL,
+      tool        VARCHAR(64)  NOT NULL,
+      action      VARCHAR(64)  NULL,
+      success     TINYINT(1)   NOT NULL DEFAULT 1,
+      summary     TEXT         NULL,
+      created_at  TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_events_chat (channel, chat_id, id),
+      INDEX idx_events_tool (tool, id),
+      INDEX idx_events_date (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  // Семантический индекс архива: чанки по N сообщений + их эмбеддинг (BLOB Float32).
+  // MariaDB 10.6 без нативного VECTOR — косинус считаем в Node. Один чанк = подряд
+  // идущие сообщения одного чата; хранит даты/авторов для точного отчёта по времени.
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS bot_archive_chunks (
+      id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+      channel          VARCHAR(20)  NOT NULL,
+      chat_id          VARCHAR(255) NOT NULL,
+      start_archive_id BIGINT       NOT NULL,
+      end_archive_id   BIGINT       NOT NULL,
+      msg_count        INT          NOT NULL,
+      first_at         DATETIME     NULL,
+      last_at          DATETIME     NULL,
+      authors          VARCHAR(255) NULL,
+      content          MEDIUMTEXT   NOT NULL,
+      embedding        LONGBLOB     NOT NULL,
+      dims             INT          NOT NULL,
+      model            VARCHAR(64)  NOT NULL,
+      created_at       TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_chunk_range (channel, chat_id, start_archive_id),
+      INDEX idx_chunk_chat (channel, chat_id, end_archive_id),
+      INDEX idx_chunk_model (model, dims)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS orch_task_events (
+      id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+      task_id       INT          NOT NULL,
+      project_id    INT          NOT NULL,
+      event_type    VARCHAR(32)  NOT NULL,
+      actor_channel VARCHAR(20)  NULL,
+      actor_chat_id VARCHAR(255) NULL,
+      actor_name    VARCHAR(120) NULL,
+      actor_role    VARCHAR(20)  NULL,
+      from_status   VARCHAR(20)  NULL,
+      to_status     VARCHAR(20)  NULL,
+      payload_json  JSON         NULL,
+      created_at    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_task_events_task (task_id, id),
+      INDEX idx_task_events_project (project_id, id),
+      INDEX idx_task_events_date (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS orch_task_reports (
+      id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+      task_id          INT          NOT NULL,
+      project_id       INT          NOT NULL,
+      reporter_channel VARCHAR(20)  NULL,
+      reporter_chat_id VARCHAR(255) NULL,
+      reporter_name    VARCHAR(120) NULL,
+      status           VARCHAR(20)  NOT NULL,
+      comment          TEXT         NOT NULL,
+      progress_percent TINYINT      NULL,
+      blocker          TEXT         NULL,
+      next_step        TEXT         NULL,
+      eta              DATETIME     NULL,
+      created_at       TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_reports_task (task_id, created_at),
+      INDEX idx_reports_date (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
 
   // Миграция: добавить колонку сводки в уже существующие таблицы истории
   // (CREATE TABLE IF NOT EXISTS не добавит колонку к созданной ранее таблице).
@@ -282,6 +518,11 @@ async function initTables() {
     if (err && err.errno !== 1060) {
       console.error('[MySQL] summary column migration:', err.message);
     }
+  }
+  try {
+    await dbQuery('ALTER TABLE bot_chat_history ADD COLUMN version INT NOT NULL DEFAULT 0');
+  } catch (err) {
+    if (err && err.errno !== 1060) console.error('[MySQL] history version migration:', err.message);
   }
 
   // Миграция: scope у фактов — 'personal' (по чату) | 'global' (правило для всех диалогов).
@@ -304,6 +545,50 @@ async function initTables() {
       if (err && err.errno !== 1060) console.error('[MySQL] orch_tasks migration:', err.message);
     }
   }
+
+  // Миграция прайса Аквасток: скидочная цена, нормализованный артикул и
+  // дополнительные поля из файла "Norma с ТТ".
+  for (const col of [
+    'ADD COLUMN source_sku VARCHAR(64) NULL AFTER sku',
+    "ADD COLUMN sku_norm VARCHAR(64) NOT NULL DEFAULT '' AFTER source_sku",
+    'ADD COLUMN pallet_qty VARCHAR(32) NULL AFTER weight_kg',
+    'ADD COLUMN discount_price DECIMAL(14,2) NULL AFTER retail_price',
+  ]) {
+    try {
+      await dbQuery(`ALTER TABLE orch_price_items ${col}`);
+    } catch (err) {
+      if (err && err.errno !== 1060) console.error('[MySQL] orch_price_items Aquastok migration:', err.message);
+    }
+  }
+  try {
+    await dbQuery('CREATE INDEX idx_price_active_sku_norm ON orch_price_items (active, sku_norm)');
+  } catch (err) {
+    if (err && err.errno !== 1061 && err.errno !== 1060) console.error('[MySQL] orch_price_items sku_norm index:', err.message);
+  }
+  for (const col of [
+    'ADD COLUMN old_discount_price DECIMAL(14,2) NULL AFTER new_price',
+    'ADD COLUMN new_discount_price DECIMAL(14,2) NULL AFTER old_discount_price',
+  ]) {
+    try {
+      await dbQuery(`ALTER TABLE orch_price_changes ${col}`);
+    } catch (err) {
+      if (err && err.errno !== 1060) console.error('[MySQL] orch_price_changes discount migration:', err.message);
+    }
+  }
+
+  // Старые отмены ранее ошибочно хранились как выполненные. Исправляем их до
+  // расчёта KPI и создаём одну стартовую запись журнала для существующих задач.
+  await dbQuery(
+    `UPDATE orch_tasks SET status = 'cancelled', completed_at = NULL
+      WHERE status = 'done' AND result LIKE 'Отменена:%'`
+  );
+  await dbQuery(
+    `INSERT INTO orch_task_events (task_id, project_id, event_type, to_status, payload_json, created_at)
+     SELECT t.id, t.project_id, 'snapshot_import', t.status,
+            JSON_OBJECT('source', 'pre_journal_state'), t.created_at
+       FROM orch_tasks t
+      WHERE NOT EXISTS (SELECT 1 FROM orch_task_events e WHERE e.task_id = t.id)`
+  );
 
   // Миграция: предвычисленный момент следующего запуска расписания (модель next_run_at).
   // Backfill старых строк делает scheduledRunner на первом tick (rearmSchedule).
@@ -354,6 +639,17 @@ async function initTables() {
 async function verifyCriticalSchema() {
   const probes = [
     'SELECT deadline, dispatched_at, completed_at FROM orch_tasks LIMIT 0',
+    'SELECT version FROM bot_chat_history LIMIT 0',
+    'SELECT source_hash FROM orch_price_imports LIMIT 0',
+    'SELECT source_sku, sku_norm, pallet_qty, discount_price FROM orch_price_items LIMIT 0',
+    'SELECT change_type, old_discount_price, new_discount_price FROM orch_price_changes LIMIT 0',
+    'SELECT role, content FROM bot_message_archive LIMIT 0',
+    'SELECT tool, summary FROM bot_events LIMIT 0',
+    'SELECT embedding, dims FROM bot_archive_chunks LIMIT 0',
+    'SELECT event_type, payload_json FROM orch_task_events LIMIT 0',
+    'SELECT delivery_status FROM bot_ops_events LIMIT 0',
+    'SELECT movement_type FROM orch_stock_movements LIMIT 0',
+    'SELECT status FROM orch_stock_reservations LIMIT 0',
     'SELECT next_run_at, fire_phase, nag_interval_min, until_at, run_count, watch_task_id, watch_goal FROM orch_schedules LIMIT 0',
   ];
   for (const sql of probes) {
@@ -370,14 +666,8 @@ async function verifyCriticalSchema() {
 // читаем ФИО / должность / обязанности / WhatsApp-телефон и пишем в БД.
 // Идемпотентно: если реальные сотрудники (с contact) уже есть — ничего не делаем.
 // Если реальных нет — импортируем из Excel (заменяя возможные тестовые заглушки).
-// Если файла нет и таблица пуста — fallback на 5 тестовых сотрудников.
-const SEED_EMPLOYEES = [
-  { name: 'Aida Sorokina',  roles: 'research,analytics',   skills: 'исследование рынка и конкурентов, синтез данных, аналитика, отчётность' },
-  { name: 'Timur Bekov',    roles: 'backend,devops',       skills: 'Node.js API, MySQL, CI/CD, деплой, инфраструктура' },
-  { name: 'Lena Park',      roles: 'frontend,design',      skills: 'UI/UX, React, прототипирование, тексты для экранов' },
-  { name: 'Marat Iskakov',  roles: 'qa,docs',              skills: 'тест-планы, регрессия, техническая документация, runbook' },
-  { name: 'Dana Yusupova',  roles: 'pm,comms,backend',     skills: 'координация, коммуникация со стейкхолдерами, планирование, лёгкий бэкенд' },
-];
+// Если файла нет и таблица пуста — оставляем диагностическое пустое состояние,
+// не создаём вымышленных сотрудников.
 
 async function seedEmployees() {
   try {
@@ -411,16 +701,10 @@ async function seedEmployees() {
       return;
     }
 
-    // Файла нет: если таблица совсем пуста — fallback на тестовых.
+    // Файла нет: существующий реестр не трогаем, пустой оставляем пустым.
     const any = await dbQuery('SELECT COUNT(*) AS c FROM orch_employees');
     if (any[0] && Number(any[0].c) > 0) return;
-    for (const e of SEED_EMPLOYEES) {
-      await dbQuery(
-        'INSERT INTO orch_employees (name, roles, skills, channel, contact) VALUES (?, ?, ?, NULL, NULL)',
-        [e.name, e.roles, e.skills]
-      );
-    }
-    console.log(`[MySQL] Seeded ${SEED_EMPLOYEES.length} test employees (Excel не найден)`);
+    console.warn('[MySQL] Реестр сотрудников пуст, Excel штата не найден; тестовые сотрудники не создаются');
   } catch (err) {
     console.error('[MySQL] seedEmployees:', err.message);
   }
@@ -432,7 +716,7 @@ async function listEmployees() {
     return await dbQuery(`
       SELECT e.id, e.name, e.roles, e.skills, e.channel, e.contact,
              (SELECT COUNT(*) FROM orch_tasks t
-                WHERE t.assignee_id = e.id AND t.status NOT IN ('done')) AS open_task_count
+                WHERE t.assignee_id = e.id AND t.status NOT IN ('done','cancelled')) AS open_task_count
       FROM orch_employees e
       WHERE e.active = 1
       ORDER BY e.id ASC
@@ -477,7 +761,7 @@ async function getOpenTasksForEmployee(empId) {
   try {
     return await dbQuery(
       `SELECT id, project_id, title, status, priority FROM orch_tasks
-       WHERE assignee_id = ? AND status NOT IN ('done') ORDER BY priority ASC, id ASC`,
+       WHERE assignee_id = ? AND status NOT IN ('done','cancelled') ORDER BY priority ASC, id ASC`,
       [empId]
     );
   } catch (err) {
@@ -603,29 +887,32 @@ async function getProject(id) {
 
 async function updateProjectPlan(id, plan) {
   try {
-    await dbQuery('UPDATE orch_projects SET plan = ? WHERE id = ?', [plan, id]);
+    const res = await dbQuery('UPDATE orch_projects SET plan = ? WHERE id = ?', [plan, id]);
+    return (res.affectedRows || 0) > 0;
   } catch (err) {
-    console.error('[MySQL] updateProjectPlan:', err.message);
+    throw dbError(err, 'updateProjectPlan');
   }
 }
 
 async function setProjectStatus(id, status) {
   try {
-    await dbQuery('UPDATE orch_projects SET status = ? WHERE id = ?', [status, id]);
+    const res = await dbQuery('UPDATE orch_projects SET status = ? WHERE id = ?', [status, id]);
+    return (res.affectedRows || 0) > 0;
   } catch (err) {
-    console.error('[MySQL] setProjectStatus:', err.message);
+    throw dbError(err, 'setProjectStatus');
   }
 }
 
 // Пересчитывает статус проекта ОДНИМ агрегатом (без read-modify-write на стороне
 // Node — это убирает гонку, когда несколько сотрудников отчитываются одновременно).
-// done — если все задачи done; blocked — если есть заблокированные; иначе active.
+// done — если все задачи done/cancelled; blocked — если есть заблокированные; иначе active.
 // Возвращает выставленный статус (или null при сбое).
 async function recomputeProjectStatus(projectId) {
   try {
     const rows = await dbQuery(
       `SELECT COUNT(*) AS total,
               SUM(status = 'done')    AS done,
+              SUM(status = 'cancelled') AS cancelled,
               SUM(status = 'blocked') AS blocked
          FROM orch_tasks WHERE project_id = ?`,
       [projectId]
@@ -634,13 +921,13 @@ async function recomputeProjectStatus(projectId) {
     const status = rollupStatus({
       total: Number(r.total) || 0,
       done: Number(r.done) || 0,
+      cancelled: Number(r.cancelled) || 0,
       blocked: Number(r.blocked) || 0,
     });
     await dbQuery('UPDATE orch_projects SET status = ? WHERE id = ?', [status, projectId]);
     return status;
   } catch (err) {
-    console.error('[MySQL] recomputeProjectStatus:', err.message);
-    return null;
+    throw dbError(err, 'recomputeProjectStatus');
   }
 }
 
@@ -886,22 +1173,35 @@ async function getEmployeePeriodStats(from, to) {
   try {
     return await dbQuery(
       `SELECT e.id, e.name, e.roles,
-              COALESCE(SUM(t.created_at >= ? AND t.created_at < ?), 0)                          AS assigned,
-              COALESCE(SUM(t.created_at >= ? AND t.created_at < ? AND t.status = 'done'), 0)    AS assigned_done,
-              COALESCE(SUM(t.completed_at >= ? AND t.completed_at < ?), 0)                      AS done_total,
-              COALESCE(SUM(t.completed_at >= ? AND t.completed_at < ?
-                           AND t.deadline IS NOT NULL AND t.completed_at > t.deadline), 0)      AS done_late,
-              COALESCE(SUM(t.status NOT IN ('done')
-                           AND t.deadline IS NOT NULL AND t.deadline < ?), 0)                   AS open_overdue,
-              COALESCE(SUM(t.status = 'blocked'), 0)                                            AS blocked_now,
-              AVG(CASE WHEN t.completed_at >= ? AND t.completed_at < ? AND t.dispatched_at IS NOT NULL
-                       THEN TIMESTAMPDIFF(HOUR, t.dispatched_at, t.completed_at) END)           AS avg_hours
+              (SELECT COUNT(*) FROM orch_task_events a
+                WHERE a.event_type IN ('created','assigned') AND a.created_at >= ? AND a.created_at < ?
+                  AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(a.payload_json, '$.to_assignee_id')),
+                               JSON_UNQUOTE(JSON_EXTRACT(a.payload_json, '$.assignee_id'))) = CAST(e.id AS CHAR)) AS assigned,
+              (SELECT COUNT(*) FROM orch_task_events a
+                WHERE a.event_type IN ('created','assigned') AND a.created_at >= ? AND a.created_at < ?
+                  AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(a.payload_json, '$.to_assignee_id')),
+                               JSON_UNQUOTE(JSON_EXTRACT(a.payload_json, '$.assignee_id'))) = CAST(e.id AS CHAR)
+                  AND EXISTS (SELECT 1 FROM orch_task_events d WHERE d.task_id = a.task_id
+                               AND d.to_status = 'done' AND d.created_at < ?)) AS assigned_done,
+              (SELECT COUNT(*) FROM orch_task_events d
+                WHERE d.to_status = 'done' AND d.created_at >= ? AND d.created_at < ?
+                  AND JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.assignee_id')) = CAST(e.id AS CHAR)) AS done_total,
+              (SELECT COUNT(*) FROM orch_task_events d JOIN orch_tasks dt ON dt.id = d.task_id
+                WHERE d.to_status = 'done' AND d.created_at >= ? AND d.created_at < ?
+                  AND JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.assignee_id')) = CAST(e.id AS CHAR)
+                  AND dt.deadline IS NOT NULL AND d.created_at > dt.deadline) AS done_late,
+              (SELECT COUNT(*) FROM orch_tasks ot WHERE ot.assignee_id = e.id
+                AND ot.status NOT IN ('done','cancelled') AND ot.deadline IS NOT NULL AND ot.deadline < ?) AS open_overdue,
+              (SELECT COUNT(*) FROM orch_tasks bt WHERE bt.assignee_id = e.id AND bt.status = 'blocked') AS blocked_now,
+              (SELECT AVG(TIMESTAMPDIFF(HOUR, ct.dispatched_at, d.created_at))
+                 FROM orch_task_events d JOIN orch_tasks ct ON ct.id = d.task_id
+                WHERE d.to_status = 'done' AND d.created_at >= ? AND d.created_at < ?
+                  AND JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.assignee_id')) = CAST(e.id AS CHAR)
+                  AND ct.dispatched_at IS NOT NULL) AS avg_hours
        FROM orch_employees e
-       LEFT JOIN orch_tasks t ON t.assignee_id = e.id
        WHERE e.active = 1
-       GROUP BY e.id, e.name, e.roles
        ORDER BY e.id ASC`,
-      [from, to, from, to, from, to, from, to, to, from, to]
+      [from, to, from, to, to, from, to, from, to, to, from, to]
     );
   } catch (err) {
     console.error('[MySQL] getEmployeePeriodStats:', err.message);
@@ -1069,8 +1369,9 @@ async function deletePersonalItem(channel, chatId, id) {
 async function listOpenTasksBrief() {
   try {
     return await dbQuery(
-      `SELECT id, title, project_id, status, assignee_id, updated_at
-       FROM orch_tasks WHERE status NOT IN ('done')
+      `SELECT t.id, t.title, t.project_id, t.status, t.assignee_id, t.updated_at, t.deadline,
+              (SELECT MAX(r.created_at) FROM orch_task_reports r WHERE r.task_id = t.id) AS last_report_at
+       FROM orch_tasks t WHERE t.status NOT IN ('done','cancelled')
        ORDER BY assignee_id, id`
     );
   } catch (err) {
@@ -1093,11 +1394,11 @@ async function listProjectsForOwner(channel, chatId) {
 }
 
 // ─── Оркестратор: задачи ─────────────────────────────────────────────────────
-// tasksArray: [{ ref, title, description, expected, priority, depends_on:[ref], assignee_id }]
+// tasksArray: [{ ref, title, description, expected, priority, deadline, depends_on:[ref], assignee_id }]
 // Возвращает массив [{ ref, id, title }] (карта временных ref → реальных id), плюс
 // свойство .warnings — что было исправлено (невалидный исполнитель, неизвестная
 // зависимость, отброшенное цикл-ребро). Вставка и wiring зависимостей атомарны.
-async function createTasksBulk(projectId, tasksArray) {
+async function createTasksBulk(projectId, tasksArray, actor = {}) {
   const warnings = [];
 
   // Валидация исполнителей: неизвестный/неактивный assignee_id обнуляем.
@@ -1134,18 +1435,28 @@ async function createTasksBulk(projectId, tasksArray) {
     // 1-й проход: вставляем задачи, строим карту ref → id.
     for (const t of tasksArray) {
       const rows = await q(
-        `INSERT INTO orch_tasks (project_id, title, description, expected, priority, assignee_id)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO orch_tasks (project_id, title, description, expected, priority, deadline, assignee_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [
           projectId,
           String(t.title || '').slice(0, 255),
           t.description || null,
           t.expected || null,
           Number.isInteger(t.priority) ? t.priority : 3,
+          t.deadline || null,
           t.assignee_id || null,
         ]
       );
       const id = rows.insertId;
+      const [channel, chatId, actorName, actorRole] = actorParts(actor);
+      await q(
+        `INSERT INTO orch_task_events
+         (task_id, project_id, event_type, actor_channel, actor_chat_id, actor_name,
+          actor_role, to_status, payload_json)
+         VALUES (?, ?, 'created', ?, ?, ?, ?, 'todo', ?)`,
+        [id, projectId, channel, chatId, actorName, actorRole,
+          JSON.stringify({ title: t.title, assignee_id: t.assignee_id || null, deadline: t.deadline || null })]
+      );
       if (t.ref) refMap[String(t.ref)] = id;
       acc.push({ ref: t.ref || null, id, title: t.title });
     }
@@ -1190,6 +1501,7 @@ async function listTasksForProject(projectId) {
     return await dbQuery(
       `SELECT t.id, t.project_id, t.title, t.description, t.expected, t.priority,
               t.depends_on, t.assignee_id, t.status, t.result, t.dispatched, t.sent,
+              t.deadline, t.dispatched_at, t.completed_at,
               e.name AS assignee_name
        FROM orch_tasks t
        LEFT JOIN orch_employees e ON e.id = t.assignee_id
@@ -1207,30 +1519,43 @@ async function listTasksForProject(projectId) {
 // заблокированной задачи сбрасываем диспатч (новый исполнитель ещё не получал
 // бриф) и возвращаем её в очередь (todo), обнуляя тайминги — чтобы метрики и
 // статус проекта пересчитались корректно. Возвращает новый статус задачи.
-async function assignTask(taskId, employeeId) {
+async function assignTask(taskId, employeeId, actor = {}) {
   try {
-    await dbQuery(
+    return await withTransaction(async (q) => {
+      const rows = await q('SELECT id, project_id, assignee_id, status FROM orch_tasks WHERE id = ? LIMIT 1 FOR UPDATE', [taskId]);
+      if (!rows.length) return null;
+      const task = rows[0];
+      await q(
       `UPDATE orch_tasks
          SET assignee_id = ?,
              dispatched = 0,
              sent = 0,
-             dispatched_at = CASE WHEN status IN ('dispatched','done','blocked') THEN NULL ELSE dispatched_at END,
+             dispatched_at = CASE WHEN status IN ('dispatched','done','cancelled','blocked') THEN NULL ELSE dispatched_at END,
              completed_at  = CASE WHEN status = 'done' THEN NULL ELSE completed_at END,
-             status = CASE WHEN status IN ('dispatched','done','blocked') THEN 'todo' ELSE status END
+             status = CASE WHEN status IN ('dispatched','done','cancelled','blocked') THEN 'todo' ELSE status END
        WHERE id = ?`,
       [employeeId, taskId]
-    );
-    const rows = await dbQuery('SELECT status FROM orch_tasks WHERE id = ? LIMIT 1', [taskId]);
-    return rows.length ? rows[0].status : null;
+      );
+      const current = await q('SELECT status FROM orch_tasks WHERE id = ? LIMIT 1', [taskId]);
+      const [channel, chatId, actorName, actorRole] = actorParts(actor);
+      await q(
+        `INSERT INTO orch_task_events
+         (task_id, project_id, event_type, actor_channel, actor_chat_id, actor_name,
+          actor_role, from_status, to_status, payload_json)
+         VALUES (?, ?, 'assigned', ?, ?, ?, ?, ?, ?, ?)`,
+        [task.id, task.project_id, channel, chatId, actorName, actorRole, task.status,
+          current[0].status, JSON.stringify({ from_assignee_id: task.assignee_id, to_assignee_id: employeeId })]
+      );
+      return current[0].status;
+    });
   } catch (err) {
-    console.error('[MySQL] assignTask:', err.message);
-    return null;
+    throw dbError(err, 'assignTask');
   }
 }
 
 // Точечная правка полей задачи (revise_project edit_tasks). Только whitelist-
 // колонки; переназначение исполнителя делает assignTask (со сбросом диспатча).
-async function updateTaskFields(taskId, fields = {}) {
+async function updateTaskFields(taskId, fields = {}, actor = {}) {
   const ALLOWED = ['title', 'description', 'expected', 'priority', 'deadline'];
   const sets = [];
   const vals = [];
@@ -1239,91 +1564,226 @@ async function updateTaskFields(taskId, fields = {}) {
   }
   if (!sets.length) return false;
   try {
-    vals.push(taskId);
-    await dbQuery(`UPDATE orch_tasks SET ${sets.join(', ')} WHERE id = ?`, vals);
-    return true;
+    return await withTransaction(async (q) => {
+      const rows = await q('SELECT id, project_id, assignee_id, status FROM orch_tasks WHERE id = ? LIMIT 1 FOR UPDATE', [taskId]);
+      if (!rows.length) return false;
+      vals.push(taskId);
+      await q(`UPDATE orch_tasks SET ${sets.join(', ')} WHERE id = ?`, vals);
+      const [channel, chatId, actorName, actorRole] = actorParts(actor);
+      const payload = {};
+      for (const col of ALLOWED) if (fields[col] !== undefined) payload[col] = fields[col];
+      await q(
+        `INSERT INTO orch_task_events
+         (task_id, project_id, event_type, actor_channel, actor_chat_id, actor_name,
+          actor_role, from_status, to_status, payload_json)
+         VALUES (?, ?, 'fields_changed', ?, ?, ?, ?, ?, ?, ?)`,
+        [rows[0].id, rows[0].project_id, channel, chatId, actorName, actorRole,
+          rows[0].status, rows[0].status, JSON.stringify(payload)]
+      );
+      return true;
+    });
   } catch (err) {
-    console.error('[MySQL] updateTaskFields:', err.message);
-    return false;
+    throw dbError(err, 'updateTaskFields');
   }
 }
 
-async function markDispatched(taskId, sent) {
+async function markDispatched(taskId, sent, actor = {}) {
   try {
-    // dispatched_at ставим один раз (COALESCE), чтобы метрика времени была корректной.
-    await dbQuery(
-      `UPDATE orch_tasks
-         SET dispatched = 1, sent = ?, status = 'dispatched',
-             dispatched_at = COALESCE(dispatched_at, NOW())
-       WHERE id = ?`,
-      [sent ? 1 : 0, taskId]
-    );
+    return await withTransaction(async (q) => {
+      const rows = await q('SELECT id, project_id, status FROM orch_tasks WHERE id = ? LIMIT 1 FOR UPDATE', [taskId]);
+      if (!rows.length) return false;
+      const task = rows[0];
+      await q(
+        `UPDATE orch_tasks
+           SET dispatched = 1, sent = ?, status = 'dispatched',
+               dispatched_at = COALESCE(dispatched_at, NOW())
+         WHERE id = ?`,
+        [sent ? 1 : 0, taskId]
+      );
+      const [channel, chatId, actorName, actorRole] = actorParts(actor);
+      await q(
+        `INSERT INTO orch_task_events
+         (task_id, project_id, event_type, actor_channel, actor_chat_id, actor_name,
+          actor_role, from_status, to_status, payload_json)
+         VALUES (?, ?, 'dispatched', ?, ?, ?, ?, ?, 'dispatched', ?)`,
+        [task.id, task.project_id, channel, chatId, actorName, actorRole, task.status,
+          JSON.stringify({ sent: Boolean(sent) })]
+      );
+      return true;
+    });
   } catch (err) {
-    console.error('[MySQL] markDispatched:', err.message);
+    throw dbError(err, 'markDispatched');
   }
 }
 
-async function updateTaskStatus(taskId, status, result) {
+async function updateTaskStatus(taskId, status, result, actor = {}) {
   try {
     // completed_at проставляем ТОЛЬКО при переходе в done (write-once через COALESCE).
     // При любом другом статусе completed_at НЕ трогаем — иначе возврат задачи на
     // доработку (done → in_progress → done) затирал бы исторический тайминг и портил
     // метрики времени выполнения. Реальный «reopen» выполняет assignTask.
     const setCompleted = status === 'done' ? ', completed_at = COALESCE(completed_at, NOW())' : '';
-    if (result !== undefined && result !== null) {
-      await dbQuery(
+    return await withTransaction(async (q) => {
+      const rows = await q('SELECT id, project_id, assignee_id, status FROM orch_tasks WHERE id = ? LIMIT 1 FOR UPDATE', [taskId]);
+      if (!rows.length) return false;
+      const task = rows[0];
+      if (result !== undefined && result !== null) {
+        await q(
         `UPDATE orch_tasks SET status = ?, result = ?${setCompleted} WHERE id = ?`,
         [status, result, taskId]
-      );
-    } else {
-      await dbQuery(
+        );
+      } else {
+        await q(
         `UPDATE orch_tasks SET status = ?${setCompleted} WHERE id = ?`,
         [status, taskId]
+        );
+      }
+      const [channel, chatId, actorName, actorRole] = actorParts(actor);
+      await q(
+        `INSERT INTO orch_task_events
+         (task_id, project_id, event_type, actor_channel, actor_chat_id, actor_name,
+          actor_role, from_status, to_status, payload_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [task.id, task.project_id, status === 'cancelled' ? 'cancelled' : 'status_changed',
+          channel, chatId, actorName, actorRole, task.status, status,
+          JSON.stringify({ result: result == null ? null : String(result), assignee_id: task.assignee_id || null })]
       );
-    }
+      return true;
+    });
   } catch (err) {
-    console.error('[MySQL] updateTaskStatus:', err.message);
+    throw dbError(err, 'updateTaskStatus');
   }
 }
 
 async function setTaskDeadline(taskId, deadline) {
   try {
-    await dbQuery('UPDATE orch_tasks SET deadline = ? WHERE id = ?', [deadline, taskId]);
+    const res = await dbQuery('UPDATE orch_tasks SET deadline = ? WHERE id = ?', [deadline, taskId]);
+    return (res.affectedRows || 0) > 0;
   } catch (err) {
-    console.error('[MySQL] setTaskDeadline:', err.message);
+    throw dbError(err, 'setTaskDeadline');
   }
+}
+
+function actorParts(actor = {}) {
+  return [
+    actor.channel || null,
+    actor.chatId || null,
+    actor.clientName || actor.name || null,
+    actor.role || null,
+  ];
+}
+
+async function createTaskReport(taskId, report, actor = {}) {
+  return withTransaction(async (q) => {
+    const rows = await q('SELECT * FROM orch_tasks WHERE id = ? LIMIT 1 FOR UPDATE', [taskId]);
+    if (!rows.length) return null;
+    const task = rows[0];
+    const status = String(report.status || 'in_progress');
+    const comment = String(report.comment || '').trim();
+    const progress = report.progress_percent == null
+      ? null : Math.max(0, Math.min(100, Number(report.progress_percent)));
+    const completedSql = status === 'done' ? ', completed_at = COALESCE(completed_at, NOW())' : '';
+    await q(
+      `UPDATE orch_tasks SET status = ?, result = ?${completedSql} WHERE id = ?`,
+      [status, comment, taskId]
+    );
+    const [channel, chatId, actorName, actorRole] = actorParts(actor);
+    const inserted = await q(
+      `INSERT INTO orch_task_reports
+       (task_id, project_id, reporter_channel, reporter_chat_id, reporter_name,
+        status, comment, progress_percent, blocker, next_step, eta)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [task.id, task.project_id, channel, chatId, actorName, status, comment,
+        progress, report.blocker || null, report.next_step || null, report.eta || null]
+    );
+    await q(
+      `INSERT INTO orch_task_events
+       (task_id, project_id, event_type, actor_channel, actor_chat_id, actor_name,
+        actor_role, from_status, to_status, payload_json)
+       VALUES (?, ?, 'report', ?, ?, ?, ?, ?, ?, ?)`,
+      [task.id, task.project_id, channel, chatId, actorName, actorRole, task.status, status,
+        JSON.stringify({ report_id: inserted.insertId, comment, progress_percent: progress,
+          assignee_id: task.assignee_id || null,
+          blocker: report.blocker || null, next_step: report.next_step || null, eta: report.eta || null })]
+    );
+    return { ...task, old_status: task.status, status, report_id: inserted.insertId };
+  });
+}
+
+async function listTaskEvents({ taskId, projectId, limit = 50 } = {}) {
+  const where = [];
+  const params = [];
+  if (taskId != null) { where.push('task_id = ?'); params.push(Number(taskId)); }
+  if (projectId != null) { where.push('project_id = ?'); params.push(Number(projectId)); }
+  if (!where.length) return [];
+  params.push(Math.max(1, Math.min(Number(limit) || 50, 100)));
+  return dbQuery(
+    `SELECT id, task_id, project_id, event_type, actor_name, actor_role,
+            from_status, to_status, payload_json, created_at
+       FROM orch_task_events WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT ?`,
+    params
+  );
 }
 
 // ─── Chat history ─────────────────────────────────────────────────────────────
 async function loadHistory(channel, chatId) {
   try {
     const rows = await dbQuery(
-      'SELECT messages, summary FROM bot_chat_history WHERE channel = ? AND chat_id = ?',
+      'SELECT messages, summary, version FROM bot_chat_history WHERE channel = ? AND chat_id = ?',
       [channel, chatId]
     );
-    if (!rows.length) return { summary: '', messages: [] };
-    return { summary: rows[0].summary || '', messages: JSON.parse(rows[0].messages) };
+    if (!rows.length) return { summary: '', messages: [], version: 0 };
+    return { summary: rows[0].summary || '', messages: JSON.parse(rows[0].messages), version: Number(rows[0].version) || 0 };
   } catch (err) {
-    console.error('[MySQL] loadHistory:', err.message);
-    return { summary: '', messages: [] };
+    throw dbError(err, 'loadHistory');
   }
 }
 
-async function saveHistory(channel, chatId, messages, summary = '') {
+function _mergeHistory(current, incoming) {
+  const a = Array.isArray(current) ? current : [];
+  const b = Array.isArray(incoming) ? incoming : [];
+  let common = 0;
+  while (common < a.length && common < b.length
+    && JSON.stringify(a[common]) === JSON.stringify(b[common])) common++;
+  return [...a, ...b.slice(common)];
+}
+
+async function saveHistory(channel, chatId, messages, summary = '', expectedVersion = null) {
   try {
     // Backstop only — contextManager keeps the array well under this via summarization.
     // Режем по ЧИСТОЙ границе хода: иначе обрезанный массив может начаться с
     // осиротевшего role:'tool' → API 400 на каждом следующем сообщении (чат залипает).
     const { safeTrimHistory } = require('../agent/contextManager');
-    const trimmed = safeTrimHistory(messages, config.CHAT_MEMORY_WINDOW);
-    await dbQuery(
-      `INSERT INTO bot_chat_history (channel, chat_id, messages, summary)
-       VALUES (?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE messages = VALUES(messages), summary = VALUES(summary)`,
-      [channel, chatId, JSON.stringify(trimmed), summary || null]
-    );
+    const incoming = safeTrimHistory(messages, config.CHAT_MEMORY_WINDOW);
+    return await withTransaction(async (q) => {
+      const rows = await q(
+        'SELECT messages, summary, version FROM bot_chat_history WHERE channel = ? AND chat_id = ? FOR UPDATE',
+        [channel, chatId]
+      );
+      if (!rows.length) {
+        await q(
+          'INSERT INTO bot_chat_history (channel, chat_id, messages, summary, version) VALUES (?, ?, ?, ?, 1)',
+          [channel, chatId, JSON.stringify(incoming), summary || null]
+        );
+        return 1;
+      }
+      const currentVersion = Number(rows[0].version) || 0;
+      let next = incoming;
+      if (expectedVersion != null && Number(expectedVersion) !== currentVersion) {
+        let current = [];
+        try { current = JSON.parse(rows[0].messages); } catch (_) {}
+        next = safeTrimHistory(_mergeHistory(current, incoming), config.CHAT_MEMORY_WINDOW);
+      }
+      const nextVersion = currentVersion + 1;
+      await q(
+        `UPDATE bot_chat_history SET messages = ?, summary = ?, version = ?
+          WHERE channel = ? AND chat_id = ?`,
+        [JSON.stringify(next), summary || rows[0].summary || null, nextVersion, channel, chatId]
+      );
+      return nextVersion;
+    });
   } catch (err) {
-    console.error('[MySQL] saveHistory:', err.message);
+    throw dbError(err, 'saveHistory');
   }
 }
 
@@ -1340,6 +1800,163 @@ async function clearHistory(channel, chatId) {
     console.error('[MySQL] clearHistory:', err.message);
     return false;
   }
+}
+
+// ── Долгая память: архив переписки + журнал действий + recall ────────────────
+// Запись в архив — append-only, never throws (память не должна ломать ответ).
+async function archiveMessage(channel, chatId, role, content, actorName = null) {
+  const text = (content == null ? '' : String(content)).trim();
+  if (!channel || !chatId || !text) return;
+  try {
+    await dbQuery(
+      'INSERT INTO bot_message_archive (channel, chat_id, role, actor_name, content) VALUES (?, ?, ?, ?, ?)',
+      [String(channel), String(chatId), String(role || 'user').slice(0, 16),
+        actorName ? String(actorName).slice(0, 120) : null, text.slice(0, 60000)]
+    );
+  } catch (err) {
+    console.error('[MySQL] archiveMessage:', err.message);
+  }
+}
+
+async function logBotEvent(data = {}) {
+  if (!data.tool) return;
+  try {
+    await dbQuery(
+      `INSERT INTO bot_events (channel, chat_id, actor_name, actor_role, tool, action, success, summary)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [data.channel || null, data.chatId ? String(data.chatId) : null,
+        data.actorName ? String(data.actorName).slice(0, 120) : null,
+        data.actorRole || null, String(data.tool).slice(0, 64),
+        data.action ? String(data.action).slice(0, 64) : null,
+        data.success === false ? 0 : 1,
+        data.summary ? String(data.summary).slice(0, 2000) : null]
+    );
+  } catch (err) {
+    console.error('[MySQL] logBotEvent:', err.message);
+  }
+}
+
+// Поиск по архиву переписки (и опционально по действиям/фактам). Токены AND по LIKE.
+// scope: 'chat' (только этот чат) | 'all' (по всем чатам — для босса-«базы знаний»).
+async function recallSearch({ channel, chatId, query, scope = 'chat', kind = 'messages', limit = 20 } = {}) {
+  const { normKey } = require('../utils/stockKey');
+  const cap = Math.max(1, Math.min(Number(limit) || 20, 50));
+  const tokens = String(query || '').trim() ? normKey(query).split(' ').filter(Boolean).slice(0, 8) : [];
+  const out = {};
+  const chatFilter = scope === 'all' ? '' : ' AND channel = ? AND chat_id = ?';
+  const chatParams = scope === 'all' ? [] : [channel, chatId];
+  try {
+    if (kind === 'messages' || kind === 'all') {
+      const where = ['1=1'];
+      const params = [];
+      for (const t of tokens) { where.push('content LIKE ?'); params.push(`%${t}%`); }
+      const sql = `SELECT id, channel, chat_id, role, actor_name, content, created_at
+                     FROM bot_message_archive
+                    WHERE ${where.join(' AND ')}${chatFilter}
+                    ORDER BY id DESC LIMIT ?`;
+      out.messages = await dbQuery(sql, [...params, ...chatParams, cap]);
+    }
+    if (kind === 'events' || kind === 'all') {
+      const where = ['1=1'];
+      const params = [];
+      for (const t of tokens) { where.push('(tool LIKE ? OR summary LIKE ?)'); params.push(`%${t}%`, `%${t}%`); }
+      const sql = `SELECT id, channel, chat_id, actor_name, actor_role, tool, action, success, summary, created_at
+                     FROM bot_events
+                    WHERE ${where.join(' AND ')}${chatFilter}
+                    ORDER BY id DESC LIMIT ?`;
+      out.events = await dbQuery(sql, [...params, ...chatParams, cap]);
+    }
+    return out;
+  } catch (err) {
+    throw dbError(err, 'recallSearch');
+  }
+}
+
+// Точная выборка архива по диапазону дат (UTC-границы). tokens — опц. сужение по
+// ключевым словам внутри периода. Хронологический порядок (ASC) — для отчёта.
+async function archiveByDateRange({ channel, chatId, scope = 'chat', fromUtc, toUtc, tokens = [], limit = 100 } = {}) {
+  const fmt = (d) => (d instanceof Date ? d.toISOString().slice(0, 19).replace('T', ' ') : d);
+  const where = ['created_at >= ?', 'created_at <= ?'];
+  const params = [fmt(fromUtc), fmt(toUtc)];
+  if (scope !== 'all') { where.push('channel = ?', 'chat_id = ?'); params.push(channel, chatId); }
+  for (const t of (tokens || [])) { where.push('content LIKE ?'); params.push(`%${t}%`); }
+  params.push(Math.max(1, Math.min(Number(limit) || 100, 500)));
+  try {
+    return await dbQuery(
+      `SELECT id, channel, chat_id, role, actor_name, content, created_at
+         FROM bot_message_archive
+        WHERE ${where.join(' AND ')}
+        ORDER BY created_at ASC, id ASC LIMIT ?`,
+      params
+    );
+  } catch (err) { throw dbError(err, 'archiveByDateRange'); }
+}
+
+// ── Семантический индекс архива (bot_archive_chunks) ─────────────────────────
+// Чаты, где накопилось ≥ chunkSize ещё не заэмбедженных сообщений (есть бэклог).
+async function listChatsWithBacklog(chunkSize = 10, limit = 50) {
+  try {
+    return await dbQuery(
+      `SELECT a.channel, a.chat_id,
+              COALESCE(MAX(c.end_archive_id), 0) AS watermark,
+              SUM(a.id > COALESCE((SELECT MAX(c2.end_archive_id) FROM bot_archive_chunks c2
+                                    WHERE c2.channel = a.channel AND c2.chat_id = a.chat_id), 0)) AS backlog
+         FROM bot_message_archive a
+         LEFT JOIN bot_archive_chunks c ON c.channel = a.channel AND c.chat_id = a.chat_id
+        GROUP BY a.channel, a.chat_id
+       HAVING backlog >= ?
+        ORDER BY backlog DESC
+        LIMIT ?`,
+      [Number(chunkSize) || 10, Math.max(1, Math.min(Number(limit) || 50, 200))]
+    );
+  } catch (err) { throw dbError(err, 'listChatsWithBacklog'); }
+}
+
+// Сообщения архива чата СТРОГО после afterId (по возрастанию) — для нарезки чанков.
+async function archiveMessagesAfter(channel, chatId, afterId, limit = 200) {
+  try {
+    return await dbQuery(
+      `SELECT id, role, actor_name, content, created_at
+         FROM bot_message_archive
+        WHERE channel = ? AND chat_id = ? AND id > ?
+        ORDER BY id ASC LIMIT ?`,
+      [channel, chatId, Number(afterId) || 0, Math.max(1, Math.min(Number(limit) || 200, 1000))]
+    );
+  } catch (err) { throw dbError(err, 'archiveMessagesAfter'); }
+}
+
+async function insertArchiveChunk(row) {
+  try {
+    await dbQuery(
+      `INSERT INTO bot_archive_chunks
+       (channel, chat_id, start_archive_id, end_archive_id, msg_count, first_at, last_at, authors, content, embedding, dims, model)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE end_archive_id = VALUES(end_archive_id), msg_count = VALUES(msg_count),
+         first_at = VALUES(first_at), last_at = VALUES(last_at), authors = VALUES(authors),
+         content = VALUES(content), embedding = VALUES(embedding), dims = VALUES(dims), model = VALUES(model)`,
+      [row.channel, row.chat_id, row.start_archive_id, row.end_archive_id, row.msg_count,
+        row.first_at || null, row.last_at || null, row.authors || null, row.content,
+        row.embedding, row.dims, row.model]
+    );
+  } catch (err) { throw dbError(err, 'insertArchiveChunk'); }
+}
+
+// Загрузить чанки-кандидаты для поиска (с эмбеддингами). scope='all' — по всем чатам.
+async function loadChunkVectors({ channel, chatId, scope = 'chat', model, dims, limit = 5000 } = {}) {
+  const where = ['model = ?', 'dims = ?'];
+  const params = [model, dims];
+  if (scope !== 'all') { where.push('channel = ?', 'chat_id = ?'); params.push(channel, chatId); }
+  params.push(Math.max(1, Math.min(Number(limit) || 5000, 20000)));
+  try {
+    return await dbQuery(
+      `SELECT id, channel, chat_id, start_archive_id, end_archive_id, msg_count,
+              first_at, last_at, authors, content, embedding
+         FROM bot_archive_chunks
+        WHERE ${where.join(' AND ')}
+        ORDER BY end_archive_id DESC LIMIT ?`,
+      params
+    );
+  } catch (err) { throw dbError(err, 'loadChunkVectors'); }
 }
 
 // ─── Daily counts (images / documents) ───────────────────────────────────────
@@ -1431,6 +2048,311 @@ async function listActiveQuiet() {
 }
 
 
+// ── Технические события / обратная связь ────────────────────────────────────
+async function createOpsEvent(data) {
+  if (data.deduplicate) {
+    const recent = await dbQuery(
+      `SELECT id FROM bot_ops_events
+        WHERE fingerprint = ? AND created_at >= NOW() - INTERVAL 15 MINUTE
+        ORDER BY id DESC LIMIT 1`,
+      [data.fingerprint]
+    );
+    if (recent.length) return { id: recent[0].id, deduplicated: true };
+  }
+  const res = await dbQuery(
+    `INSERT INTO bot_ops_events
+     (kind, severity, fingerprint, source_channel, source_chat_id, actor_name, message, context_text)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [data.kind, data.severity, data.fingerprint, data.sourceChannel, data.sourceChatId,
+      data.actorName, data.message, data.context || null]
+  );
+  return {
+    id: res.insertId,
+    kind: data.kind,
+    severity: data.severity,
+    source_channel: data.sourceChannel,
+    source_chat_id: data.sourceChatId,
+    actor_name: data.actorName,
+    message: data.message,
+    context_text: data.context || '',
+  };
+}
+
+async function listPendingOpsEvents(limit = 20) {
+  return dbQuery(
+    `SELECT * FROM bot_ops_events
+      WHERE delivery_status = 'pending' AND attempts < 10
+        AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
+      ORDER BY id ASC LIMIT ?`,
+    [Math.max(1, Math.min(Number(limit) || 20, 100))]
+  );
+}
+
+async function markOpsEventDelivered(id) {
+  const res = await dbQuery(
+    `UPDATE bot_ops_events SET delivery_status = 'delivered', delivered_at = NOW() WHERE id = ?`,
+    [id]
+  );
+  return (res.affectedRows || 0) > 0;
+}
+
+async function markOpsEventAttempt(id) {
+  const res = await dbQuery(
+    `UPDATE bot_ops_events
+        SET attempts = attempts + 1, next_attempt_at = DATE_ADD(NOW(), INTERVAL 5 MINUTE)
+      WHERE id = ?`,
+    [id]
+  );
+  return (res.affectedRows || 0) > 0;
+}
+
+// ── Прайс-каталог ───────────────────────────────────────────────────────────
+function normalizeSku(sku) {
+  return String(sku || '')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, '')
+    .replace(/А/g, 'A')
+    .replace(/В/g, 'B')
+    .replace(/Е/g, 'E')
+    .replace(/К/g, 'K')
+    .replace(/М/g, 'M')
+    .replace(/Н/g, 'H')
+    .replace(/О/g, 'O')
+    .replace(/Р/g, 'P')
+    .replace(/С/g, 'C')
+    .replace(/Т/g, 'T')
+    .replace(/Х/g, 'X');
+}
+
+async function importPriceCatalog(parsed) {
+  return withTransaction(async (q) => {
+    const existing = await q(
+      'SELECT id, row_count FROM orch_price_imports WHERE source_hash = ? AND status = ? LIMIT 1',
+      [parsed.source_hash, 'ready']
+    );
+    if (existing.length) {
+      await q('UPDATE orch_price_items SET active = 0 WHERE active = 1');
+      await q('UPDATE orch_price_items SET active = 1 WHERE import_id = ?', [existing[0].id]);
+      return { imported: false, import_id: existing[0].id, row_count: existing[0].row_count, activated: true };
+    }
+
+    const head = await q(
+      `INSERT INTO orch_price_imports
+       (source_file, source_hash, sheet_name, price_date, row_count, status)
+       VALUES (?, ?, ?, ?, ?, 'ready')`,
+      [parsed.source_file, parsed.source_hash, parsed.sheet, parsed.price_date || null, parsed.items.length]
+    );
+    const importId = head.insertId;
+    await q('UPDATE orch_price_items SET active = 0 WHERE active = 1');
+    for (const item of parsed.items) {
+      await q(
+        `INSERT INTO orch_price_items
+         (import_id, active, row_number, series_name, sku, source_sku, sku_norm, load_class, name, dn,
+          length_mm, width_mm, height_mm, weight_kg, pallet_qty, retail_price, discount_price, currency, norm_key)
+         VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [importId, item.row_number, item.series, item.sku, item.source_sku || null, normalizeSku(item.sku),
+          item.load_class, item.name, item.dn, item.length_mm, item.width_mm, item.height_mm, item.weight_kg,
+          item.pallet_qty || null, item.retail_price, item.discount_price, item.currency || 'KZT', item.norm_key]
+      );
+    }
+    return { imported: true, import_id: importId, row_count: parsed.items.length };
+  });
+}
+
+async function priceGetBySku(sku) {
+  const normalized = normalizeSku(sku);
+  try {
+    const rows = await dbQuery(
+      `SELECT p.*, i.source_file, i.price_date
+         FROM orch_price_items p JOIN orch_price_imports i ON i.id = p.import_id
+        WHERE p.active = 1 AND (p.sku_norm = ? OR UPPER(p.sku) = UPPER(?)) LIMIT 1`,
+      [normalized, String(sku || '').trim()]
+    );
+    return rows[0] || null;
+  } catch (err) { throw dbError(err, 'priceGetBySku'); }
+}
+
+async function priceSearch(query, limit = 20) {
+  const { normKey } = require('../utils/stockKey');
+  const skuNorm = normalizeSku(query);
+  const qNorm = normKey(query);
+  const tokens = qNorm.split(' ').filter(Boolean).slice(0, 8);
+  const where = ['p.active = 1'];
+  const params = [];
+  if (tokens.length) {
+    const tokenWhere = [];
+    for (const token of tokens) { tokenWhere.push('p.norm_key LIKE ?'); params.push(`%${token}%`); }
+    where.push(`(p.sku_norm = ? OR (${tokenWhere.join(' AND ')}))`);
+    params.splice(params.length - tokenWhere.length, 0, skuNorm);
+  }
+  params.push(Math.max(1, Math.min(Number(limit) || 20, 50)));
+  try {
+    return await dbQuery(
+      `SELECT p.*, i.source_file, i.price_date
+         FROM orch_price_items p JOIN orch_price_imports i ON i.id = p.import_id
+        WHERE ${where.join(' AND ')}
+        ORDER BY p.sku ASC LIMIT ?`,
+      params
+    );
+  } catch (err) { throw dbError(err, 'priceSearch'); }
+}
+
+// ── Прайс: ручные правки активного каталога ─────────────────────────────────
+// Активные позиции (active=1) принадлежат последнему импорту. Правки мутируют их
+// напрямую и пишут запись в orch_price_changes. Удаление — мягкое (active=0),
+// чтобы снимок импорта оставался целым. Новый импорт ФАЙЛА начинает новый снимок
+// и стирает ручные правки (это полное обновление прайса; повторный импорт того же
+// файла идемпотентен по source_hash и правки НЕ трогает).
+
+// import_id активного каталога (для добавления новых позиций в текущий снимок).
+async function priceActiveImportId(q) {
+  const rows = await q('SELECT import_id FROM orch_price_items WHERE active = 1 ORDER BY import_id DESC LIMIT 1');
+  if (rows.length) return rows[0].import_id;
+  const imp = await q("SELECT id FROM orch_price_imports WHERE status = 'ready' ORDER BY id DESC LIMIT 1");
+  return imp.length ? imp[0].id : null;
+}
+
+async function priceSetPrice(sku, newPrice, actor = {}) {
+  const price = Number(newPrice);
+  if (!Number.isFinite(price) || price < 0) return { ok: false, reason: 'invalid_price' };
+  const normalized = normalizeSku(sku);
+  try {
+    return await withTransaction(async (q) => {
+      const rows = await q('SELECT * FROM orch_price_items WHERE active = 1 AND (sku_norm = ? OR UPPER(sku) = UPPER(?)) LIMIT 1 FOR UPDATE', [normalized, String(sku || '').trim()]);
+      if (!rows.length) return { ok: false, reason: 'not_found' };
+      const item = rows[0];
+      const old = Number(item.retail_price);
+      await q('UPDATE orch_price_items SET retail_price = ? WHERE id = ?', [price, item.id]);
+      await q(
+        `INSERT INTO orch_price_changes (price_item_id, sku, change_type, old_price, new_price, actor_name, note)
+         VALUES (?, ?, 'set_price', ?, ?, ?, ?)`,
+        [item.id, item.sku, old, price, stockActor(actor), (actor && actor.note) || null]
+      );
+      return { ok: true, sku: item.sku, name: item.name, old_price: old, new_price: price, currency: item.currency };
+    });
+  } catch (err) { throw dbError(err, 'priceSetPrice'); }
+}
+
+async function priceSetDiscountPrice(sku, newPrice, actor = {}) {
+  const price = Number(newPrice);
+  if (!Number.isFinite(price) || price < 0) return { ok: false, reason: 'invalid_price' };
+  const normalized = normalizeSku(sku);
+  try {
+    return await withTransaction(async (q) => {
+      const rows = await q('SELECT * FROM orch_price_items WHERE active = 1 AND (sku_norm = ? OR UPPER(sku) = UPPER(?)) LIMIT 1 FOR UPDATE', [normalized, String(sku || '').trim()]);
+      if (!rows.length) return { ok: false, reason: 'not_found' };
+      const item = rows[0];
+      const old = item.discount_price == null ? null : Number(item.discount_price);
+      await q('UPDATE orch_price_items SET discount_price = ? WHERE id = ?', [price, item.id]);
+      await q(
+        `INSERT INTO orch_price_changes (price_item_id, sku, change_type, old_discount_price, new_discount_price, actor_name, note)
+         VALUES (?, ?, 'set_discount', ?, ?, ?, ?)`,
+        [item.id, item.sku, old, price, stockActor(actor), (actor && actor.note) || null]
+      );
+      return { ok: true, sku: item.sku, name: item.name, old_discount_price: old, new_discount_price: price, currency: item.currency };
+    });
+  } catch (err) { throw dbError(err, 'priceSetDiscountPrice'); }
+}
+
+async function priceAddItem(data = {}, actor = {}) {
+  const { normKey } = require('../utils/stockKey');
+  const sku = String(data.sku || '').trim();
+  const name = String(data.name || '').trim();
+  const price = Number(data.retail_price);
+  const discount = data.discount_price == null ? null : Number(data.discount_price);
+  if (!sku || !name) return { ok: false, reason: 'sku_name_required' };
+  if (!Number.isFinite(price) || price < 0) return { ok: false, reason: 'invalid_price' };
+  if (discount != null && (!Number.isFinite(discount) || discount < 0)) return { ok: false, reason: 'invalid_discount_price' };
+  const normalized = normalizeSku(sku);
+  try {
+    return await withTransaction(async (q) => {
+      const importId = await priceActiveImportId(q);
+      if (!importId) return { ok: false, reason: 'no_active_catalog' };
+      const dup = await q('SELECT id FROM orch_price_items WHERE active = 1 AND (sku_norm = ? OR UPPER(sku) = UPPER(?)) LIMIT 1', [normalized, sku]);
+      if (dup.length) return { ok: false, reason: 'exists' };
+      const rn = await q('SELECT COALESCE(MAX(row_number), 0) + 1 AS rn FROM orch_price_items WHERE import_id = ?', [importId]);
+      const series = data.series || null;
+      const loadClass = data.load_class || null;
+      const dn = data.dn || null;
+      const sourceSku = data.source_sku || null;
+      const key = normKey([sku, sourceSku, series, loadClass, name, dn].filter(Boolean).join(' '));
+      const res = await q(
+        `INSERT INTO orch_price_items
+         (import_id, active, row_number, series_name, sku, source_sku, sku_norm, load_class, name, dn,
+          length_mm, width_mm, height_mm, weight_kg, pallet_qty, retail_price, discount_price, currency, norm_key)
+         VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [importId, rn[0].rn, series, sku, sourceSku, normalized, loadClass, name, dn,
+          data.length_mm ?? null, data.width_mm ?? null, data.height_mm ?? null, data.weight_kg ?? null,
+          data.pallet_qty || null, price, discount, data.currency || 'KZT', key]
+      );
+      await q(
+        `INSERT INTO orch_price_changes (price_item_id, sku, change_type, new_price, new_discount_price, new_name, actor_name, note)
+         VALUES (?, ?, 'add', ?, ?, ?, ?, ?)`,
+        [res.insertId, sku, price, discount, name, stockActor(actor), (actor && actor.note) || null]
+      );
+      return { ok: true, id: res.insertId, sku, name, retail_price: price, discount_price: discount, currency: data.currency || 'KZT' };
+    });
+  } catch (err) { throw dbError(err, 'priceAddItem'); }
+}
+
+// Мягкое удаление: active=0 (снимок импорта остаётся целым, история — тоже).
+async function priceRemove(sku, actor = {}) {
+  const normalized = normalizeSku(sku);
+  try {
+    return await withTransaction(async (q) => {
+      const rows = await q('SELECT * FROM orch_price_items WHERE active = 1 AND (sku_norm = ? OR UPPER(sku) = UPPER(?)) LIMIT 1 FOR UPDATE', [normalized, String(sku || '').trim()]);
+      if (!rows.length) return { ok: false, reason: 'not_found' };
+      const item = rows[0];
+      await q('UPDATE orch_price_items SET active = 0 WHERE id = ?', [item.id]);
+      await q(
+        `INSERT INTO orch_price_changes (price_item_id, sku, change_type, old_price, old_name, actor_name, note)
+         VALUES (?, ?, 'remove', ?, ?, ?, ?)`,
+        [item.id, item.sku, Number(item.retail_price), item.name, stockActor(actor), (actor && actor.note) || null]
+      );
+      return { ok: true, sku: item.sku, name: item.name };
+    });
+  } catch (err) { throw dbError(err, 'priceRemove'); }
+}
+
+async function priceRename(sku, newName, actor = {}) {
+  const { normKey } = require('../utils/stockKey');
+  const name = String(newName || '').trim();
+  if (!name) return { ok: false, reason: 'name_required' };
+  const normalized = normalizeSku(sku);
+  try {
+    return await withTransaction(async (q) => {
+      const rows = await q('SELECT * FROM orch_price_items WHERE active = 1 AND (sku_norm = ? OR UPPER(sku) = UPPER(?)) LIMIT 1 FOR UPDATE', [normalized, String(sku || '').trim()]);
+      if (!rows.length) return { ok: false, reason: 'not_found' };
+      const item = rows[0];
+      const key = normKey([item.sku, item.source_sku, item.series_name, item.load_class, name, item.dn].filter(Boolean).join(' '));
+      await q('UPDATE orch_price_items SET name = ?, norm_key = ? WHERE id = ?', [name, key, item.id]);
+      await q(
+        `INSERT INTO orch_price_changes (price_item_id, sku, change_type, old_name, new_name, actor_name, note)
+         VALUES (?, ?, 'rename', ?, ?, ?, ?)`,
+        [item.id, item.sku, item.name, name, stockActor(actor), (actor && actor.note) || null]
+      );
+      return { ok: true, sku: item.sku, old_name: item.name, new_name: name };
+    });
+  } catch (err) { throw dbError(err, 'priceRename'); }
+}
+
+async function priceListChanges(sku = null, limit = 50) {
+  const where = [];
+  const params = [];
+  if (sku) { where.push('UPPER(sku) = UPPER(?)'); params.push(String(sku).trim()); }
+  params.push(Math.max(1, Math.min(Number(limit) || 50, 100)));
+  try {
+    return await dbQuery(
+      `SELECT id, price_item_id, sku, change_type, old_price, new_price,
+              old_discount_price, new_discount_price, old_name, new_name, actor_name, note, created_at
+         FROM orch_price_changes ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+        ORDER BY id DESC LIMIT ?`,
+      params
+    );
+  } catch (err) { throw dbError(err, 'priceListChanges'); }
+}
+
 // ── Склад: остатки (orch_stock) ─────────────────────────────────────────────
 const { normKey, queryTokens } = require('../utils/stockKey');
 
@@ -1441,11 +2363,16 @@ async function stockSearch(query, location = null, limit = 50) {
     const tokens = queryTokens(query);
     const where = [];
     const params = [];
-    if (location) { where.push('location = ?'); params.push(location); }
-    for (const t of tokens) { where.push('norm_key LIKE ?'); params.push(`%${t}%`); }
-    const sql = `SELECT id, location, name, qty, unit, updated_at FROM orch_stock`
+    if (location) { where.push('s.location = ?'); params.push(location); }
+    for (const t of tokens) { where.push('s.norm_key LIKE ?'); params.push(`%${t}%`); }
+    const sql = `SELECT s.id, s.location, s.name, s.qty, s.unit, s.catalog_item_id, s.updated_at,
+                        COALESCE((SELECT SUM(r.qty) FROM orch_stock_reservations r
+                                  WHERE r.stock_id = s.id AND r.status = 'active'), 0) AS reserved_qty,
+                        s.qty - COALESCE((SELECT SUM(r.qty) FROM orch_stock_reservations r
+                                          WHERE r.stock_id = s.id AND r.status = 'active'), 0) AS available_qty
+                   FROM orch_stock s`
       + (where.length ? ` WHERE ${where.join(' AND ')}` : '')
-      + ` ORDER BY name ASC LIMIT ?`;
+      + ` ORDER BY s.name ASC LIMIT ?`;
     params.push(Number(limit) || 50);
     return await dbQuery(sql, params);
   } catch (err) {
@@ -1456,6 +2383,19 @@ async function stockSearch(query, location = null, limit = 50) {
 
 async function stockList(location = null, limit = 50) {
   return stockSearch('', location, limit);
+}
+
+async function listStockAlerts(limit = 20) {
+  return dbQuery(
+    `SELECT s.id, s.name, s.qty, s.unit,
+            COALESCE(SUM(CASE WHEN r.status = 'active' THEN r.qty ELSE 0 END), 0) AS reserved_qty,
+            s.qty - COALESCE(SUM(CASE WHEN r.status = 'active' THEN r.qty ELSE 0 END), 0) AS available_qty
+       FROM orch_stock s LEFT JOIN orch_stock_reservations r ON r.stock_id = s.id
+      GROUP BY s.id, s.name, s.qty, s.unit
+     HAVING reserved_qty > 0 OR available_qty <= 0
+      ORDER BY available_qty ASC, s.name ASC LIMIT ?`,
+    [Math.max(1, Math.min(Number(limit) || 20, 100))]
+  );
 }
 
 async function stockGetById(id) {
@@ -1472,33 +2412,145 @@ async function stockGetByKey(location, key) {
   } catch (err) { console.error('[MySQL] stockGetByKey:', err.message); return null; }
 }
 
-// Установить абсолютный остаток (создаёт позицию, если её не было). Возвращает
-// { id, created, qty }.
+function stockActor(meta) {
+  if (meta && typeof meta === 'object') return String(meta.clientName || meta.chatId || '').slice(0, 120) || null;
+  return meta ? String(meta).slice(0, 120) : null;
+}
+
+// Установить абсолютный остаток и записать неизменяемое движение.
 async function stockUpsertSet(location, name, qty, unit = 'шт', by = null) {
   const loc = location || 'Нижний';
   const key = normKey(name);
-  const q = Number(qty);
-  await dbQuery(
-    `INSERT INTO orch_stock (location, name, norm_key, qty, unit, updated_by)
-     VALUES (?, ?, ?, ?, ?, ?)
-     ON DUPLICATE KEY UPDATE qty = VALUES(qty), name = VALUES(name),
-       unit = VALUES(unit), updated_by = VALUES(updated_by)`,
-    [loc, String(name), key, q, unit || 'шт', by]
-  );
-  const row = await stockGetByKey(loc, key);
-  return { id: row ? row.id : null, created: !!row, qty: row ? Number(row.qty) : q };
+  const targetQty = Number(qty);
+  if (!Number.isFinite(targetQty) || targetQty < 0) throw new Error('invalid_stock_qty');
+  return withTransaction(async (query) => {
+    const rows = await query('SELECT * FROM orch_stock WHERE location = ? AND norm_key = ? LIMIT 1 FOR UPDATE', [loc, key]);
+    let id;
+    let old = 0;
+    let created = false;
+    if (rows.length) {
+      id = rows[0].id;
+      old = Number(rows[0].qty);
+      await query('UPDATE orch_stock SET name = ?, qty = ?, unit = ?, updated_by = ? WHERE id = ?',
+        [String(name), targetQty, unit || rows[0].unit || 'шт', stockActor(by), id]);
+    } else {
+      const res = await query(
+        'INSERT INTO orch_stock (location, name, norm_key, qty, unit, updated_by) VALUES (?, ?, ?, ?, ?, ?)',
+        [loc, String(name), key, targetQty, unit || 'шт', stockActor(by)]
+      );
+      id = res.insertId;
+      created = true;
+    }
+    await query(
+      `INSERT INTO orch_stock_movements
+       (stock_id, movement_type, qty_delta, balance_after, actor_name, note)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [id, created ? 'opening' : 'set', targetQty - old, targetQty, stockActor(by),
+        created ? 'Новая складская позиция' : 'Установка точного остатка']
+    );
+    return { id, created, old, qty: targetQty };
+  });
 }
 
-// Приход(+)/расход(−) по существующей позиции. Остаток не уходит ниже 0 (clamp).
-// Возвращает { ok, old, qty, clamped } или { ok:false } если позиция не найдена.
+async function stockMovement(stockId, type, quantity, meta = {}) {
+  const qty = Math.abs(Number(quantity));
+  if (!Number.isFinite(qty) || qty <= 0) return { ok: false, reason: 'invalid_qty' };
+  const sign = type === 'receive' ? 1 : -1;
+  if (!['receive', 'issue'].includes(type)) return { ok: false, reason: 'invalid_type' };
+  return withTransaction(async (q) => {
+    const rows = await q('SELECT * FROM orch_stock WHERE id = ? LIMIT 1 FOR UPDATE', [stockId]);
+    if (!rows.length) return { ok: false, reason: 'not_found' };
+    const row = rows[0];
+    const reservedRows = await q(
+      "SELECT id, qty FROM orch_stock_reservations WHERE stock_id = ? AND status = 'active' FOR UPDATE",
+      [stockId]
+    );
+    const reserved = reservedRows.reduce((sum, r) => sum + Number(r.qty), 0);
+    const old = Number(row.qty);
+    const available = old - reserved;
+    if (sign < 0 && qty > available) return { ok: false, reason: 'insufficient_available', old, reserved, available };
+    const next = old + sign * qty;
+    await q('UPDATE orch_stock SET qty = ?, updated_by = ? WHERE id = ?', [next, stockActor(meta), stockId]);
+    const movement = await q(
+      `INSERT INTO orch_stock_movements
+       (stock_id, movement_type, qty_delta, balance_after, object_ref, project_id, task_id, actor_name, note)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [stockId, type, sign * qty, next, meta.object_ref || null, meta.project_id || null,
+        meta.task_id || null, stockActor(meta), meta.note || null]
+    );
+    return { ok: true, movement_id: movement.insertId, old, qty: next, reserved, available: next - reserved };
+  });
+}
+
 async function stockAdjust(row, delta, by = null) {
-  if (!row) return { ok: false };
-  const old = Number(row.qty);
-  let next = old + Number(delta);
-  let clamped = false;
-  if (next < 0) { next = 0; clamped = true; }
-  await dbQuery('UPDATE orch_stock SET qty = ?, updated_by = ? WHERE id = ?', [next, by, row.id]);
-  return { ok: true, old, qty: next, clamped };
+  if (!row) return { ok: false, reason: 'not_found' };
+  const d = Number(delta);
+  return stockMovement(row.id, d >= 0 ? 'receive' : 'issue', Math.abs(d),
+    by && typeof by === 'object' ? by : { clientName: by });
+}
+
+async function stockReserve(stockId, quantity, meta = {}) {
+  const qty = Number(quantity);
+  if (!Number.isFinite(qty) || qty <= 0) return { ok: false, reason: 'invalid_qty' };
+  return withTransaction(async (q) => {
+    const rows = await q('SELECT * FROM orch_stock WHERE id = ? LIMIT 1 FOR UPDATE', [stockId]);
+    if (!rows.length) return { ok: false, reason: 'not_found' };
+    const reservedRows = await q(
+      "SELECT id, qty FROM orch_stock_reservations WHERE stock_id = ? AND status = 'active' FOR UPDATE",
+      [stockId]
+    );
+    const reserved = reservedRows.reduce((sum, r) => sum + Number(r.qty), 0);
+    const available = Number(rows[0].qty) - reserved;
+    if (qty > available) return { ok: false, reason: 'insufficient_available', available, reserved };
+    const res = await q(
+      `INSERT INTO orch_stock_reservations
+       (stock_id, qty, object_ref, project_id, task_id, actor_name, note)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [stockId, qty, meta.object_ref || null, meta.project_id || null, meta.task_id || null,
+        stockActor(meta), meta.note || null]
+    );
+    return { ok: true, reservation_id: res.insertId, qty, reserved: reserved + qty, available: available - qty };
+  });
+}
+
+async function stockReleaseReservation(reservationId, consume = false, meta = {}) {
+  return withTransaction(async (q) => {
+    const rows = await q('SELECT * FROM orch_stock_reservations WHERE id = ? LIMIT 1 FOR UPDATE', [reservationId]);
+    if (!rows.length) return { ok: false, reason: 'not_found' };
+    const reservation = rows[0];
+    if (reservation.status !== 'active') return { ok: false, reason: 'not_active', status: reservation.status };
+    let balance = null;
+    if (consume) {
+      const stockRows = await q('SELECT qty FROM orch_stock WHERE id = ? LIMIT 1 FOR UPDATE', [reservation.stock_id]);
+      if (!stockRows.length || Number(stockRows[0].qty) < Number(reservation.qty)) return { ok: false, reason: 'insufficient_on_hand' };
+      balance = Number(stockRows[0].qty) - Number(reservation.qty);
+      await q('UPDATE orch_stock SET qty = ?, updated_by = ? WHERE id = ?', [balance, stockActor(meta), reservation.stock_id]);
+      await q(
+        `INSERT INTO orch_stock_movements
+         (stock_id, movement_type, qty_delta, balance_after, object_ref, project_id, task_id, actor_name, note)
+         VALUES (?, 'issue', ?, ?, ?, ?, ?, ?, ?)`,
+        [reservation.stock_id, -Number(reservation.qty), balance, reservation.object_ref,
+          reservation.project_id, reservation.task_id, stockActor(meta), meta.note || 'Списание резерва']
+      );
+    }
+    await q('UPDATE orch_stock_reservations SET status = ? WHERE id = ?', [consume ? 'consumed' : 'released', reservationId]);
+    return { ok: true, reservation_id: Number(reservationId), status: consume ? 'consumed' : 'released', balance };
+  });
+}
+
+async function stockListMovements(stockId, limit = 50) {
+  return dbQuery(
+    'SELECT * FROM orch_stock_movements WHERE stock_id = ? ORDER BY id DESC LIMIT ?',
+    [Number(stockId), Math.max(1, Math.min(Number(limit) || 50, 100))]
+  );
+}
+
+async function stockLinkCatalog(stockId, sku) {
+  const item = await priceGetBySku(sku);
+  if (!item) return { ok: false, reason: 'sku_not_found' };
+  const res = await dbQuery('UPDATE orch_stock SET catalog_item_id = ? WHERE id = ?', [item.id, Number(stockId)]);
+  if (!(res.affectedRows || 0)) return { ok: false, reason: 'stock_not_found' };
+  return { ok: true, stock_id: Number(stockId), catalog_item_id: item.id, sku: item.sku };
 }
 
 async function stockRemove(id) {
@@ -1519,8 +2571,12 @@ async function stockRename(id, newName, by = null) {
 }
 
 module.exports = {
-  getPool, dbQuery, withTransaction, initTables,
+  getPool, dbQuery, withTransaction, initTables, _mergeHistory,
   loadHistory, saveHistory, clearHistory,
+  // Долгая память: архив переписки + журнал действий + recall
+  archiveMessage, logBotEvent, recallSearch, archiveByDateRange,
+  // Семантический индекс архива (RAG)
+  listChatsWithBacklog, archiveMessagesAfter, insertArchiveChunk, loadChunkVectors,
   checkDailyCount, incrementDailyCount,
   // Оркестратор: сотрудники
   seedEmployees, listEmployees, findEmployeeByContact, getEmployeeById, getOpenTasksForEmployee,
@@ -1541,8 +2597,16 @@ module.exports = {
   // Оркестратор: задачи
   createTasksBulk, getTask, listTasksForProject, assignTask, markDispatched, updateTaskStatus,
   updateTaskFields,
-  setTaskDeadline,
+  setTaskDeadline, createTaskReport, listTaskEvents,
+  // Ops / обратная связь
+  createOpsEvent, listPendingOpsEvents, markOpsEventDelivered, markOpsEventAttempt,
+  // Прайс
+  importPriceCatalog, priceGetBySku, priceSearch,
+  priceSetPrice, priceSetDiscountPrice, priceAddItem, priceRemove, priceRename, priceListChanges,
   // Склад: остатки
   stockSearch, stockList, stockGetById, stockGetByKey, stockUpsertSet, stockAdjust,
+  listStockAlerts,
+  stockMovement, stockReserve, stockReleaseReservation, stockListMovements,
+  stockLinkCatalog,
   stockRemove, stockRename,
 };

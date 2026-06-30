@@ -53,9 +53,12 @@ function isGoalMet(goal, status) {
   if (goal === 'accepted') return ACCEPTED_STATUSES.includes(status);
   return status === 'done'; // goal === 'done' (дефолт)
 }
-// Работу уже переназначают/задачи нет — стеречь нечего (стоп без погони).
+// Стеречь нечего: задачи нет, её переназначают, либо она уже закрыта
+// (done/cancelled). Отменённая задача никогда не достигнет цели 'done', поэтому
+// без этого условия сторож гонял бы её и эскалировал бесконечно.
 function isWatchTerminalStop(task) {
-  return !task || task.status === 'reassign';
+  return !task || task.status === 'reassign'
+    || task.status === 'cancelled' || task.status === 'done';
 }
 
 function goalVerb(goal) {
@@ -432,7 +435,7 @@ module.exports = {
   start,
   // для тестов
   _internals: {
-    isDue, wrapInstruction, tick, runSchedule, isGoalMet, runWatchPhase,
+    isDue, wrapInstruction, tick, runSchedule, isGoalMet, isWatchTerminalStop, runWatchPhase,
     setDeliver: (f) => { deliverFn = f; },
   },
 };

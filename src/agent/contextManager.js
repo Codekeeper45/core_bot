@@ -75,11 +75,19 @@ const SUMMARY_SYSTEM = `Ты ведёшь долгую память чат-бо�
 // inputs unchanged so the user reply is never blocked.
 async function summarizeIfNeeded({ messages, summary, openai, model }) {
   const limit = config.CONTEXT_SUMMARY_CHAR_LIMIT;
+  const hardLimit = config.CONTEXT_SUMMARY_HARD_CHAR_LIMIT || (limit * 3);
+  const minMessages = config.CONTEXT_SUMMARY_MIN_MESSAGES || 0;
   const keepRecent = config.CONTEXT_KEEP_RECENT_MSGS;
   const msgs = Array.isArray(messages) ? messages : [];
   const cur = summary || '';
 
-  if (msgs.length <= keepRecent || totalChars(msgs) <= limit) {
+  // Сжимаем только при фактическом переполнении (НЕ по времени): либо сообщений
+  // стало больше порога И объём превысил мягкий лимит, либо объём пробил аварийный
+  // потолок (защита от переполнения контекста модели огромными сообщениями).
+  const chars = totalChars(msgs);
+  const overSoft = msgs.length > minMessages && chars > limit;
+  const overHard = chars > hardLimit;
+  if (msgs.length <= keepRecent || (!overSoft && !overHard)) {
     return { messages: msgs, summary: cur, changed: false };
   }
 

@@ -6,8 +6,8 @@ async function loadChatHistory(channel, chatId) {
   return loadHistory(channel, chatId);
 }
 
-async function saveChatHistory(channel, chatId, messages, summary = '') {
-  return saveHistory(channel, chatId, messages, summary);
+async function saveChatHistory(channel, chatId, messages, summary = '', expectedVersion = null) {
+  return saveHistory(channel, chatId, messages, summary, expectedVersion);
 }
 
 // Записать ИСХОДЯЩЕЕ сообщение бота (диспатч задачи, оповещение, пересылку) в историю
@@ -18,9 +18,11 @@ async function saveChatHistory(channel, chatId, messages, summary = '') {
 async function recordOutbound(channel, chatId, text) {
   if (!channel || !chatId || !text) return;
   try {
-    const { summary, messages } = await loadHistory(channel, chatId);
+    const { summary, messages, version } = await loadHistory(channel, chatId);
     messages.push({ role: 'assistant', content: String(text) });
-    await saveHistory(channel, chatId, messages, summary);
+    await saveHistory(channel, chatId, messages, summary, version);
+    // Долгая память: исходящее (диспатч/оповещение/пересылка) — тоже в полный архив.
+    require('../services/mysql').archiveMessage(channel, chatId, 'assistant', text, 'Бот');
   } catch (err) {
     console.error('[Memory] recordOutbound:', err.message);
   }

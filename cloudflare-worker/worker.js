@@ -24,6 +24,7 @@
 
 const BOT_URL_KEY = 'bot_url';
 const QUEUE_KEY = 'queue';
+const DLQ_KEY = 'dead_letter';
 
 // Free-tier Cloudflare KV лимиты:
 //   100k reads/day, 1k writes/day, 1k list/day.
@@ -102,7 +103,9 @@ export default {
       // Single-key queue: 1 GET + 1 PUT на сообщение, без list().
       const current = await env.WAZZUP_QUEUE.get(QUEUE_KEY, 'json') || [];
       current.push({
+        id: crypto.randomUUID(),
         ts: Date.now(),
+        attempts: 0,
         body: parsed || bodyText,
       });
       // Сохраняем последние 200 — защита от distress если бот долго offline.
@@ -111,9 +114,23 @@ export default {
       return json({ ok: true, fallback: 'queued', count: trimmed.length });
     }
 
+    // === Подтверждение успешно обработанных payload ===
+    const ackMatch = path.match(/^\/ack\/([^/]+)\/?$/);
+    if (request.method === 'POST' && ackMatch) {
+      if (ackMatch[1] !== secret) return text('forbidden', 403);
+      let body;
+      try { body = await request.json(); } catch { return text('bad json', 400); }
+      const ids = new Set(Array.isArray(body?.ids) ? body.ids.map(String) : []);
+      if (!ids.size) return json({ ok: true, removed: 0 });
+      const queue = await env.WAZZUP_QUEUE.get(QUEUE_KEY, 'json') || [];
+      const kept = queue.filter((item) => !ids.has(String(item.id)));
+      await env.WAZZUP_QUEUE.put(QUEUE_KEY, JSON.stringify(kept));
+      return json({ ok: true, removed: queue.length - kept.length, remaining: kept.length });
+    }
+
     // === Бот забирает буфер (fallback) ===
-    // 1 GET, и только если буфер не пустой — 1 PUT с пустым массивом.
-    // На пустых поллах НИ ОДНОЙ write-операции. Это критично для дневных лимитов.
+    // Ничего не удаляем до явного ACK. При сбое обработки payload вернётся снова;
+    // message_id в основном боте делает повтор идемпотентным.
     const pollMatch = path.match(/^\/poll\/([^/]+)\/?$/);
     if (request.method === 'GET' && pollMatch) {
       if (pollMatch[1] !== secret) return text('forbidden', 403);
@@ -122,11 +139,19 @@ export default {
       if (queue.length === 0) {
         return json({ ok: true, count: 0, payloads: [] });
       }
-      // Очищаем атомарно — но KV не даёт CAS, поэтому редкая race-condition
-      // (новый POST между нашим GET и PUT) приведёт к небольшой потере. Для
-      // безопасности можно delete, но put '[]' даёт более чистую семантику.
-      await env.WAZZUP_QUEUE.put(QUEUE_KEY, '[]');
-      const payloads = queue.map((item, i) => ({ key: `idx:${i}-ts:${item.ts}`, body: item.body }));
+      const active = [];
+      const dead = [];
+      for (const item of queue) {
+        const next = { ...item, id: item.id || `legacy-${item.ts}`, attempts: Number(item.attempts || 0) + 1 };
+        if (next.attempts > 10) dead.push({ ...next, failed_at: Date.now() });
+        else active.push(next);
+      }
+      if (dead.length) {
+        const oldDlq = await env.WAZZUP_QUEUE.get(DLQ_KEY, 'json') || [];
+        await env.WAZZUP_QUEUE.put(DLQ_KEY, JSON.stringify([...oldDlq, ...dead].slice(-200)));
+      }
+      await env.WAZZUP_QUEUE.put(QUEUE_KEY, JSON.stringify(active));
+      const payloads = active.map((item) => ({ key: item.id, attempts: item.attempts, body: item.body }));
       return json({ ok: true, count: payloads.length, payloads });
     }
 

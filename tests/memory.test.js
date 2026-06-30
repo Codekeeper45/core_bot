@@ -1,5 +1,5 @@
 'use strict';
-const { test, describe } = require('node:test');
+const { test, describe, after } = require('node:test');
 const assert = require('node:assert/strict');
 
 // Мок mysql loadHistory/saveHistory (память хранит истории в объекте).
@@ -8,6 +8,7 @@ const k = (c, id) => `${c}|${id}`;
 const mysqlMock = {
   loadHistory: async (c, id) => store.rows[k(c, id)] || { summary: '', messages: [] },
   saveHistory: async (c, id, messages, summary) => { store.rows[k(c, id)] = { summary: summary || '', messages }; },
+  archiveMessage: async () => {},
 };
 
 const Module = require('module');
@@ -17,7 +18,7 @@ Module.prototype.require = function (id) {
   return orig.apply(this, arguments);
 };
 const memory = require('../src/agent/memory');
-Module.prototype.require = orig;
+after(() => { Module.prototype.require = orig; });
 
 describe('recordOutbound — запись исходящего в историю получателя', () => {
   test('добавляет assistant-ход под тем же ключом, сводку сохраняет', async () => {

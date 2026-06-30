@@ -5,7 +5,8 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "viewer": "node viewer/server.js"
+    "viewer": "node viewer/server.js",
+    "import:price": "node scripts/importPrice.js"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^7.0.0-rc13",

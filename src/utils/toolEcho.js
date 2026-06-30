@@ -41,6 +41,16 @@ function formatToolEcho(name, args = {}) {
       const act = { search: 'Смотрю остатки', list: 'Смотрю склад', adjust: 'Обновляю остаток', set: 'Обновляю остаток', add: 'Добавляю позицию', remove: 'Удаляю позицию', rename: 'Переименовываю позицию' }[a.action] || 'Работаю со складом';
       return `📦 ${act}`;
     }
+    case 'price_catalog':
+      return a.action === 'calculate' ? '💰 Считаю стоимость по прайсу' : '💰 Смотрю прайс';
+    case 'manage_price': {
+      const act = { set_price: 'Меняю цену', add: 'Добавляю позицию в прайс', remove: 'Удаляю из прайса', rename: 'Переименовываю позицию', history: 'Смотрю историю цен' }[a.action] || 'Работаю с прайсом';
+      return `💰 ${act}`;
+    }
+    case 'recall':
+      return '🧠 Ищу в памяти прошлую переписку';
+    case 'recall_by_date':
+      return '📅 Поднимаю переписку за период';
     case 'get_current_time':
       return '🕐 Сверяю текущее время';
     default:

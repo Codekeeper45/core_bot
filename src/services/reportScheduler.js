@@ -12,7 +12,7 @@
 // (вкл/выкл, смена часов, запуск вручную). Изменения сохраняются в orch_settings
 // и переживают рестарт: env-значения — только дефолт при первом старте.
 const config = require('../config');
-const { listEmployees, listOpenTasksBrief, getSettings, setSetting, listActiveQuiet } = require('./mysql');
+const { listEmployees, listOpenTasksBrief, listStockAlerts, getSettings, setSetting, listActiveQuiet } = require('./mysql');
 const notifier = require('./notifier');
 
 // Кому сейчас нельзя писать первым (тихий режим) — по нормализованному телефону.
@@ -98,7 +98,7 @@ function buildEveningReminders(employees, tasks) {
       employee: e,
       text: `${firstName(e.name)}, конец дня — отпишись по задачам:\n`
         + `${lines.join('\n')}${more}\n`
-        + 'Что сделано, что в работе, что блокирует?',
+        + 'Ответь по номерам, например: «№10 — в работе, сделано 70%, дальше упаковка» или «№11 — блокер: нет машины».',
     });
   }
   return out;
@@ -120,7 +120,7 @@ async function runEveningReminders() {
 }
 
 // ── Утро: сводка боссу ─────────────────────────────────────────────────────
-function buildMorningSummary(tasks, employees, now = new Date()) {
+function buildMorningSummary(tasks, employees, now = new Date(), stockAlerts = []) {
   if (!tasks.length) return 'Доброе утро. Открытых задач нет.';
 
   const nameById = new Map(employees.map((e) => [e.id, firstName(e.name)]));
@@ -137,6 +137,15 @@ function buildMorningSummary(tasks, employees, now = new Date()) {
   const stale = tasks.filter((t) => t.status !== 'blocked' && t.updated_at
     && (now.getTime() - new Date(t.updated_at).getTime()) >= staleMs);
   const blocked = tasks.filter((t) => t.status === 'blocked');
+  const overdue = tasks.filter((t) => t.deadline && new Date(t.deadline).getTime() < now.getTime());
+  const todayKey = localDateKey(now);
+  const dueToday = tasks.filter((t) => t.deadline && !overdue.includes(t)
+    && localDateKey(new Date(t.deadline)) === todayKey);
+  const reportCutoff = now.getTime() - 24 * 3600 * 1000;
+  const noReportIds = new Set(tasks.filter((t) => t.assignee_id
+    && (!t.last_report_at || new Date(t.last_report_at).getTime() < reportCutoff)).map((t) => t.assignee_id));
+  const workload = new Map();
+  for (const t of tasks) if (t.assignee_id) workload.set(t.assignee_id, (workload.get(t.assignee_id) || 0) + 1);
 
   const lines = ['Доброе утро. Сводка по задачам.',
     `Открытых: ${tasks.length} (в работе ${counts.in_progress}, ожидают ${counts.waiting}, блокеры ${counts.blocked}).`];
@@ -151,8 +160,31 @@ function buildMorningSummary(tasks, employees, now = new Date()) {
       lines.push(`- №${t.id} «${t.title}» — ${who(t.assignee_id)} (${days} дн.)`);
     }
   }
-  if (!blocked.length && !stale.length) lines.push('Блокеров и зависших нет.');
+  if (overdue.length) {
+    lines.push('Просроченные:');
+    for (const t of overdue) lines.push(`- №${t.id} «${t.title}» — ${who(t.assignee_id)}`);
+  }
+  if (dueToday.length) {
+    lines.push('Срок сегодня:');
+    for (const t of dueToday) lines.push(`- №${t.id} «${t.title}» — ${who(t.assignee_id)}`);
+  }
+  if (noReportIds.size) lines.push(`Без свежего отчёта: ${[...noReportIds].map(who).join(', ')}.`);
+  if (workload.size) lines.push(`Загрузка: ${[...workload].map(([id, count]) => `${who(id)} — ${count}`).join('; ')}.`);
+  if (stockAlerts.length) {
+    lines.push('Склад:');
+    for (const s of stockAlerts.slice(0, 10)) {
+      lines.push(`- ${s.name}: всего ${Number(s.qty)}, резерв ${Number(s.reserved_qty)}, доступно ${Number(s.available_qty)} ${s.unit}`);
+    }
+  }
+  if (!blocked.length && !stale.length && !overdue.length) lines.push('Блокеров и зависших нет. Просрочек нет.');
   return lines.join('\n');
+}
+
+async function getMorningSummary() {
+  const [employees, tasks, stockAlerts] = await Promise.all([
+    listEmployees(), listOpenTasksBrief(), listStockAlerts(20),
+  ]);
+  return buildMorningSummary(tasks, employees, new Date(), stockAlerts);
 }
 
 async function runMorningSummary() {
@@ -161,8 +193,7 @@ async function runMorningSummary() {
     console.warn('[Scheduler] Утренняя сводка: нет получателей (BOSS_CONTACTS/SCHEDULER_BOSS_WA пусты)');
     return { sent: 0, total: 0 };
   }
-  const [employees, tasks] = await Promise.all([listEmployees(), listOpenTasksBrief()]);
-  const text = buildMorningSummary(tasks, employees);
+  const text = await getMorningSummary();
   const quiet = await quietDigitsSet();
   let sent = 0;
   for (const digits of targets) {
@@ -239,6 +270,7 @@ async function tick(now = new Date()) {
     }
   } catch (err) {
     console.error('[Scheduler] tick:', err.message);
+    require('./developerFeedback').reportDeveloperError(`Планировщик отчётов: ${err.message}`, { includeHistory: false }).catch(() => {});
   }
 }
 
@@ -261,7 +293,7 @@ async function start() {
 module.exports = {
   start,
   getState, setEnabled, setHours,
-  runMorningSummary, runEveningReminders,
+  getMorningSummary, runMorningSummary, runEveningReminders,
   // для тестов
   _internals: { shouldFire, buildEveningReminders, buildMorningSummary, firstName, state },
 };
