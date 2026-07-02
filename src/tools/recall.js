@@ -19,13 +19,14 @@ const definition = {
       + '«как шёл процесс…», «что мы обсуждали про…», «когда я пересылал…»). НЕ отвечай «не помню/не '
       + 'сохраняю историю», не выполнив поиск. В ответе у каждого фрагмента есть ДАТЫ — называй их '
       + 'точно и не путай. query — суть вопроса своими словами. scope: chat — текущий чат (по умолч.); '
-      + 'all — по всем чатам (только босс; для переписки с другим человеком). kind: messages '
+      + 'all — по всем чатам (доступно каждому; чужие ПРИВАТНЫЕ чаты исключаются — их видят только их '
+      + 'владелец и босс, см. manage_chat_privacy). kind: messages '
       + '(переписка, умолч.) / events (действия бота) / all.',
     parameters: {
       type: 'object',
       properties: {
         query: { type: 'string', description: 'Суть вопроса/тема своими словами (можно естественным языком).' },
-        scope: { type: 'string', enum: ['chat', 'all'], description: 'chat — этот чат (умолч.); all — по всем чатам (только босс).' },
+        scope: { type: 'string', enum: ['chat', 'all'], description: 'chat — этот чат (умолч.); all — по всем чатам (чужие private-чаты не ищутся).' },
         kind: { type: 'string', enum: ['messages', 'events', 'all'], description: 'Что искать: переписку (умолч.), действия или всё.' },
         limit: { type: 'integer', description: 'Сколько фрагментов вернуть (1–25, по умолч. 8).' },
       },
@@ -57,9 +58,10 @@ function fmtChunk(c) {
 async function handler(args, context = {}) {
   const query = String(args.query || '').trim();
   if (!query) return { success: false, reason: 'empty_query', message: 'Нужны ключевые слова для поиска.' };
-  // scope=all (по всем чатам) — только боссу: иначе сотрудник прочитал бы чужую
-  // (в т.ч. боссовскую) переписку. Сотруднику молча сужаем до его чата.
-  const scope = (args.scope === 'all' && context.role === 'boss') ? 'all' : 'chat';
+  // scope=all открыт всем: границы держит фильтр приватности — чужие private-чаты
+  // не-боссу не показываются (viewer ниже), свой чат виден всегда.
+  const scope = args.scope === 'all' ? 'all' : 'chat';
+  const viewer = { channel: context.channel, chatId: context.chatId, isBoss: context.role === 'boss' };
   const kind = args.kind || 'messages';
   try {
     // 1) Семантика по переписке (если включена).
@@ -67,7 +69,7 @@ async function handler(args, context = {}) {
     let mode = 'keyword';
     if (kind !== 'events') {
       try {
-        const sem = await semanticRecall({ channel: context.channel, chatId: context.chatId, query, scope, limit: args.limit || 8 });
+        const sem = await semanticRecall({ channel: context.channel, chatId: context.chatId, query, scope, limit: args.limit || 8, viewer });
         if (sem.ok && sem.results.length) { fragments = sem.results.map(fmtChunk); mode = 'semantic'; }
         else if (sem.ok) mode = 'semantic'; // включено, но пусто → не падаем зря на LIKE
       } catch (e) { /* эмбеддинги недоступны — уйдём в LIKE ниже */ }
@@ -79,7 +81,7 @@ async function handler(args, context = {}) {
     if (mode !== 'semantic' || kind === 'events' || kind === 'all') {
       const res = await recallSearch({
         channel: context.channel, chatId: context.chatId, query, scope,
-        kind: mode === 'semantic' ? 'events' : kind, limit: args.limit,
+        kind: mode === 'semantic' ? 'events' : kind, limit: args.limit, viewer,
       });
       messages = (res.messages || []).map(fmtMsg);
       events = (res.events || []).map(fmtEvent);

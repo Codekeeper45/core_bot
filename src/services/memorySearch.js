@@ -6,7 +6,8 @@ const embeddings = require('./embeddings');
 const mysql = require('./mysql');
 
 // { ok, results:[{score, content, first_at, last_at, authors, channel, chat_id}], scanned, truncated }
-async function semanticRecall({ channel, chatId, query, scope = 'chat', limit = 8 } = {}) {
+// viewer = {channel, chatId, isBoss} — при scope=all не-боссу скрываются чужие private-чаты.
+async function semanticRecall({ channel, chatId, query, scope = 'chat', limit = 8, viewer = null } = {}) {
   if (!embeddings.isEnabled()) return { ok: false, reason: 'disabled', results: [] };
   const q = String(query || '').trim();
   if (!q) return { ok: false, reason: 'empty_query', results: [] };
@@ -15,7 +16,7 @@ async function semanticRecall({ channel, chatId, query, scope = 'chat', limit = 
   if (!qVec.length) return { ok: false, reason: 'embed_failed', results: [] };
 
   const rows = await mysql.loadChunkVectors({
-    channel, chatId, scope,
+    channel, chatId, scope, viewer,
     model: config.EMBEDDING_MODEL,
     dims: config.EMBEDDING_DIMENSIONS,
     limit: config.EMBEDDING_SEARCH_CANDIDATES,

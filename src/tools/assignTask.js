@@ -1,6 +1,7 @@
 'use strict';
 const { getTask, getEmployeeById, assignTask, recomputeProjectStatus } = require('../services/mysql');
 const { handleToolDbError } = require('../utils/toolError');
+const notifier = require('../services/notifier');
 
 const definition = {
   type: 'function',
@@ -8,8 +9,9 @@ const definition = {
     name: 'assign_task',
     description:
       'Назначает (или переназначает) подзадачу сотруднику. Используй для переназначения при '
-      + 'блокировке/перегрузке исполнителя. При первичном создании назначение можно задавать прямо '
-      + 'в create_project (assignee_id).',
+      + 'блокировке/перегрузке исполнителя. Доступно всем; когда переназначает не-босс, '
+      + 'руководитель уведомляется автоматически. При первичном создании назначение можно задавать '
+      + 'прямо в create_project (assignee_id).',
     parameters: {
       type: 'object',
       properties: {
@@ -32,6 +34,16 @@ async function handler(args, context = {}) {
     const newStatus = await assignTask(args.task_id, args.employee_id, context);
     // Пересчитываем статус проекта (например, был done → снова active после reopen).
     const projectStatus = await recomputeProjectStatus(task.project_id);
+
+    // Переназначение не-боссом — уведомляем руководителя (прозрачность вместо запрета).
+    if (context.role !== 'boss') {
+      const actor = context.clientName || context.phone || context.chatId || 'сотрудник';
+      notifier.notifyBossAboutChange(
+        context,
+        `🔔 ${actor} переназначил задачу #${task.id} «${task.title}» → ${emp.name}.`,
+        { projectId: task.project_id }
+      ).catch(() => {});
+    }
 
     const needsRedispatch = newStatus === 'todo' && task.status !== 'todo';
     return {

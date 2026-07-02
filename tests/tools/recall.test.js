@@ -73,19 +73,21 @@ describe('recall', () => {
     assert.equal(lastKeywordArgs.kind, 'events'); // фрагменты из семантики, события — из LIKE
   });
 
-  test('сотруднику scope=all сужается до его чата', async () => {
-    let seenScope = null;
-    semanticImpl = async (p) => { seenScope = p.scope; return { ok: true, results: [] }; };
+  test('сотруднику scope=all проходит с viewer (не босс) — приватность фильтрует SQL', async () => {
+    let seen = null;
+    semanticImpl = async (p) => { seen = p; return { ok: true, results: [] }; };
     const r = await handler({ query: 'x', scope: 'all' }, { channel: 'whatsapp', chatId: 'emp1', role: 'employee' });
-    assert.equal(seenScope, 'chat');
-    assert.equal(r.scope, 'chat');
+    assert.equal(seen.scope, 'all');
+    assert.equal(r.scope, 'all');
+    assert.deepEqual(seen.viewer, { channel: 'whatsapp', chatId: 'emp1', isBoss: false });
   });
 
-  test('боссу scope=all проходит', async () => {
-    let seenScope = null;
-    semanticImpl = async (p) => { seenScope = p.scope; return { ok: true, results: [] }; };
+  test('боссу scope=all проходит с viewer.isBoss=true', async () => {
+    let seen = null;
+    semanticImpl = async (p) => { seen = p; return { ok: true, results: [] }; };
     await handler({ query: 'x', scope: 'all' }, { channel: 'whatsapp', chatId: 'boss', role: 'boss' });
-    assert.equal(seenScope, 'all');
+    assert.equal(seen.scope, 'all');
+    assert.equal(seen.viewer.isBoss, true);
   });
 
   test('ничего не найдено → found 0 + note', async () => {

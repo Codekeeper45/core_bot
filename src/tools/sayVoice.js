@@ -1,7 +1,7 @@
 'use strict';
 // Озвучить ответ голосом по решению агента — с управлением интонацией.
 // Текст здесь ОТДЕЛЁН от отображаемого ответа: теги [] и стиль-инструкции попадают только
-// в голос и не показываются пользователю. Режим босса (BOSS_ONLY).
+// в голос и не показываются пользователю. Доступен всем (гейт — TTS_ENABLED).
 const { synthesizeSpeech, listVoices } = require('../services/tts');
 const notifier = require('../services/notifier');
 const voiceFlag = require('../services/voiceFlag');

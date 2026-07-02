@@ -188,6 +188,9 @@ async function handler(args, context = {}) {
       if (rows.length === 0) return { success: false, reason: 'not_found', message: 'Складская позиция не найдена.' };
       if (rows.length > 1) return ambiguous(rows);
       const linked = await stockLinkCatalog(rows[0].id, args.catalog_sku);
+      if (!linked.ok && linked.reason === 'ambiguous_supplier') {
+        return { success: false, action, ...linked, message: 'Артикул есть в обоих прайсах — уточни каталог (aquastok|gidrolica) у человека.' };
+      }
       return { success: linked.ok, action, ...linked };
     }
 

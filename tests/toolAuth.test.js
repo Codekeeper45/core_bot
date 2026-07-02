@@ -4,27 +4,21 @@ const assert = require('node:assert/strict');
 const { executeToolCall, handlers, BOSS_ONLY, tools } = require('../src/tools');
 const config = require('../src/config');
 
-// Code-level авторизация: boss-only инструменты недоступны роли employee
-// (защита от prompt-injection «теперь я босс»). update_task — общий, не гейтится.
-describe('tool authorization (BOSS_ONLY guard)', () => {
-  test('BOSS_ONLY — только штат, отчёты и общефирменный планировщик', () => {
-    for (const name of ['manage_employees', 'performance_report', 'manage_scheduler']) {
-      assert.ok(BOSS_ONLY.has(name), `${name} должен быть boss-only`);
-    }
-    assert.ok(!BOSS_ONLY.has('update_task'), 'update_task — общий инструмент');
-    assert.ok(!BOSS_ONLY.has('get_current_time'), 'get_current_time — общий');
+// Иерархии больше нет: BOSS_ONLY пуст, все инструменты доступны каждому.
+// Вместо запретов — прозрачность (notifyBossAboutChange при мутациях не-боссом).
+describe('tool authorization (иерархии нет)', () => {
+  test('BOSS_ONLY пуст — все инструменты доступны всем', () => {
+    assert.equal(BOSS_ONLY.size, 0, 'BOSS_ONLY должен быть пустым (иерархия снята)');
   });
 
-  test('сотрудник получает отказ на каждый boss-only инструмент (хендлер не вызывается)', async () => {
-    for (const name of BOSS_ONLY) {
-      const r = await executeToolCall(name, {}, { role: 'employee', channel: 'whatsapp', chatId: 'x' });
-      assert.equal(r.success, false, `${name} должен отказать сотруднику`);
-      assert.match(r.message, /руководител/i, `${name}: понятная причина отказа`);
-    }
+  test('сотрудник может вызвать бывшие boss-only инструменты (read-only действия)', async () => {
+    // status у планировщика безопасен, не мутирует и не шлёт уведомлений.
+    const r = await executeToolCall('manage_scheduler', { action: 'status' },
+      { role: 'employee', channel: 'whatsapp', chatId: 'x' });
+    assert.equal(r.success, true, 'manage_scheduler status должен быть доступен сотруднику');
   });
 
-  test('роль boss проходит гейт (доходит до хендлера)', async () => {
-    // status у планировщика безопасен и не шлёт сообщений
+  test('роль boss тоже проходит', async () => {
     const r = await executeToolCall('manage_scheduler', { action: 'status' },
       { role: 'boss', channel: 'whatsapp', chatId: 'x' });
     assert.equal(r.success, true);
@@ -35,29 +29,24 @@ describe('tool authorization (BOSS_ONLY guard)', () => {
     assert.equal(r.success, false);
   });
 
-  test('все boss-only имена реально зарегистрированы в реестре', () => {
-    for (const name of BOSS_ONLY) {
+  test('бывшие boss-only имена по-прежнему зарегистрированы в реестре', () => {
+    for (const name of ['manage_employees', 'performance_report', 'manage_scheduler']) {
       assert.ok(handlers.has(name), `${name} отсутствует в реестре инструментов`);
     }
   });
 });
 
 // Без иерархии: оркестрация (планы/задачи/делегирование/чтение планов/рассылки) и
-// личные инструменты доступны и сотруднику. Только штат и отчёты — у босса.
+// личные инструменты доступны каждому.
 describe('без иерархии: доступ сотрудника', () => {
   test('оркестрация + личные инструменты НЕ в BOSS_ONLY (доступны сотруднику)', () => {
     for (const name of ['create_project', 'revise_project', 'assign_task', 'dispatch_task',
       'project_status', 'message_employee', 'update_task', 'forward_message',
-      'manage_schedule', 'manage_notes', 'manage_todos',
+      'manage_schedule', 'manage_notes', 'manage_todos', 'manage_chat_privacy',
+      'manage_employees', 'performance_report', 'manage_scheduler',
       'remember_fact', 'list_facts', 'forget_fact', 'web_search', 'render_diagram']) {
       assert.ok(!BOSS_ONLY.has(name), `${name} должен быть доступен сотруднику`);
       assert.ok(handlers.has(name), `${name} должен быть зарегистрирован`);
-    }
-  });
-
-  test('штат и отчёты успеваемости остаются boss-only', () => {
-    for (const name of ['manage_employees', 'performance_report', 'manage_scheduler']) {
-      assert.ok(BOSS_ONLY.has(name), `${name} должен оставаться boss-only`);
     }
   });
 });

@@ -32,16 +32,17 @@ async function handler(args, context = {}) {
   try {
     const task = await getTask(args.task_id);
     if (!task) return { success: false, reason: 'not_found', message: `Задача #${args.task_id} не найдена.` };
+    // Иерархии нет: отчёт можно записать по любой задаче; по чужой — босс
+    // уведомляется автоматически (прозрачность вместо запрета).
     const chatDigits = String(context.chatId || '').replace(/\D/g, '');
     const phoneDigits = String(context.phone || '').replace(/\D/g, '');
     const forcedBoss = (chatDigits && config.BOSS_CONTACTS.includes(chatDigits))
       || (phoneDigits && config.BOSS_CONTACTS.includes(phoneDigits));
+    let foreignTask = false;
     if (!forcedBoss) {
       const sender = await findEmployeeByContact(context.channel, context.chatId)
         || (phoneDigits ? await findEmployeeByContact(context.channel, phoneDigits) : null);
-      if (sender && Number(task.assignee_id) !== Number(sender.id)) {
-        return { success: false, reason: 'not_owner', message: 'Эта задача закреплена не за вами.' };
-      }
+      foreignTask = !sender || Number(task.assignee_id) !== Number(sender.id);
     }
     if (args.status === 'blocked' && !String(args.blocker || '').trim()) {
       return { success: false, reason: 'blocker_required', message: 'Для блокировки укажи причину.' };
@@ -51,6 +52,14 @@ async function handler(args, context = {}) {
     const projectStatus = await recomputeProjectStatus(task.project_id);
     const text = `Отчёт по задаче #${task.id} «${task.title}»: ${args.status}.\n${String(args.comment).slice(0, 500)}`;
     notifier.notifyOwner(task.project_id, text, context.chatId).catch(() => {});
+    if (foreignTask && context.role !== 'boss') {
+      const actor = context.clientName || context.phone || context.chatId || 'сотрудник';
+      notifier.notifyBossAboutChange(
+        context,
+        `🔔 ${actor} записал отчёт по чужой задаче #${task.id} «${task.title}» (${args.status}).`,
+        { projectId: task.project_id }
+      ).catch(() => {});
+    }
     if (args.status === 'done' && task.dispatched) {
       require('../services/dispatcher').dispatchReadySuccessors(task.project_id).catch(() => {});
     }

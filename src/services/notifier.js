@@ -88,6 +88,48 @@ async function notifyOwner(projectId, text, exceptChatId) {
   }
 }
 
+// Уведомить босса, что НЕ-босс изменил общий ресурс (чужую задачу, план, реестр
+// сотрудников, общефирменные рассылки). Философия «прозрачность вместо запретов»:
+// действия не блокируются, но босс всегда в курсе. Роутинг как в message_boss
+// (без owner-ветки): findBossRoute() → BOSS_CONTACTS → MANAGER_TG/MANAGER_WA.
+// opts.projectId — владелец плана уже уведомлён notifyOwner: его chat_id скипаем,
+// чтобы не дублировать. Действия самого босса не уведомляются. Fire-and-forget:
+// на вызывающей стороне всегда .catch(() => {}) — сбой уведомления не валит инструмент.
+async function notifyBossAboutChange(context = {}, text, opts = {}) {
+  if (!text) return false;
+  if (context.role === 'boss') return false;
+  const actorDigits = new Set(
+    [context.chatId, context.phone]
+      .map((v) => String(v || '').replace(/\D/g, ''))
+      .filter(Boolean)
+  );
+  const skipContacts = new Set();
+  if (opts.projectId != null) {
+    try {
+      const project = await getProject(opts.projectId);
+      if (project && project.owner_chat_id) skipContacts.add(String(project.owner_chat_id));
+    } catch (_) { /* не смогли достать проект — просто не дедупим */ }
+  }
+
+  const routes = [];
+  try {
+    const { findBossRoute } = require('./mysql');
+    const boss = await findBossRoute();
+    if (boss) routes.push({ channel: boss.channel, contact: boss.contact });
+  } catch (_) { /* реестр недоступен — идём по env-контактам */ }
+  for (const d of config.BOSS_CONTACTS) routes.push({ channel: 'whatsapp', contact: d });
+  if (config.MANAGER_TG) routes.push({ channel: 'telegram', contact: config.MANAGER_TG });
+  if (config.MANAGER_WA) routes.push({ channel: 'whatsapp', contact: config.MANAGER_WA });
+
+  for (const r of routes) {
+    const digits = String(r.contact || '').replace(/\D/g, '');
+    if (digits && actorDigits.has(digits)) continue;          // не уведомляем актёра о нём самом
+    if (skipContacts.has(String(r.contact))) continue;        // владелец уже получил notifyOwner
+    if (await deliver(r.channel, r.contact, text)) return true;
+  }
+  return false;
+}
+
 // Ops-оповещение «живого» оператора при сбое ИИ (все LLM-провайдеры легли).
 // Шлёт в заданные MANAGER_* контакты; если ничего не задано — тихий no-op.
 async function alertManager(text) {
@@ -103,4 +145,4 @@ async function alertManager(text) {
   return sent;
 }
 
-module.exports = { deliver, notifyOwner, alertManager };
+module.exports = { deliver, notifyOwner, alertManager, notifyBossAboutChange };

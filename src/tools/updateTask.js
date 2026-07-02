@@ -18,8 +18,8 @@ const definition = {
     description:
       'Меняет статус подзадачи и/или записывает её результат. В режиме приёма отчёта от сотрудника '
       + '(когда сообщение пришло от зарегистрированного сотрудника) — фиксируй его прогресс этим '
-      + 'инструментом, сопоставив сообщение с одной из его открытых задач. Босс может форсировать '
-      + 'статус (например, reassign при блокировке).',
+      + 'инструментом, сопоставив сообщение с одной из его открытых задач. Менять можно ЛЮБУЮ задачу '
+      + '(общие планы — общее дело); при изменении чужой задачи руководитель уведомляется автоматически.',
     parameters: {
       type: 'object',
       properties: {
@@ -41,19 +41,18 @@ async function handler(args, context = {}) {
     const task = await getTask(args.task_id);
     if (!task) return { success: false, message: `Задача ${args.task_id} не найдена.` };
 
-    // Авторизация: сотрудник может менять только СВОЮ задачу. Босс (не сотрудник
-    // или номер из BOSS_CONTACTS) может форсировать статус любой задачи.
+    // Иерархии нет: менять можно любую задачу. Определяем отправителя только чтобы
+    // понять, ЧУЖУЮ ли задачу он меняет — тогда босс уведомляется автоматически.
     // phone — запасной идентификатор для LID-режима WhatsApp.
     const chatDigits = String(context.chatId || '').replace(/\D/g, '');
     const phoneDigits = String(context.phone || '').replace(/\D/g, '');
     const forcedBoss = (chatDigits && config.BOSS_CONTACTS.includes(chatDigits))
       || (phoneDigits && config.BOSS_CONTACTS.includes(phoneDigits));
+    let foreignTask = false;
     if (!forcedBoss) {
       const sender = await findEmployeeByContact(context.channel, context.chatId)
         || (phoneDigits ? await findEmployeeByContact(context.channel, phoneDigits) : null);
-      if (sender && task.assignee_id !== sender.id) {
-        return { success: false, reason: 'not_owner', message: 'Эта задача закреплена не за вами.' };
-      }
+      foreignTask = !sender || task.assignee_id !== sender.id;
     }
 
     const changed = await updateTaskStatus(args.task_id, args.status, args.result, context);
@@ -94,6 +93,16 @@ async function handler(args, context = {}) {
           + autoDispatched.map((t) => `#${t.task_id} «${t.title}» → ${t.employee}`).join('; ');
       }
       notifier.notifyOwner(task.project_id, msg, context.chatId).catch(() => {});
+      // Не-босс изменил ЧУЖУЮ задачу → прозрачность: боссу уходит уведомление
+      // (владелец плана уже уведомлён notifyOwner — projectId дедупит).
+      if (foreignTask && context.role !== 'boss') {
+        const actor = context.clientName || context.phone || context.chatId || 'сотрудник';
+        notifier.notifyBossAboutChange(
+          context,
+          `🔔 ${actor} изменил чужую задачу #${task.id} «${task.title}» → ${STATUS_RU[args.status] || args.status}.`,
+          { projectId: task.project_id }
+        ).catch(() => {});
+      }
     } catch (_) { /* уведомление некритично */ }
 
     return {

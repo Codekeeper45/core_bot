@@ -81,26 +81,38 @@ if (!config.TTS_ENABLED) {
   }
 }
 
-// Инструменты ТОЛЬКО для босса. По решению «убрать иерархию» оркестрация (планы,
-// задачи, делегирование, чтение всех планов, рассылки) доступна ВСЕМ сотрудникам —
-// поэтому здесь остаётся лишь то, что реально опасно дать каждому:
-//   - manage_employees — добавить/удалить людей из общего реестра,
-//   - performance_report — KPI/успеваемость по всем сотрудникам,
-//   - manage_scheduler — общефирменные утренняя/вечерняя рассылки.
-// Всё остальное (create_project, revise_project, assign_task, dispatch_task,
-// project_status, message_employee, update_task + личные инструменты) — доступно
-// и сотруднику. Code-level гейт: prompt-инъекция не обойдёт.
-const BOSS_ONLY = new Set([
-  'manage_employees', 'performance_report', 'manage_scheduler',
-]);
+// Иерархии инструментов НЕТ: все инструменты доступны всем (босс и сотрудники
+// равны). Вместо запретов — прозрачность: изменение общих ресурсов не-боссом
+// автоматически уведомляет босса (см. NOTIFY_BOSS_MUTATIONS ниже и адресные
+// уведомления в updateTask/assignTask/reviseProject/dispatchTask). Механизм
+// BOSS_ONLY оставлен (пустым) как точка возврата, если что-то придётся закрыть.
+const BOSS_ONLY = new Set([]);
 
-// Подмножество тул-схем для роли: сотруднику не показываем boss-only инструменты
-// (он их всё равно не вызовет — гейт ниже остаётся как defense-in-depth, но и
-// схемы в промпт не уходят → экономия токенов и меньше путаницы у модели).
-// Чистая функция: возвращает новый массив, исходный `tools` не мутирует.
+// Подмножество тул-схем для роли. Иерархии нет — все получают всё; функция
+// сохранена, чтобы не менять вызывающих (agent.js) и как точка расширения.
+// Чистая функция: возвращает новый массив/исходный `tools` без мутации.
 function toolsForRole(role) {
   if (role === 'boss') return tools;
   return tools.filter((t) => !BOSS_ONLY.has(t.function.name));
+}
+
+// Мутирующие действия «общих» инструментов, о которых босс уведомляется, когда
+// их выполняет НЕ-босс. Read-only действия (status, list, report) не шумят.
+const NOTIFY_BOSS_MUTATIONS = {
+  manage_employees: new Set(['add', 'update', 'remove']),
+  manage_scheduler: new Set(['enable', 'disable', 'set_times', 'run_morning_now', 'run_evening_now']),
+};
+
+function notifyBossIfNeeded(name, args, context, result) {
+  if (!result || result.success !== true) return;
+  if (context.role === 'boss') return;
+  const actions = NOTIFY_BOSS_MUTATIONS[name];
+  const action = args && args.action;
+  if (!actions || !actions.has(action)) return;
+  const who = context.clientName || context.phone || context.chatId || 'сотрудник';
+  const detail = result.note || result.message || '';
+  const text = `🔔 ${who} изменил общие настройки: ${name} → ${action}.${detail ? `\n${detail}` : ''}`;
+  require('../services/notifier').notifyBossAboutChange(context, text).catch(() => {});
 }
 
 // Выполнить инструмент по имени. context = { channel, chatId, phone, clientName, role }.
@@ -116,7 +128,9 @@ async function executeToolCall(name, args, context = {}) {
     console.warn(`[Tools] Отказ: '${name}' доступен только боссу, роль='${context.role}' (${context.channel}:${context.chatId})`);
     return { success: false, message: 'Доступно только руководителю (роль босса).' };
   }
-  return handler(args, context);
+  const result = await handler(args, context);
+  try { notifyBossIfNeeded(name, args, context, result); } catch (_) { /* уведомление не должно валить инструмент */ }
+  return result;
 }
 
 module.exports = { tools, executeToolCall, handlers, BOSS_ONLY, toolsForRole };

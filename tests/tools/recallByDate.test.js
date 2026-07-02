@@ -53,14 +53,16 @@ describe('recall_by_date', () => {
     assert.ok(Array.isArray(lastArgs.tokens) && lastArgs.tokens.length >= 1);
   });
 
-  test('сотруднику scope=all сужается до его чата', async () => {
+  test('сотруднику scope=all проходит с viewer (не босс)', async () => {
     await handler({ from: '2025-06-01', scope: 'all' }, { channel: 'whatsapp', chatId: 'emp1', role: 'employee' });
-    assert.equal(lastArgs.scope, 'chat');
+    assert.equal(lastArgs.scope, 'all');
+    assert.deepEqual(lastArgs.viewer, { channel: 'whatsapp', chatId: 'emp1', isBoss: false });
   });
 
-  test('боссу scope=all проходит', async () => {
+  test('боссу scope=all проходит с viewer.isBoss=true', async () => {
     await handler({ from: '2025-06-01', scope: 'all' }, { channel: 'whatsapp', chatId: 'boss', role: 'boss' });
     assert.equal(lastArgs.scope, 'all');
+    assert.equal(lastArgs.viewer.isBoss, true);
   });
 
   test('без to — конец периода = сейчас (успех)', async () => {

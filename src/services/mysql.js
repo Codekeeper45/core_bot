@@ -255,6 +255,20 @@ async function initTables() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
+  // Приватность чата для ОБЩЕГО поиска памяти (recall/recall_by_date scope=all).
+  // Нет строки = 'work' (чат виден всем при поиске по всем чатам). 'private' —
+  // чат находят только его владелец и босс. Владелец помечает свой чат сам
+  // (инструмент manage_chat_privacy) — личная граница, босс не уведомляется.
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS bot_chat_privacy (
+      channel    VARCHAR(20)  NOT NULL,
+      chat_id    VARCHAR(255) NOT NULL,
+      privacy    VARCHAR(10)  NOT NULL DEFAULT 'work',
+      updated_at TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (channel, chat_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
   // Остатки склада: одна строка = товар на конкретном складе (location). norm_key —
   // нормализованное наименование (см. utils/stockKey) для поиска/дедупа; UNIQUE
   // (location, norm_key) → upsert по нему. qty DECIMAL: допускает метры/дробное.
@@ -675,6 +689,7 @@ async function verifyCriticalSchema() {
     'SELECT movement_type FROM orch_stock_movements LIMIT 0',
     'SELECT status FROM orch_stock_reservations LIMIT 0',
     'SELECT next_run_at, fire_phase, nag_interval_min, until_at, run_count, watch_task_id, watch_goal FROM orch_schedules LIMIT 0',
+    'SELECT privacy FROM bot_chat_privacy LIMIT 0',
   ];
   for (const sql of probes) {
     try {
@@ -1860,35 +1875,73 @@ async function logBotEvent(data = {}) {
   }
 }
 
+// Фильтр приватности для scope='all': не-босс не видит ЧУЖИЕ private-чаты
+// (свой чат виден всегда). tableAlias — имя/алиас таблицы с channel/chat_id.
+// Возвращает { sql, params } для конкатенации к WHERE (или пустую строку боссу).
+function privacyExclusion(tableAlias, viewer) {
+  if (!viewer || viewer.isBoss) return { sql: '', params: [] };
+  return {
+    sql: ` AND NOT EXISTS (SELECT 1 FROM bot_chat_privacy pv
+            WHERE pv.channel = ${tableAlias}.channel AND pv.chat_id = ${tableAlias}.chat_id
+              AND pv.privacy = 'private'
+              AND NOT (${tableAlias}.channel = ? AND ${tableAlias}.chat_id = ?))`,
+    params: [String(viewer.channel || ''), String(viewer.chatId || '')],
+  };
+}
+
+async function setChatPrivacy(channel, chatId, privacy) {
+  const value = privacy === 'private' ? 'private' : 'work';
+  try {
+    await dbQuery(
+      `INSERT INTO bot_chat_privacy (channel, chat_id, privacy) VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE privacy = VALUES(privacy)`,
+      [channel, String(chatId), value]
+    );
+    return value;
+  } catch (err) { throw dbError(err, 'setChatPrivacy'); }
+}
+
+async function getChatPrivacy(channel, chatId) {
+  try {
+    const rows = await dbQuery(
+      'SELECT privacy FROM bot_chat_privacy WHERE channel = ? AND chat_id = ? LIMIT 1',
+      [channel, String(chatId)]
+    );
+    return rows.length ? rows[0].privacy : 'work';
+  } catch (err) { throw dbError(err, 'getChatPrivacy'); }
+}
+
 // Поиск по архиву переписки (и опционально по действиям/фактам). Токены AND по LIKE.
-// scope: 'chat' (только этот чат) | 'all' (по всем чатам — для босса-«базы знаний»).
-async function recallSearch({ channel, chatId, query, scope = 'chat', kind = 'messages', limit = 20 } = {}) {
+// scope: 'chat' (только этот чат) | 'all' (по всем чатам). viewer = {channel, chatId,
+// isBoss} — при scope=all не-боссу скрываются чужие private-чаты.
+async function recallSearch({ channel, chatId, query, scope = 'chat', kind = 'messages', limit = 20, viewer = null } = {}) {
   const { normKey } = require('../utils/stockKey');
   const cap = Math.max(1, Math.min(Number(limit) || 20, 50));
   const tokens = String(query || '').trim() ? normKey(query).split(' ').filter(Boolean).slice(0, 8) : [];
   const out = {};
-  const chatFilter = scope === 'all' ? '' : ' AND channel = ? AND chat_id = ?';
+  const chatFilter = scope === 'all' ? '' : ' AND a.channel = ? AND a.chat_id = ?';
   const chatParams = scope === 'all' ? [] : [channel, chatId];
+  const privacy = scope === 'all' ? privacyExclusion('a', viewer) : { sql: '', params: [] };
   try {
     if (kind === 'messages' || kind === 'all') {
       const where = ['1=1'];
       const params = [];
-      for (const t of tokens) { where.push('content LIKE ?'); params.push(`%${t}%`); }
-      const sql = `SELECT id, channel, chat_id, role, actor_name, content, created_at
-                     FROM bot_message_archive
-                    WHERE ${where.join(' AND ')}${chatFilter}
-                    ORDER BY id DESC LIMIT ?`;
-      out.messages = await dbQuery(sql, [...params, ...chatParams, cap]);
+      for (const t of tokens) { where.push('a.content LIKE ?'); params.push(`%${t}%`); }
+      const sql = `SELECT a.id, a.channel, a.chat_id, a.role, a.actor_name, a.content, a.created_at
+                     FROM bot_message_archive a
+                    WHERE ${where.join(' AND ')}${chatFilter}${privacy.sql}
+                    ORDER BY a.id DESC LIMIT ?`;
+      out.messages = await dbQuery(sql, [...params, ...chatParams, ...privacy.params, cap]);
     }
     if (kind === 'events' || kind === 'all') {
       const where = ['1=1'];
       const params = [];
-      for (const t of tokens) { where.push('(tool LIKE ? OR summary LIKE ?)'); params.push(`%${t}%`, `%${t}%`); }
-      const sql = `SELECT id, channel, chat_id, actor_name, actor_role, tool, action, success, summary, created_at
-                     FROM bot_events
-                    WHERE ${where.join(' AND ')}${chatFilter}
-                    ORDER BY id DESC LIMIT ?`;
-      out.events = await dbQuery(sql, [...params, ...chatParams, cap]);
+      for (const t of tokens) { where.push('(a.tool LIKE ? OR a.summary LIKE ?)'); params.push(`%${t}%`, `%${t}%`); }
+      const sql = `SELECT a.id, a.channel, a.chat_id, a.actor_name, a.actor_role, a.tool, a.action, a.success, a.summary, a.created_at
+                     FROM bot_events a
+                    WHERE ${where.join(' AND ')}${chatFilter}${privacy.sql}
+                    ORDER BY a.id DESC LIMIT ?`;
+      out.events = await dbQuery(sql, [...params, ...chatParams, ...privacy.params, cap]);
     }
     return out;
   } catch (err) {
@@ -1898,19 +1951,22 @@ async function recallSearch({ channel, chatId, query, scope = 'chat', kind = 'me
 
 // Точная выборка архива по диапазону дат (UTC-границы). tokens — опц. сужение по
 // ключевым словам внутри периода. Хронологический порядок (ASC) — для отчёта.
-async function archiveByDateRange({ channel, chatId, scope = 'chat', fromUtc, toUtc, tokens = [], limit = 100 } = {}) {
+// viewer — см. recallSearch: при scope=all не-боссу скрываются чужие private-чаты.
+async function archiveByDateRange({ channel, chatId, scope = 'chat', fromUtc, toUtc, tokens = [], limit = 100, viewer = null } = {}) {
   const fmt = (d) => (d instanceof Date ? d.toISOString().slice(0, 19).replace('T', ' ') : d);
-  const where = ['created_at >= ?', 'created_at <= ?'];
+  const where = ['a.created_at >= ?', 'a.created_at <= ?'];
   const params = [fmt(fromUtc), fmt(toUtc)];
-  if (scope !== 'all') { where.push('channel = ?', 'chat_id = ?'); params.push(channel, chatId); }
-  for (const t of (tokens || [])) { where.push('content LIKE ?'); params.push(`%${t}%`); }
+  if (scope !== 'all') { where.push('a.channel = ?', 'a.chat_id = ?'); params.push(channel, chatId); }
+  for (const t of (tokens || [])) { where.push('a.content LIKE ?'); params.push(`%${t}%`); }
+  const privacy = scope === 'all' ? privacyExclusion('a', viewer) : { sql: '', params: [] };
+  params.push(...privacy.params);
   params.push(Math.max(1, Math.min(Number(limit) || 100, 500)));
   try {
     return await dbQuery(
-      `SELECT id, channel, chat_id, role, actor_name, content, created_at
-         FROM bot_message_archive
-        WHERE ${where.join(' AND ')}
-        ORDER BY created_at ASC, id ASC LIMIT ?`,
+      `SELECT a.id, a.channel, a.chat_id, a.role, a.actor_name, a.content, a.created_at
+         FROM bot_message_archive a
+        WHERE ${where.join(' AND ')}${privacy.sql}
+        ORDER BY a.created_at ASC, a.id ASC LIMIT ?`,
       params
     );
   } catch (err) { throw dbError(err, 'archiveByDateRange'); }
@@ -1965,19 +2021,22 @@ async function insertArchiveChunk(row) {
   } catch (err) { throw dbError(err, 'insertArchiveChunk'); }
 }
 
-// Загрузить чанки-кандидаты для поиска (с эмбеддингами). scope='all' — по всем чатам.
-async function loadChunkVectors({ channel, chatId, scope = 'chat', model, dims, limit = 5000 } = {}) {
-  const where = ['model = ?', 'dims = ?'];
+// Загрузить чанки-кандидаты для поиска (с эмбеддингами). scope='all' — по всем чатам;
+// viewer — см. recallSearch: не-боссу скрываются чужие private-чаты.
+async function loadChunkVectors({ channel, chatId, scope = 'chat', model, dims, limit = 5000, viewer = null } = {}) {
+  const where = ['a.model = ?', 'a.dims = ?'];
   const params = [model, dims];
-  if (scope !== 'all') { where.push('channel = ?', 'chat_id = ?'); params.push(channel, chatId); }
+  if (scope !== 'all') { where.push('a.channel = ?', 'a.chat_id = ?'); params.push(channel, chatId); }
+  const privacy = scope === 'all' ? privacyExclusion('a', viewer) : { sql: '', params: [] };
+  params.push(...privacy.params);
   params.push(Math.max(1, Math.min(Number(limit) || 5000, 20000)));
   try {
     return await dbQuery(
-      `SELECT id, channel, chat_id, start_archive_id, end_archive_id, msg_count,
-              first_at, last_at, authors, content, embedding
-         FROM bot_archive_chunks
-        WHERE ${where.join(' AND ')}
-        ORDER BY end_archive_id DESC LIMIT ?`,
+      `SELECT a.id, a.channel, a.chat_id, a.start_archive_id, a.end_archive_id, a.msg_count,
+              a.first_at, a.last_at, a.authors, a.content, a.embedding
+         FROM bot_archive_chunks a
+        WHERE ${where.join(' AND ')}${privacy.sql}
+        ORDER BY a.end_archive_id DESC LIMIT ?`,
       params
     );
   } catch (err) { throw dbError(err, 'loadChunkVectors'); }
@@ -2598,12 +2657,15 @@ async function stockListMovements(stockId, limit = 50) {
   );
 }
 
-async function stockLinkCatalog(stockId, sku) {
-  const item = await priceGetBySku(sku);
-  if (!item) return { ok: false, reason: 'sku_not_found' };
+async function stockLinkCatalog(stockId, sku, supplier = null) {
+  const rows = await priceGetBySku(sku, supplier);
+  if (!rows.length) return { ok: false, reason: 'sku_not_found' };
+  // Артикул есть в обоих каталогах → нужен supplier, молча не выбираем.
+  if (rows.length > 1) return { ok: false, reason: 'ambiguous_supplier', suppliers: rows.map((r) => r.supplier) };
+  const item = rows[0];
   const res = await dbQuery('UPDATE orch_stock SET catalog_item_id = ? WHERE id = ?', [item.id, Number(stockId)]);
   if (!(res.affectedRows || 0)) return { ok: false, reason: 'stock_not_found' };
-  return { ok: true, stock_id: Number(stockId), catalog_item_id: item.id, sku: item.sku };
+  return { ok: true, stock_id: Number(stockId), catalog_item_id: item.id, sku: item.sku, supplier: item.supplier };
 }
 
 async function stockRemove(id) {
@@ -2647,6 +2709,7 @@ module.exports = {
   addFact, listFacts, deleteFact,
   addPersonalItem, listPersonalItems, setPersonalItemDone, deletePersonalItem,
   setQuiet, clearQuiet, getQuiet, listActiveQuiet,
+  setChatPrivacy, getChatPrivacy,
   // Оркестратор: задачи
   createTasksBulk, getTask, listTasksForProject, assignTask, markDispatched, updateTaskStatus,
   updateTaskFields,

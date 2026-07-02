@@ -20,14 +20,15 @@ const definition = {
       + 'посчитай от сегодняшней даты (она в системном штампе) и задай границы. to можно не указывать '
       + '(тогда до настоящего момента). query — опционально, чтобы сузить по словам внутри периода. '
       + 'Возвращает сообщения по возрастанию времени с точными датами — выстраивай по ним хронологию, '
-      + 'даты бери строго из ответа. scope=all (по всем чатам) — только босс.',
+      + 'даты бери строго из ответа. scope=all — по всем чатам (доступно каждому; чужие ПРИВАТНЫЕ '
+      + 'чаты исключаются, их видят только владелец и босс).',
     parameters: {
       type: 'object',
       properties: {
         from: { type: 'string', description: 'Начало периода: «ГГГГ-ММ-ДД» или «ГГГГ-ММ-ДД ЧЧ:ММ» (время компании).' },
         to: { type: 'string', description: 'Конец периода (вкл.). Если опущен — до настоящего момента.' },
         query: { type: 'string', description: 'Необязательно: ключевые слова для сужения внутри периода.' },
-        scope: { type: 'string', enum: ['chat', 'all'], description: 'chat — этот чат (умолч.); all — по всем чатам (только босс).' },
+        scope: { type: 'string', enum: ['chat', 'all'], description: 'chat — этот чат (умолч.); all — по всем чатам (чужие private-чаты не ищутся).' },
         limit: { type: 'integer', description: 'Сколько сообщений вернуть (1–500, по умолч. 100).' },
       },
       required: ['from'],
@@ -42,11 +43,13 @@ async function handler(args, context = {}) {
   if (!toUtc) return { success: false, reason: 'bad_to', message: 'Не понял дату конца. Формат: ГГГГ-ММ-ДД или ГГГГ-ММ-ДД ЧЧ:ММ.' };
   if (fromUtc.getTime() > toUtc.getTime()) return { success: false, reason: 'bad_range', message: 'Начало периода позже конца — поменяй from и to местами.' };
 
-  const scope = (args.scope === 'all' && context.role === 'boss') ? 'all' : 'chat';
+  // scope=all открыт всем: чужие private-чаты отсекает фильтр приватности (viewer).
+  const scope = args.scope === 'all' ? 'all' : 'chat';
+  const viewer = { channel: context.channel, chatId: context.chatId, isBoss: context.role === 'boss' };
   const tokens = String(args.query || '').trim() ? normKey(args.query).split(' ').filter(Boolean).slice(0, 8) : [];
   const limit = Math.max(1, Math.min(Number(args.limit) || 100, 500));
   try {
-    const rows = await archiveByDateRange({ channel: context.channel, chatId: context.chatId, scope, fromUtc, toUtc, tokens, limit });
+    const rows = await archiveByDateRange({ channel: context.channel, chatId: context.chatId, scope, fromUtc, toUtc, tokens, limit, viewer });
     const messages = rows.map((m) => ({
       when: localStamp(m.created_at),
       who: m.role === 'user' ? (m.actor_name || 'Пользователь') : 'Бот',

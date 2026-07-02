@@ -45,6 +45,13 @@ describe('semanticRecall', () => {
     assert.equal(r.results[1].authors, 'Босс, Бот');
   });
 
+  test('viewer пробрасывается в loadChunkVectors (фильтр приватности)', async () => {
+    const viewer = { channel: 'whatsapp', chatId: 'emp1', isBoss: false };
+    await semanticRecall({ channel: 'whatsapp', chatId: 'emp1', query: 'x', scope: 'all', viewer });
+    assert.equal(loadArgs.scope, 'all');
+    assert.deepEqual(loadArgs.viewer, viewer);
+  });
+
   test('пустой запрос → ok:false без обращения к БД', async () => {
     const r = await semanticRecall({ channel: 'whatsapp', chatId: 'boss', query: '  ' });
     assert.equal(r.ok, false);

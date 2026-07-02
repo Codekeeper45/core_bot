@@ -12,8 +12,8 @@ const definition = {
     description:
       'Пересмотреть/адаптировать план по фидбэку: обновить текст плана, добавить новые подзадачи, '
       + 'ИЗМЕНИТЬ существующие (название/описание/ожидаемое/срок/приоритет), переназначить или '
-      + 'ОТМЕНИТЬ задачи. Используй, когда босс правит план ИЛИ когда сотрудник сообщил об изменении '
-      + '(клиент передумал, нет товара, поменялось количество) и босс подтвердил адаптацию. '
+      + 'ОТМЕНИТЬ задачи. Общие планы правит ЛЮБОЙ (клиент передумал, нет товара, поменялось '
+      + 'количество) — когда чужой план меняет не-босс, руководитель уведомляется автоматически. '
       + 'Не спорь — адаптируй план под реальность.',
     parameters: {
       type: 'object',
@@ -143,6 +143,26 @@ async function handler(args, context) {
     // Если правили/отменяли задачи — пересчитать статус плана.
     if (result.edited.length || result.cancelled.length || result.reassigned.length || result.added.length) {
       result.project_status = await recomputeProjectStatus(args.project_id);
+    }
+
+    // Не-босс ревизовал ЧУЖОЙ план и что-то реально поменял → одно сводное
+    // уведомление боссу за весь вызов (не по каждой подзадаче).
+    const changedAnything = result.plan_updated || result.added.length
+      || result.reassigned.length || result.edited.length || result.cancelled.length;
+    const foreignProject = String(project.owner_chat_id || '') !== String((context && context.chatId) || '');
+    if (changedAnything && foreignProject && (!context || context.role !== 'boss')) {
+      const actor = (context && (context.clientName || context.phone || context.chatId)) || 'сотрудник';
+      const parts = [];
+      if (result.plan_updated) parts.push('обновлён текст плана');
+      if (result.added.length) parts.push(`добавлено задач: ${result.added.length}`);
+      if (result.reassigned.length) parts.push(`переназначено: ${result.reassigned.length}`);
+      if (result.edited.length) parts.push(`изменено: ${result.edited.length}`);
+      if (result.cancelled.length) parts.push(`отменено: ${result.cancelled.length}`);
+      require('../services/notifier').notifyBossAboutChange(
+        context || {},
+        `🔔 ${actor} пересмотрел план «${project.title}» (#${args.project_id}): ${parts.join(', ')}.\nПричина: ${String(args.note || '').slice(0, 300)}`,
+        { projectId: args.project_id }
+      ).catch(() => {});
     }
 
     return result;
