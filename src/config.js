@@ -113,6 +113,11 @@ module.exports = {
   DAILY_IMAGE_LIMIT: 10,
   DAILY_DOC_LIMIT: 10,
   DOCUMENT_CHAR_LIMIT: 20000,
+  // Стэш распарсенных документов (docStash): последние N файлов на чат, TTL —
+  // сколько текст живёт в памяти, чтобы manage_files action=save мог сохранить
+  // файл в базу знаний без повторной пересылки текста через LLM.
+  DOC_STASH_MAX: parseInt(process.env.DOC_STASH_MAX || '5', 10),
+  DOC_STASH_TTL_MS: parseInt(process.env.DOC_STASH_TTL_MS || String(6 * 3600 * 1000), 10),
   // Сколько последних сообщений держим в активной истории (bot_chat_history).
   // ВСЯ переписка дополнительно архивируется в bot_message_archive (не режется),
   // и бот ищет по ней инструментом recall — так «помнит всё», а не только окно.

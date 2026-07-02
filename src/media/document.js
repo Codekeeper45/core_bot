@@ -109,6 +109,12 @@ async function processDocument(normalized) {
     return { error: FALLBACK_MESSAGES.doc_char_limit };
   }
 
+  // Кладём текст в стэш: инструмент manage_files (база знаний) сможет сохранить
+  // этот файл в векторное хранилище, не гоняя текст через аргументы LLM.
+  try {
+    require('../services/docStash').put(channel, chat_id, { fileName: document_file_name, text: parsedText });
+  } catch (err) { console.error('[Doc] docStash:', err.message); }
+
   const caption = message || '';
   const result = `[ИЗ ДОКУМЕНТА: ${document_file_name}]\n\ncaption: ${caption || 'нет'}\n\n${parsedText}`;
   return { text: result };

@@ -255,6 +255,41 @@ async function initTables() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
+  // База знаний по файлам: bot_files — метаданные (владелец = чат, который
+  // прислал; visibility: public — ищут все, private — владелец + босс),
+  // bot_file_chunks — нарезанный текст с эмбеддингами (embedding NULL, если
+  // эмбеддинги были выключены при сохранении — тогда чанк ищется только LIKE'ом).
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS bot_files (
+      id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+      channel     VARCHAR(20)  NOT NULL,
+      chat_id     VARCHAR(255) NOT NULL,
+      owner_name  VARCHAR(120) NULL,
+      file_name   VARCHAR(255) NOT NULL,
+      visibility  VARCHAR(10)  NOT NULL DEFAULT 'public',
+      description TEXT         NULL,
+      chunk_count INT          NOT NULL DEFAULT 0,
+      char_count  INT          NOT NULL DEFAULT 0,
+      created_at  TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_file_owner_name (channel, chat_id, file_name),
+      INDEX idx_files_visibility (visibility)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS bot_file_chunks (
+      id         BIGINT AUTO_INCREMENT PRIMARY KEY,
+      file_id    BIGINT      NOT NULL,
+      seq        INT         NOT NULL,
+      content    MEDIUMTEXT  NOT NULL,
+      embedding  LONGBLOB    NULL,
+      dims       INT         NULL,
+      model      VARCHAR(64) NULL,
+      created_at TIMESTAMP   DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_file_seq (file_id, seq),
+      INDEX idx_file_chunks_model (model, dims)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
   // Приватность чата для ОБЩЕГО поиска памяти (recall/recall_by_date scope=all).
   // Нет строки = 'work' (чат виден всем при поиске по всем чатам). 'private' —
   // чат находят только его владелец и босс. Владелец помечает свой чат сам
@@ -690,6 +725,8 @@ async function verifyCriticalSchema() {
     'SELECT status FROM orch_stock_reservations LIMIT 0',
     'SELECT next_run_at, fire_phase, nag_interval_min, until_at, run_count, watch_task_id, watch_goal FROM orch_schedules LIMIT 0',
     'SELECT privacy FROM bot_chat_privacy LIMIT 0',
+    'SELECT visibility, chunk_count FROM bot_files LIMIT 0',
+    'SELECT embedding, dims FROM bot_file_chunks LIMIT 0',
   ];
   for (const sql of probes) {
     try {
@@ -2042,6 +2079,164 @@ async function loadChunkVectors({ channel, chatId, scope = 'chat', model, dims, 
   } catch (err) { throw dbError(err, 'loadChunkVectors'); }
 }
 
+// ── База знаний по файлам (bot_files / bot_file_chunks) ─────────────────────
+// Видимость: public — ищут/видят все; private — владелец (channel+chat_id) и босс.
+// Фильтр для SELECT'ов; f — алиас bot_files. Боссу фильтр не нужен.
+function fileVisibilityFilter(viewer) {
+  if (!viewer || viewer.isBoss) return { sql: '', params: [] };
+  return {
+    sql: " AND (f.visibility = 'public' OR (f.channel = ? AND f.chat_id = ?))",
+    params: [String(viewer.channel || ''), String(viewer.chatId || '')],
+  };
+}
+
+// Сохранить файл целиком (метаданные + чанки) в одной транзакции. Тот же
+// владелец + то же имя = полная замена (старые чанки удаляются).
+async function replaceFile({ channel, chatId, ownerName, fileName, visibility = 'public', description = null, charCount = 0, chunks = [] } = {}) {
+  try {
+    return await withTransaction(async (q) => {
+      const existing = await q(
+        'SELECT id FROM bot_files WHERE channel = ? AND chat_id = ? AND file_name = ? LIMIT 1',
+        [channel, String(chatId), fileName]
+      );
+      let fileId;
+      let replaced = false;
+      if (existing.length) {
+        fileId = existing[0].id;
+        replaced = true;
+        await q('DELETE FROM bot_file_chunks WHERE file_id = ?', [fileId]);
+        await q(
+          'UPDATE bot_files SET owner_name = ?, visibility = ?, description = ?, chunk_count = ?, char_count = ? WHERE id = ?',
+          [ownerName || null, visibility, description, chunks.length, charCount, fileId]
+        );
+      } else {
+        const res = await q(
+          `INSERT INTO bot_files (channel, chat_id, owner_name, file_name, visibility, description, chunk_count, char_count)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [channel, String(chatId), ownerName || null, fileName, visibility, description, chunks.length, charCount]
+        );
+        fileId = res.insertId;
+      }
+      for (const c of chunks) {
+        await q(
+          'INSERT INTO bot_file_chunks (file_id, seq, content, embedding, dims, model) VALUES (?, ?, ?, ?, ?, ?)',
+          [fileId, c.seq, c.content, c.embedding || null, c.dims || null, c.model || null]
+        );
+      }
+      return { id: fileId, replaced };
+    });
+  } catch (err) { throw dbError(err, 'replaceFile'); }
+}
+
+async function listFiles({ viewer } = {}) {
+  const vis = fileVisibilityFilter(viewer);
+  try {
+    return await dbQuery(
+      `SELECT f.id, f.channel, f.chat_id, f.owner_name, f.file_name, f.visibility,
+              f.description, f.chunk_count, f.char_count, f.created_at
+         FROM bot_files f
+        WHERE 1=1${vis.sql}
+        ORDER BY f.created_at DESC, f.id DESC LIMIT 100`,
+      vis.params
+    );
+  } catch (err) { throw dbError(err, 'listFiles'); }
+}
+
+// Найти файл по id или имени. По имени предпочитаем СВОЙ файл (у разных
+// владельцев могут быть одноимённые), затем любой видимый.
+async function findFile({ id = null, fileName = null, viewer } = {}) {
+  const vis = fileVisibilityFilter(viewer);
+  try {
+    if (id != null) {
+      const rows = await dbQuery(
+        `SELECT f.* FROM bot_files f WHERE f.id = ?${vis.sql} LIMIT 1`,
+        [Number(id), ...vis.params]
+      );
+      return rows[0] || null;
+    }
+    if (fileName) {
+      const rows = await dbQuery(
+        `SELECT f.* FROM bot_files f
+          WHERE f.file_name = ?${vis.sql}
+          ORDER BY (f.channel = ? AND f.chat_id = ?) DESC, f.id DESC LIMIT 1`,
+        [String(fileName), ...vis.params, String((viewer && viewer.channel) || ''), String((viewer && viewer.chatId) || '')]
+      );
+      return rows[0] || null;
+    }
+    return null;
+  } catch (err) { throw dbError(err, 'findFile'); }
+}
+
+async function deleteFile(id) {
+  try {
+    return await withTransaction(async (q) => {
+      await q('DELETE FROM bot_file_chunks WHERE file_id = ?', [Number(id)]);
+      const res = await q('DELETE FROM bot_files WHERE id = ?', [Number(id)]);
+      return (res.affectedRows || 0) > 0;
+    });
+  } catch (err) { throw dbError(err, 'deleteFile'); }
+}
+
+async function setFileVisibility(id, visibility) {
+  const value = visibility === 'private' ? 'private' : 'public';
+  try {
+    const res = await dbQuery('UPDATE bot_files SET visibility = ? WHERE id = ?', [value, Number(id)]);
+    return (res.affectedRows || 0) > 0 ? value : null;
+  } catch (err) { throw dbError(err, 'setFileVisibility'); }
+}
+
+async function renameFile(id, newName) {
+  try {
+    const res = await dbQuery('UPDATE bot_files SET file_name = ? WHERE id = ?', [String(newName), Number(id)]);
+    return (res.affectedRows || 0) > 0;
+  } catch (err) { throw dbError(err, 'renameFile'); }
+}
+
+// Чанки-кандидаты для семантического поиска (только с эмбеддингами нужной модели).
+async function loadFileChunkVectors({ viewer, model, dims, fileName = null, limit = 5000 } = {}) {
+  const vis = fileVisibilityFilter(viewer);
+  const where = ['c.embedding IS NOT NULL', 'c.model = ?', 'c.dims = ?'];
+  const params = [model, dims];
+  let extra = vis.sql;
+  params.push(...vis.params);
+  if (fileName) { extra += ' AND f.file_name = ?'; params.push(String(fileName)); }
+  params.push(Math.max(1, Math.min(Number(limit) || 5000, 20000)));
+  try {
+    return await dbQuery(
+      `SELECT c.id, c.file_id, c.seq, c.content, c.embedding,
+              f.file_name, f.owner_name, f.visibility
+         FROM bot_file_chunks c JOIN bot_files f ON f.id = c.file_id
+        WHERE ${where.join(' AND ')}${extra}
+        ORDER BY c.id DESC LIMIT ?`,
+      params
+    );
+  } catch (err) { throw dbError(err, 'loadFileChunkVectors'); }
+}
+
+// Дословный поиск по содержимому чанков (fallback + чанки без эмбеддингов).
+async function fileKeywordSearch({ viewer, query, fileName = null, limit = 6 } = {}) {
+  const { normKey } = require('../utils/stockKey');
+  const vis = fileVisibilityFilter(viewer);
+  const tokens = String(query || '').trim() ? normKey(query).split(' ').filter(Boolean).slice(0, 8) : [];
+  const where = ['1=1'];
+  const params = [];
+  for (const t of tokens) { where.push('c.content LIKE ?'); params.push(`%${t}%`); }
+  let extra = vis.sql;
+  params.push(...vis.params);
+  if (fileName) { extra += ' AND f.file_name = ?'; params.push(String(fileName)); }
+  params.push(Math.max(1, Math.min(Number(limit) || 6, 15)));
+  try {
+    return await dbQuery(
+      `SELECT c.id, c.file_id, c.seq, c.content,
+              f.file_name, f.owner_name, f.visibility
+         FROM bot_file_chunks c JOIN bot_files f ON f.id = c.file_id
+        WHERE ${where.join(' AND ')}${extra}
+        ORDER BY c.file_id DESC, c.seq ASC LIMIT ?`,
+      params
+    );
+  } catch (err) { throw dbError(err, 'fileKeywordSearch'); }
+}
+
 // ─── Daily counts (images / documents) ───────────────────────────────────────
 async function checkDailyCount(channel, chatId, type, limit) {
   try {
@@ -2710,6 +2905,9 @@ module.exports = {
   addPersonalItem, listPersonalItems, setPersonalItemDone, deletePersonalItem,
   setQuiet, clearQuiet, getQuiet, listActiveQuiet,
   setChatPrivacy, getChatPrivacy,
+  // База знаний по файлам
+  replaceFile, listFiles, findFile, deleteFile, setFileVisibility, renameFile,
+  loadFileChunkVectors, fileKeywordSearch,
   // Оркестратор: задачи
   createTasksBulk, getTask, listTasksForProject, assignTask, markDispatched, updateTaskStatus,
   updateTaskFields,
