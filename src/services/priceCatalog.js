@@ -5,8 +5,23 @@ const crypto = require('crypto');
 const XLSX = require('xlsx');
 const { normKey } = require('../utils/stockKey');
 
-const AQUASTOK_SHEET = 'Norma с ТТ';
-const AQUASTOK_PRICE_DATE = '2026-01-01';
+// Два поставщика живут в БД одновременно: у каждого свой лист, свой формат
+// колонок и свой префикс синтетических артикулов. active-флаг снимка скоупится
+// по supplier (см. mysql.importPriceCatalog).
+const SUPPLIERS = {
+  aquastok: {
+    sheet: 'Norma с ТТ',
+    price_date: '2026-01-01',
+    synthetic_prefix: 'AQ',
+    parseRows: parseAquastokRows,
+  },
+  gidrolica: {
+    sheet: 'Пластик ТДЕ',
+    price_date: '2025-07-01',
+    synthetic_prefix: 'GD',
+    parseRows: parseGidrolicaRows,
+  },
+};
 
 function numeric(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -45,24 +60,17 @@ function col(map, name) {
   return idx;
 }
 
-function syntheticSku(rawSku, rowNumber) {
+function syntheticSku(rawSku, rowNumber, prefix) {
   const sku = clean(rawSku);
   // Пустой артикул — позиция без артикула; синтетический ключ для уникальности,
   // наружу артикул показывается как «нет» (source_sku остаётся null).
-  if (!sku) return `AQ-NOART-R${String(rowNumber).padStart(3, '0')}`;
+  if (!sku) return `${prefix}-NOART-R${String(rowNumber).padStart(3, '0')}`;
   if (sku.toLowerCase() !== 'новинка') return sku;
-  return `AQ-NOVINKA-R${String(rowNumber).padStart(3, '0')}`;
+  return `${prefix}-NOVINKA-R${String(rowNumber).padStart(3, '0')}`;
 }
 
-function parsePriceWorkbook(filePath) {
-  const buffer = fs.readFileSync(filePath);
-  const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: false });
-  const sheet = workbook.SheetNames.includes(AQUASTOK_SHEET) ? AQUASTOK_SHEET : workbook.SheetNames[0];
-  if (!sheet) throw new Error('price_workbook_has_no_sheets');
-  const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheet], { header: 1, defval: '', raw: true });
-  if (sheet !== AQUASTOK_SHEET) throw new Error(`price_workbook_missing_sheet:${AQUASTOK_SHEET}`);
-  if (!rows.length) throw new Error('price_workbook_has_no_rows');
-
+function parseAquastokRows(rows) {
+  const prefix = SUPPLIERS.aquastok.synthetic_prefix;
   const headers = headerMap(rows[0] || []);
   const indexes = {
     sku: col(headers, 'Артикул'),
@@ -89,7 +97,7 @@ function parsePriceWorkbook(filePath) {
       currentSection = rawSku;
       continue;
     }
-    const sku = syntheticSku(rawSku, rowNumber);
+    const sku = syntheticSku(rawSku, rowNumber, prefix);
     const price = numeric(row[indexes.retailPrice]);
     const discountPrice = numeric(row[indexes.discountPrice]);
     // Импортируем и позиции без артикула (sku синтетический), важно лишь наличие
@@ -115,21 +123,106 @@ function parsePriceWorkbook(filePath) {
     item.norm_key = normKey([item.sku, item.source_sku, item.series, item.load_class, item.name, item.dn, item.pallet_qty].filter(Boolean).join(' '));
     items.push(item);
   }
+  return items;
+}
+
+// Прайс Gidrolica: заголовок — строка с «№ по каталогу» в колонке 1 (строка 0 —
+// объединённый титул). Колонки фиксированы относительно якоря: 0=серия, 1=артикул,
+// 2=класс нагрузки, 3=наименование, 4=DN (или «шт.»), 5-8 габариты/вес, 9=розница.
+// Секции (строки без артикула с текстом в кол.0) дают контекст: DN для
+// принадлежностей и типы («пескоуловители», «дождеприемники») в norm_key.
+function parseGidrolicaRows(rows) {
+  const prefix = SUPPLIERS.gidrolica.synthetic_prefix;
+  let headerIdx = -1;
+  for (let i = 0; i < rows.length; i++) {
+    if (normalizeHeader((rows[i] || [])[1]) === normalizeHeader('№ по каталогу')) { headerIdx = i; break; }
+  }
+  if (headerIdx < 0) throw new Error('price_workbook_missing_column:№ по каталогу');
+
+  const items = [];
+  let currentSection = null;
+  for (let i = headerIdx + 1; i < rows.length; i++) {
+    const row = rows[i] || [];
+    const rowNumber = i + 1;
+    const rawSku = clean(row[1]);
+    const name = clean(row[3]);
+    if (!rawSku && clean(row[0])) {
+      currentSection = clean(row[0]);
+      continue;
+    }
+    const price = numeric(row[9]);
+    // Позиция = наименование + положительная розница (строка 15 «…| 0» отсеивается).
+    if (!name || price == null || price <= 0) continue;
+    const sku = syntheticSku(rawSku, rowNumber, prefix);
+    const rawDn = clean(row[4]);
+    let dn = null;
+    if (/^dn/i.test(rawDn)) dn = rawDn.replace(/\s+/g, '');
+    else if (currentSection) dn = (currentSection.match(/DN\d+(?:\/\d+)?/i) || [null])[0];
+    const loadClass = clean(row[2]);
+    const item = {
+      row_number: rowNumber,
+      series: clean(row[0]) || null,
+      sku,
+      source_sku: null,
+      load_class: loadClass && loadClass !== '-' ? loadClass : null,
+      name,
+      dn,
+      length_mm: numeric(row[5]),
+      width_mm: numeric(row[6]),
+      height_mm: numeric(row[7]),
+      weight_kg: numeric(row[8]),
+      pallet_qty: null,
+      retail_price: price,
+      discount_price: null,
+      currency: 'KZT',
+    };
+    item.norm_key = normKey([item.sku, item.series, currentSection, item.load_class, item.name, item.dn].filter(Boolean).join(' '));
+    items.push(item);
+  }
+  return items;
+}
+
+function detectSupplier(workbook) {
+  for (const [id, cfg] of Object.entries(SUPPLIERS)) {
+    if (workbook.SheetNames.includes(cfg.sheet)) return id;
+  }
+  return null;
+}
+
+function parsePriceWorkbook(filePath, supplier = 'aquastok') {
+  const cfg = SUPPLIERS[supplier];
+  if (!cfg) throw new Error(`price_workbook_unknown_supplier:${supplier}`);
+  const buffer = fs.readFileSync(filePath);
+  const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: false });
+  if (!workbook.SheetNames.length) throw new Error('price_workbook_has_no_sheets');
+  if (!workbook.SheetNames.includes(cfg.sheet)) throw new Error(`price_workbook_missing_sheet:${cfg.sheet}`);
+  const rows = XLSX.utils.sheet_to_json(workbook.Sheets[cfg.sheet], { header: 1, defval: '', raw: true });
+  if (!rows.length) throw new Error('price_workbook_has_no_rows');
+
+  const items = cfg.parseRows(rows);
   const unique = new Set(items.map((x) => x.sku));
   if (unique.size !== items.length) throw new Error('price_workbook_has_duplicate_sku');
   return {
+    supplier,
     source_file: filePath.split(/[\\/]/).pop(),
     source_hash: crypto.createHash('sha256').update(buffer).digest('hex'),
-    sheet,
-    price_date: AQUASTOK_PRICE_DATE,
+    sheet: cfg.sheet,
+    price_date: cfg.price_date,
     items,
   };
 }
 
 async function importPriceWorkbook(filePath, opts = {}) {
-  const parsed = parsePriceWorkbook(filePath);
+  let supplier = opts.supplier || null;
+  if (!supplier) {
+    const buffer = fs.readFileSync(filePath);
+    const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: false, bookSheets: true });
+    supplier = detectSupplier(workbook);
+  }
+  if (!supplier) throw new Error('price_workbook_unknown_supplier');
+  const parsed = parsePriceWorkbook(filePath, supplier);
   const mysql = require('./mysql');
   return mysql.importPriceCatalog(parsed, opts);
 }
 
-module.exports = { numeric, parsePriceWorkbook, importPriceWorkbook };
+module.exports = { numeric, parsePriceWorkbook, importPriceWorkbook, detectSupplier, SUPPLIERS };

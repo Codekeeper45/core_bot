@@ -11,6 +11,7 @@ test('парсер прайса Аквасток извлекает Norma с Т�
   const file = fs.readdirSync(root).find((name) => /аквасток.*январь.*2026.*продажн.*\.xlsx$/iu.test(name.normalize('NFC')));
   assert.ok(file, 'прайс XLSX должен находиться в корне репозитория');
   const parsed = parsePriceWorkbook(path.join(root, file));
+  assert.equal(parsed.supplier, 'aquastok');
   assert.equal(parsed.items.length, 89);
   assert.equal(new Set(parsed.items.map((x) => x.sku)).size, 89);
   assert.equal(parsed.sheet, 'Norma с ТТ');

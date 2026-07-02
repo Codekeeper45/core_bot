@@ -317,11 +317,13 @@ async function initTables() {
       WHERE NOT EXISTS (SELECT 1 FROM orch_stock_movements m WHERE m.stock_id = s.id)`
   );
 
-  // Версионированный каталог розничных цен. Активным является только последний
-  // успешно импортированный снимок; исходный XLSX в рантайме не читается.
+  // Версионированный каталог розничных цен. Поставщиков несколько (aquastok,
+  // gidrolica): у каждого активен свой последний снимок; исходный XLSX в
+  // рантайме не читается.
   await dbQuery(`
     CREATE TABLE IF NOT EXISTS orch_price_imports (
       id          INT AUTO_INCREMENT PRIMARY KEY,
+      supplier    VARCHAR(32)  NOT NULL DEFAULT 'aquastok',
       source_file VARCHAR(255) NOT NULL,
       source_hash CHAR(64)     NOT NULL,
       sheet_name  VARCHAR(120) NOT NULL,
@@ -329,13 +331,14 @@ async function initTables() {
       row_count   INT          NOT NULL DEFAULT 0,
       status      VARCHAR(16)  NOT NULL DEFAULT 'ready',
       created_at  TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE KEY uq_price_hash (source_hash)
+      UNIQUE KEY uq_price_supplier_hash (supplier, source_hash)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
   await dbQuery(`
     CREATE TABLE IF NOT EXISTS orch_price_items (
       id           INT AUTO_INCREMENT PRIMARY KEY,
       import_id    INT           NOT NULL,
+      supplier     VARCHAR(32)   NOT NULL DEFAULT 'aquastok',
       active       TINYINT(1)    NOT NULL DEFAULT 1,
       row_number   INT           NOT NULL,
       series_name  VARCHAR(120)  NULL,
@@ -357,7 +360,8 @@ async function initTables() {
       created_at   TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
       UNIQUE KEY uq_price_import_sku (import_id, sku),
       INDEX idx_price_active_sku_norm (active, sku_norm),
-      INDEX idx_price_active_sku (active, sku)
+      INDEX idx_price_active_sku (active, sku),
+      INDEX idx_price_supplier_active (supplier, active)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
   // Неизменяемый журнал ручных правок прайса (кто/когда/старая→новая цена/имя).
@@ -368,6 +372,7 @@ async function initTables() {
       id            BIGINT AUTO_INCREMENT PRIMARY KEY,
       price_item_id INT           NULL,
       sku           VARCHAR(64)   NOT NULL,
+      supplier      VARCHAR(32)   NULL,
       change_type   VARCHAR(16)   NOT NULL,
       old_price     DECIMAL(14,2) NULL,
       new_price     DECIMAL(14,2) NULL,
@@ -576,6 +581,25 @@ async function initTables() {
     }
   }
 
+  // Миграция «два поставщика»: supplier-колонки (DEFAULT 'aquastok' бэкфиллит
+  // существующий снимок Аквастока — он остаётся активным без переимпорта),
+  // уникальность hash становится (supplier, source_hash). Порядок важен:
+  // сначала колонка, потом составной уникальный ключ.
+  for (const [sql, tolerate] of [
+    ["ALTER TABLE orch_price_imports ADD COLUMN supplier VARCHAR(32) NOT NULL DEFAULT 'aquastok' AFTER id", [1060]],
+    ['ALTER TABLE orch_price_imports ADD UNIQUE KEY uq_price_supplier_hash (supplier, source_hash)', [1061]],
+    ['ALTER TABLE orch_price_imports DROP INDEX uq_price_hash', [1091]],
+    ["ALTER TABLE orch_price_items ADD COLUMN supplier VARCHAR(32) NOT NULL DEFAULT 'aquastok' AFTER import_id", [1060]],
+    ['CREATE INDEX idx_price_supplier_active ON orch_price_items (supplier, active)', [1061]],
+    ['ALTER TABLE orch_price_changes ADD COLUMN supplier VARCHAR(32) NULL AFTER sku', [1060]],
+  ]) {
+    try {
+      await dbQuery(sql);
+    } catch (err) {
+      if (err && !tolerate.includes(err.errno)) console.error('[MySQL] price supplier migration:', err.message);
+    }
+  }
+
   // Старые отмены ранее ошибочно хранились как выполненные. Исправляем их до
   // расчёта KPI и создаём одну стартовую запись журнала для существующих задач.
   await dbQuery(
@@ -640,9 +664,9 @@ async function verifyCriticalSchema() {
   const probes = [
     'SELECT deadline, dispatched_at, completed_at FROM orch_tasks LIMIT 0',
     'SELECT version FROM bot_chat_history LIMIT 0',
-    'SELECT source_hash FROM orch_price_imports LIMIT 0',
-    'SELECT source_sku, sku_norm, pallet_qty, discount_price FROM orch_price_items LIMIT 0',
-    'SELECT change_type, old_discount_price, new_discount_price FROM orch_price_changes LIMIT 0',
+    'SELECT supplier, source_hash FROM orch_price_imports LIMIT 0',
+    'SELECT supplier, source_sku, sku_norm, pallet_qty, discount_price FROM orch_price_items LIMIT 0',
+    'SELECT supplier, change_type, old_discount_price, new_discount_price FROM orch_price_changes LIMIT 0',
     'SELECT role, content FROM bot_message_archive LIMIT 0',
     'SELECT tool, summary FROM bot_events LIMIT 0',
     'SELECT embedding, dims FROM bot_archive_chunks LIMIT 0',
@@ -2126,15 +2150,17 @@ function normalizeSku(sku) {
 }
 
 async function importPriceCatalog(parsed, opts = {}) {
+  const supplier = String(parsed.supplier || '').trim();
+  if (!supplier) throw new Error('price_import_missing_supplier');
   return withTransaction(async (q) => {
     const existing = await q(
-      'SELECT id, row_count FROM orch_price_imports WHERE source_hash = ? AND status = ? LIMIT 1',
-      [parsed.source_hash, 'ready']
+      'SELECT id, row_count FROM orch_price_imports WHERE supplier = ? AND source_hash = ? AND status = ? LIMIT 1',
+      [supplier, parsed.source_hash, 'ready']
     );
     if (existing.length && !opts.force) {
-      await q('UPDATE orch_price_items SET active = 0 WHERE active = 1');
+      await q('UPDATE orch_price_items SET active = 0 WHERE active = 1 AND supplier = ?', [supplier]);
       await q('UPDATE orch_price_items SET active = 1 WHERE import_id = ?', [existing[0].id]);
-      return { imported: false, import_id: existing[0].id, row_count: existing[0].row_count, activated: true };
+      return { imported: false, supplier, import_id: existing[0].id, row_count: existing[0].row_count, activated: true };
     }
     if (existing.length && opts.force) {
       // Тот же файл, но новый парсер: сносим старый снимок и вставляем заново.
@@ -2144,47 +2170,53 @@ async function importPriceCatalog(parsed, opts = {}) {
 
     const head = await q(
       `INSERT INTO orch_price_imports
-       (source_file, source_hash, sheet_name, price_date, row_count, status)
-       VALUES (?, ?, ?, ?, ?, 'ready')`,
-      [parsed.source_file, parsed.source_hash, parsed.sheet, parsed.price_date || null, parsed.items.length]
+       (supplier, source_file, source_hash, sheet_name, price_date, row_count, status)
+       VALUES (?, ?, ?, ?, ?, ?, 'ready')`,
+      [supplier, parsed.source_file, parsed.source_hash, parsed.sheet, parsed.price_date || null, parsed.items.length]
     );
     const importId = head.insertId;
-    await q('UPDATE orch_price_items SET active = 0 WHERE active = 1');
+    // Импорт затрагивает только снимок СВОЕГО поставщика: второй каталог не трогаем.
+    await q('UPDATE orch_price_items SET active = 0 WHERE active = 1 AND supplier = ?', [supplier]);
     for (const item of parsed.items) {
       await q(
         `INSERT INTO orch_price_items
-         (import_id, active, row_number, series_name, sku, source_sku, sku_norm, load_class, name, dn,
+         (import_id, supplier, active, row_number, series_name, sku, source_sku, sku_norm, load_class, name, dn,
           length_mm, width_mm, height_mm, weight_kg, pallet_qty, retail_price, discount_price, currency, norm_key)
-         VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [importId, item.row_number, item.series, item.sku, item.source_sku || null, normalizeSku(item.sku),
+         VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [importId, supplier, item.row_number, item.series, item.sku, item.source_sku || null, normalizeSku(item.sku),
           item.load_class, item.name, item.dn, item.length_mm, item.width_mm, item.height_mm, item.weight_kg,
           item.pallet_qty || null, item.retail_price, item.discount_price, item.currency || 'KZT', item.norm_key]
       );
     }
-    return { imported: true, import_id: importId, row_count: parsed.items.length };
+    return { imported: true, supplier, import_id: importId, row_count: parsed.items.length };
   });
 }
 
-async function priceGetBySku(sku) {
+// Один артикул может существовать у обоих поставщиков (например «1101») —
+// возвращаем МАССИВ совпадений; вызывающий решает, что делать с неоднозначностью.
+async function priceGetBySku(sku, supplier = null) {
   const normalized = normalizeSku(sku);
+  const params = [normalized, String(sku || '').trim()];
+  let where = 'p.active = 1 AND (p.sku_norm = ? OR UPPER(p.sku) = UPPER(?))';
+  if (supplier) { where += ' AND p.supplier = ?'; params.push(supplier); }
   try {
-    const rows = await dbQuery(
+    return await dbQuery(
       `SELECT p.*, i.source_file, i.price_date
          FROM orch_price_items p JOIN orch_price_imports i ON i.id = p.import_id
-        WHERE p.active = 1 AND (p.sku_norm = ? OR UPPER(p.sku) = UPPER(?)) LIMIT 1`,
-      [normalized, String(sku || '').trim()]
+        WHERE ${where} ORDER BY p.supplier ASC LIMIT 5`,
+      params
     );
-    return rows[0] || null;
   } catch (err) { throw dbError(err, 'priceGetBySku'); }
 }
 
-async function priceSearch(query, limit = 20) {
+async function priceSearch(query, limit = 20, supplier = null) {
   const { normKey } = require('../utils/stockKey');
   const skuNorm = normalizeSku(query);
   const qNorm = normKey(query);
   const tokens = qNorm.split(' ').filter(Boolean).slice(0, 8);
   const where = ['p.active = 1'];
   const params = [];
+  if (supplier) { where.push('p.supplier = ?'); params.push(supplier); }
   if (tokens.length) {
     const tokenWhere = [];
     for (const token of tokens) { tokenWhere.push('p.norm_key LIKE ?'); params.push(`%${token}%`); }
@@ -2197,7 +2229,7 @@ async function priceSearch(query, limit = 20) {
       `SELECT p.*, i.source_file, i.price_date
          FROM orch_price_items p JOIN orch_price_imports i ON i.id = p.import_id
         WHERE ${where.join(' AND ')}
-        ORDER BY p.sku ASC LIMIT ?`,
+        ORDER BY p.supplier ASC, p.sku ASC LIMIT ?`,
       params
     );
   } catch (err) { throw dbError(err, 'priceSearch'); }
@@ -2210,52 +2242,65 @@ async function priceSearch(query, limit = 20) {
 // и стирает ручные правки (это полное обновление прайса; повторный импорт того же
 // файла идемпотентен по source_hash и правки НЕ трогает).
 
-// import_id активного каталога (для добавления новых позиций в текущий снимок).
-async function priceActiveImportId(q) {
-  const rows = await q('SELECT import_id FROM orch_price_items WHERE active = 1 ORDER BY import_id DESC LIMIT 1');
+// import_id активного каталога поставщика (для добавления позиций в его снимок).
+async function priceActiveImportId(q, supplier) {
+  const rows = await q('SELECT import_id FROM orch_price_items WHERE active = 1 AND supplier = ? ORDER BY import_id DESC LIMIT 1', [supplier]);
   if (rows.length) return rows[0].import_id;
-  const imp = await q("SELECT id FROM orch_price_imports WHERE status = 'ready' ORDER BY id DESC LIMIT 1");
+  const imp = await q("SELECT id FROM orch_price_imports WHERE status = 'ready' AND supplier = ? ORDER BY id DESC LIMIT 1", [supplier]);
   return imp.length ? imp[0].id : null;
 }
 
-async function priceSetPrice(sku, newPrice, actor = {}) {
+// Находит активную позицию для правки. Без supplier артикул может совпасть у
+// обоих поставщиков → { ambiguous: true } (вызывающий просит уточнить каталог).
+async function priceFindForUpdate(q, sku, supplier = null) {
+  const normalized = normalizeSku(sku);
+  const params = [normalized, String(sku || '').trim()];
+  let where = 'active = 1 AND (sku_norm = ? OR UPPER(sku) = UPPER(?))';
+  if (supplier) { where += ' AND supplier = ?'; params.push(supplier); }
+  const rows = await q(`SELECT * FROM orch_price_items WHERE ${where} ORDER BY supplier ASC LIMIT 2 FOR UPDATE`, params);
+  if (!rows.length) return { item: null };
+  if (rows.length > 1) return { item: null, ambiguous: true, suppliers: rows.map((r) => r.supplier) };
+  return { item: rows[0] };
+}
+
+async function priceSetPrice(sku, newPrice, actor = {}, supplier = null) {
   const price = Number(newPrice);
   if (!Number.isFinite(price) || price < 0) return { ok: false, reason: 'invalid_price' };
-  const normalized = normalizeSku(sku);
   try {
     return await withTransaction(async (q) => {
-      const rows = await q('SELECT * FROM orch_price_items WHERE active = 1 AND (sku_norm = ? OR UPPER(sku) = UPPER(?)) LIMIT 1 FOR UPDATE', [normalized, String(sku || '').trim()]);
-      if (!rows.length) return { ok: false, reason: 'not_found' };
-      const item = rows[0];
+      const found = await priceFindForUpdate(q, sku, supplier);
+      if (found.ambiguous) return { ok: false, reason: 'ambiguous_supplier', suppliers: found.suppliers };
+      if (!found.item) return { ok: false, reason: 'not_found' };
+      const item = found.item;
       const old = Number(item.retail_price);
       await q('UPDATE orch_price_items SET retail_price = ? WHERE id = ?', [price, item.id]);
       await q(
-        `INSERT INTO orch_price_changes (price_item_id, sku, change_type, old_price, new_price, actor_name, note)
-         VALUES (?, ?, 'set_price', ?, ?, ?, ?)`,
-        [item.id, item.sku, old, price, stockActor(actor), (actor && actor.note) || null]
+        `INSERT INTO orch_price_changes (price_item_id, sku, supplier, change_type, old_price, new_price, actor_name, note)
+         VALUES (?, ?, ?, 'set_price', ?, ?, ?, ?)`,
+        [item.id, item.sku, item.supplier, old, price, stockActor(actor), (actor && actor.note) || null]
       );
-      return { ok: true, sku: item.sku, name: item.name, old_price: old, new_price: price, currency: item.currency };
+      return { ok: true, sku: item.sku, supplier: item.supplier, name: item.name, old_price: old, new_price: price, currency: item.currency };
     });
   } catch (err) { throw dbError(err, 'priceSetPrice'); }
 }
 
-async function priceSetDiscountPrice(sku, newPrice, actor = {}) {
+async function priceSetDiscountPrice(sku, newPrice, actor = {}, supplier = null) {
   const price = Number(newPrice);
   if (!Number.isFinite(price) || price < 0) return { ok: false, reason: 'invalid_price' };
-  const normalized = normalizeSku(sku);
   try {
     return await withTransaction(async (q) => {
-      const rows = await q('SELECT * FROM orch_price_items WHERE active = 1 AND (sku_norm = ? OR UPPER(sku) = UPPER(?)) LIMIT 1 FOR UPDATE', [normalized, String(sku || '').trim()]);
-      if (!rows.length) return { ok: false, reason: 'not_found' };
-      const item = rows[0];
+      const found = await priceFindForUpdate(q, sku, supplier);
+      if (found.ambiguous) return { ok: false, reason: 'ambiguous_supplier', suppliers: found.suppliers };
+      if (!found.item) return { ok: false, reason: 'not_found' };
+      const item = found.item;
       const old = item.discount_price == null ? null : Number(item.discount_price);
       await q('UPDATE orch_price_items SET discount_price = ? WHERE id = ?', [price, item.id]);
       await q(
-        `INSERT INTO orch_price_changes (price_item_id, sku, change_type, old_discount_price, new_discount_price, actor_name, note)
-         VALUES (?, ?, 'set_discount', ?, ?, ?, ?)`,
-        [item.id, item.sku, old, price, stockActor(actor), (actor && actor.note) || null]
+        `INSERT INTO orch_price_changes (price_item_id, sku, supplier, change_type, old_discount_price, new_discount_price, actor_name, note)
+         VALUES (?, ?, ?, 'set_discount', ?, ?, ?, ?)`,
+        [item.id, item.sku, item.supplier, old, price, stockActor(actor), (actor && actor.note) || null]
       );
-      return { ok: true, sku: item.sku, name: item.name, old_discount_price: old, new_discount_price: price, currency: item.currency };
+      return { ok: true, sku: item.sku, supplier: item.supplier, name: item.name, old_discount_price: old, new_discount_price: price, currency: item.currency };
     });
   } catch (err) { throw dbError(err, 'priceSetDiscountPrice'); }
 }
@@ -2264,17 +2309,19 @@ async function priceAddItem(data = {}, actor = {}) {
   const { normKey } = require('../utils/stockKey');
   const sku = String(data.sku || '').trim();
   const name = String(data.name || '').trim();
+  const supplier = String(data.supplier || '').trim();
   const price = Number(data.retail_price);
   const discount = data.discount_price == null ? null : Number(data.discount_price);
   if (!sku || !name) return { ok: false, reason: 'sku_name_required' };
+  if (!supplier) return { ok: false, reason: 'supplier_required' };
   if (!Number.isFinite(price) || price < 0) return { ok: false, reason: 'invalid_price' };
   if (discount != null && (!Number.isFinite(discount) || discount < 0)) return { ok: false, reason: 'invalid_discount_price' };
   const normalized = normalizeSku(sku);
   try {
     return await withTransaction(async (q) => {
-      const importId = await priceActiveImportId(q);
+      const importId = await priceActiveImportId(q, supplier);
       if (!importId) return { ok: false, reason: 'no_active_catalog' };
-      const dup = await q('SELECT id FROM orch_price_items WHERE active = 1 AND (sku_norm = ? OR UPPER(sku) = UPPER(?)) LIMIT 1', [normalized, sku]);
+      const dup = await q('SELECT id FROM orch_price_items WHERE active = 1 AND supplier = ? AND (sku_norm = ? OR UPPER(sku) = UPPER(?)) LIMIT 1', [supplier, normalized, sku]);
       if (dup.length) return { ok: false, reason: 'exists' };
       const rn = await q('SELECT COALESCE(MAX(row_number), 0) + 1 AS rn FROM orch_price_items WHERE import_id = ?', [importId]);
       const series = data.series || null;
@@ -2284,72 +2331,73 @@ async function priceAddItem(data = {}, actor = {}) {
       const key = normKey([sku, sourceSku, series, loadClass, name, dn, data.pallet_qty].filter(Boolean).join(' '));
       const res = await q(
         `INSERT INTO orch_price_items
-         (import_id, active, row_number, series_name, sku, source_sku, sku_norm, load_class, name, dn,
+         (import_id, supplier, active, row_number, series_name, sku, source_sku, sku_norm, load_class, name, dn,
           length_mm, width_mm, height_mm, weight_kg, pallet_qty, retail_price, discount_price, currency, norm_key)
-         VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [importId, rn[0].rn, series, sku, sourceSku, normalized, loadClass, name, dn,
+         VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [importId, supplier, rn[0].rn, series, sku, sourceSku, normalized, loadClass, name, dn,
           data.length_mm ?? null, data.width_mm ?? null, data.height_mm ?? null, data.weight_kg ?? null,
           data.pallet_qty || null, price, discount, data.currency || 'KZT', key]
       );
       await q(
-        `INSERT INTO orch_price_changes (price_item_id, sku, change_type, new_price, new_discount_price, new_name, actor_name, note)
-         VALUES (?, ?, 'add', ?, ?, ?, ?, ?)`,
-        [res.insertId, sku, price, discount, name, stockActor(actor), (actor && actor.note) || null]
+        `INSERT INTO orch_price_changes (price_item_id, sku, supplier, change_type, new_price, new_discount_price, new_name, actor_name, note)
+         VALUES (?, ?, ?, 'add', ?, ?, ?, ?, ?)`,
+        [res.insertId, sku, supplier, price, discount, name, stockActor(actor), (actor && actor.note) || null]
       );
-      return { ok: true, id: res.insertId, sku, name, retail_price: price, discount_price: discount, currency: data.currency || 'KZT' };
+      return { ok: true, id: res.insertId, sku, supplier, name, retail_price: price, discount_price: discount, currency: data.currency || 'KZT' };
     });
   } catch (err) { throw dbError(err, 'priceAddItem'); }
 }
 
 // Мягкое удаление: active=0 (снимок импорта остаётся целым, история — тоже).
-async function priceRemove(sku, actor = {}) {
-  const normalized = normalizeSku(sku);
+async function priceRemove(sku, actor = {}, supplier = null) {
   try {
     return await withTransaction(async (q) => {
-      const rows = await q('SELECT * FROM orch_price_items WHERE active = 1 AND (sku_norm = ? OR UPPER(sku) = UPPER(?)) LIMIT 1 FOR UPDATE', [normalized, String(sku || '').trim()]);
-      if (!rows.length) return { ok: false, reason: 'not_found' };
-      const item = rows[0];
+      const found = await priceFindForUpdate(q, sku, supplier);
+      if (found.ambiguous) return { ok: false, reason: 'ambiguous_supplier', suppliers: found.suppliers };
+      if (!found.item) return { ok: false, reason: 'not_found' };
+      const item = found.item;
       await q('UPDATE orch_price_items SET active = 0 WHERE id = ?', [item.id]);
       await q(
-        `INSERT INTO orch_price_changes (price_item_id, sku, change_type, old_price, old_name, actor_name, note)
-         VALUES (?, ?, 'remove', ?, ?, ?, ?)`,
-        [item.id, item.sku, Number(item.retail_price), item.name, stockActor(actor), (actor && actor.note) || null]
+        `INSERT INTO orch_price_changes (price_item_id, sku, supplier, change_type, old_price, old_name, actor_name, note)
+         VALUES (?, ?, ?, 'remove', ?, ?, ?, ?)`,
+        [item.id, item.sku, item.supplier, Number(item.retail_price), item.name, stockActor(actor), (actor && actor.note) || null]
       );
-      return { ok: true, sku: item.sku, name: item.name };
+      return { ok: true, sku: item.sku, supplier: item.supplier, name: item.name };
     });
   } catch (err) { throw dbError(err, 'priceRemove'); }
 }
 
-async function priceRename(sku, newName, actor = {}) {
+async function priceRename(sku, newName, actor = {}, supplier = null) {
   const { normKey } = require('../utils/stockKey');
   const name = String(newName || '').trim();
   if (!name) return { ok: false, reason: 'name_required' };
-  const normalized = normalizeSku(sku);
   try {
     return await withTransaction(async (q) => {
-      const rows = await q('SELECT * FROM orch_price_items WHERE active = 1 AND (sku_norm = ? OR UPPER(sku) = UPPER(?)) LIMIT 1 FOR UPDATE', [normalized, String(sku || '').trim()]);
-      if (!rows.length) return { ok: false, reason: 'not_found' };
-      const item = rows[0];
+      const found = await priceFindForUpdate(q, sku, supplier);
+      if (found.ambiguous) return { ok: false, reason: 'ambiguous_supplier', suppliers: found.suppliers };
+      if (!found.item) return { ok: false, reason: 'not_found' };
+      const item = found.item;
       const key = normKey([item.sku, item.source_sku, item.series_name, item.load_class, name, item.dn].filter(Boolean).join(' '));
       await q('UPDATE orch_price_items SET name = ?, norm_key = ? WHERE id = ?', [name, key, item.id]);
       await q(
-        `INSERT INTO orch_price_changes (price_item_id, sku, change_type, old_name, new_name, actor_name, note)
-         VALUES (?, ?, 'rename', ?, ?, ?, ?)`,
-        [item.id, item.sku, item.name, name, stockActor(actor), (actor && actor.note) || null]
+        `INSERT INTO orch_price_changes (price_item_id, sku, supplier, change_type, old_name, new_name, actor_name, note)
+         VALUES (?, ?, ?, 'rename', ?, ?, ?, ?)`,
+        [item.id, item.sku, item.supplier, item.name, name, stockActor(actor), (actor && actor.note) || null]
       );
-      return { ok: true, sku: item.sku, old_name: item.name, new_name: name };
+      return { ok: true, sku: item.sku, supplier: item.supplier, old_name: item.name, new_name: name };
     });
   } catch (err) { throw dbError(err, 'priceRename'); }
 }
 
-async function priceListChanges(sku = null, limit = 50) {
+async function priceListChanges(sku = null, limit = 50, supplier = null) {
   const where = [];
   const params = [];
   if (sku) { where.push('UPPER(sku) = UPPER(?)'); params.push(String(sku).trim()); }
+  if (supplier) { where.push('supplier = ?'); params.push(supplier); }
   params.push(Math.max(1, Math.min(Number(limit) || 50, 100)));
   try {
     return await dbQuery(
-      `SELECT id, price_item_id, sku, change_type, old_price, new_price,
+      `SELECT id, price_item_id, sku, supplier, change_type, old_price, new_price,
               old_discount_price, new_discount_price, old_name, new_name, actor_name, note, created_at
          FROM orch_price_changes ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
         ORDER BY id DESC LIMIT ?`,
