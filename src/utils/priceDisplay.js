@@ -7,7 +7,7 @@
 function displayArticle(item) {
   if (!item) return null;
   if (item.source_sku) return item.source_sku;
-  if (/^(?:AQ|GD)-(NOVINKA|NOART)-/i.test(String(item.sku || ''))) return null;
+  if (/^(?:AQ|GD|BL)-(NOVINKA|NOART)-/i.test(String(item.sku || ''))) return null;
   return item.sku || null;
 }
 
@@ -15,6 +15,7 @@ function displayArticle(item) {
 const SUPPLIER_LABELS = {
   aquastok: 'Аквасток / Norma (Январь 2026)',
   gidrolica: 'Gidrolica (июль 2025)',
+  ballu: 'Ballu ONEAIR (16.02.2026)',
 };
 
 function supplierLabel(supplier) {

@@ -26,6 +26,8 @@ function publicItem(item) {
     pallet_qty: item.pallet_qty || null,
     retail_price: Number(item.retail_price),
     discount_price: item.discount_price == null ? null : Number(item.discount_price),
+    dealer_price: item.dealer_price == null ? null : Number(item.dealer_price),
+    dealer_price_2: item.dealer_price_2 == null ? null : Number(item.dealer_price_2),
     currency: item.currency || 'KZT',
   };
 }
@@ -56,17 +58,17 @@ const definition = {
   function: {
     name: 'manage_price',
     description:
-      'Редактирование прайсов Аквасток / Norma (Январь 2026) и Gidrolica (июль 2025) — чтение/расчёт в price_catalog. Менять может любой. '
+      'Редактирование прайсов Аквасток / Norma (Январь 2026), Gidrolica (июль 2025) и Ballu ONEAIR (16.02.2026) — чтение/расчёт в price_catalog. Менять может любой. '
       + 'Действия: set_price — изменить розницу; set_discount_price — изменить цену со скидкой; add — добавить новую позицию (supplier ОБЯЗАТЕЛЕН); '
       + 'remove — удалить позицию (СНАЧАЛА подтверди у человека); rename — переименовать; '
       + 'history — журнал изменений цен. Позицию адресуй по точному артикулу (sku); если sku неизвестен, '
       + 'передай query — при нескольких совпадениях инструмент вернёт кандидатов (reason=ambiguous), не угадывай. '
-      + 'Один артикул может быть в обоих каталогах — тогда укажи supplier. Для КП основная цена — discount_price (у Gidrolica её нет — розница).',
+      + 'Один артикул может быть в нескольких каталогах — тогда укажи supplier. Для КП основная цена — discount_price (у Gidrolica и Ballu её нет — розница/РРЦ).',
     parameters: {
       type: 'object',
       properties: {
         action: { type: 'string', enum: ['set_price', 'set_discount_price', 'add', 'remove', 'rename', 'history'] },
-        supplier: { type: 'string', enum: ['aquastok', 'gidrolica'], description: 'Каталог. Обязателен для add; для остальных — фильтр, нужен когда артикул есть в обоих прайсах.' },
+        supplier: { type: 'string', enum: ['aquastok', 'gidrolica', 'ballu'], description: 'Каталог. Обязателен для add; для остальных — фильтр, нужен когда артикул есть в нескольких прайсах.' },
         sku: { type: 'string', description: 'Точный артикул позиции (для set_price/remove/rename/add).' },
         query: { type: 'string', description: 'Если sku неизвестен: название/DN/класс для поиска позиции (set_price/remove/rename).' },
         price: { type: 'number', description: 'Новая розничная цена (set_price/add).' },
@@ -92,7 +94,7 @@ const definition = {
 async function handler(args, context = {}) {
   try {
     const action = args.action;
-    const supplier = args.supplier === 'aquastok' || args.supplier === 'gidrolica' ? args.supplier : null;
+    const supplier = ['aquastok', 'gidrolica', 'ballu'].includes(args.supplier) ? args.supplier : null;
 
     if (action === 'history') {
       const rows = await priceListChanges(args.sku || null, args.limit, supplier);

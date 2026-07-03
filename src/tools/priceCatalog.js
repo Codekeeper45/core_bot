@@ -8,13 +8,13 @@ const definition = {
   type: 'function',
   function: {
     name: 'price_catalog',
-    description: 'Ищет товары в двух прайсах — Аквасток / Norma (Январь 2026) и Gidrolica (июль 2025) — и рассчитывает стоимость по количеству. По умолчанию ищет в ОБОИХ; supplier сужает до одного. У Аквасток расчёт по "Цене со скидкой", у Gidrolica скидочной цены нет — считается по рознице. В ответе всегда называй каталог (supplier_label).',
+    description: 'Ищет товары в трёх прайсах — Аквасток / Norma (Январь 2026), Gidrolica (июль 2025) и Ballu ONEAIR (16.02.2026, очистители воздуха) — и рассчитывает стоимость по количеству. По умолчанию ищет во ВСЕХ; supplier сужает до одного. У Аквасток расчёт по "Цене со скидкой"; у Gidrolica и Ballu скидочной цены нет — считается по рознице (у Ballu это РРЦ; его dealer_price/dealer_price_2 — ЗАКУПОЧНЫЕ дилерские Д/Д1, справочно, НЕ для КП клиентам). В ответе всегда называй каталог (supplier_label).',
     parameters: {
       type: 'object',
       properties: {
         action: { type: 'string', enum: ['search', 'calculate'] },
         query: { type: 'string', description: 'Артикул, название, DN или класс нагрузки для search.' },
-        supplier: { type: 'string', enum: ['aquastok', 'gidrolica'], description: 'Фильтр по каталогу (опционально). Нужен, когда артикул есть в обоих прайсах.' },
+        supplier: { type: 'string', enum: ['aquastok', 'gidrolica', 'ballu'], description: 'Фильтр по каталогу (опционально). Нужен, когда артикул есть в нескольких прайсах.' },
         price_basis: { type: 'string', enum: ['discount', 'retail'], description: 'calculate: discount (по умолчанию) или retail.' },
         lines: {
           type: 'array',
@@ -51,6 +51,9 @@ function publicItem(item) {
     pallet_qty: item.pallet_qty || null,
     retail_price: Number(item.retail_price),
     discount_price: item.discount_price == null ? null : Number(item.discount_price),
+    // Дилерские (закупочные) цены Ballu — справочно; в расчёт НЕ идут.
+    dealer_price: item.dealer_price == null ? null : Number(item.dealer_price),
+    dealer_price_2: item.dealer_price_2 == null ? null : Number(item.dealer_price_2),
     effective_price: item.discount_price == null ? Number(item.retail_price) : Number(item.discount_price),
     price_basis: item.discount_price == null ? 'retail' : 'discount',
     currency: item.currency || 'KZT',
@@ -80,14 +83,14 @@ function suppliersNote(suppliers) {
 
 async function handler(args) {
   try {
-    const supplier = args.supplier === 'aquastok' || args.supplier === 'gidrolica' ? args.supplier : null;
+    const supplier = ['aquastok', 'gidrolica', 'ballu'].includes(args.supplier) ? args.supplier : null;
     if (args.action === 'search') {
       const rows = await priceSearch(args.query || '', 20, supplier);
       return {
         success: true,
         count: rows.length,
         items: rows.map(publicItem),
-        note: 'Поиск по прайсам Аквасток/Norma (янв 2026) и Gidrolica (июль 2025); у каждой позиции есть supplier_label — называй каталог в ответе. Для расчётов у Аквасток по умолчанию "Цена со скидкой", у Gidrolica — розница.',
+        note: 'Поиск по прайсам Аквасток/Norma (янв 2026), Gidrolica (июль 2025) и Ballu ONEAIR (фев 2026); у каждой позиции есть supplier_label — называй каталог в ответе. Для расчётов у Аквасток по умолчанию "Цена со скидкой", у Gidrolica и Ballu — розница/РРЦ; dealer_price Ballu — закупочная, не для КП.',
       };
     }
     if (args.action !== 'calculate') return { success: false, reason: 'invalid_action' };

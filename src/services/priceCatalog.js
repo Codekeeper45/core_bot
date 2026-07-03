@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const XLSX = require('xlsx');
 const { normKey } = require('../utils/stockKey');
 
-// Два поставщика живут в БД одновременно: у каждого свой лист, свой формат
+// Поставщики живут в БД одновременно: у каждого свой лист, свой формат
 // колонок и свой префикс синтетических артикулов. active-флаг снимка скоупится
 // по supplier (см. mysql.importPriceCatalog).
 const SUPPLIERS = {
@@ -20,6 +20,12 @@ const SUPPLIERS = {
     price_date: '2025-07-01',
     synthetic_prefix: 'GD',
     parseRows: parseGidrolicaRows,
+  },
+  ballu: {
+    sheet: 'ONEAIR',
+    price_date: '2026-02-16',
+    synthetic_prefix: 'BL',
+    parseRows: parseBalluRows,
   },
 };
 
@@ -177,6 +183,57 @@ function parseGidrolicaRows(rows) {
       currency: 'KZT',
     };
     item.norm_key = normKey([item.sku, item.series, currentSection, item.load_class, item.name, item.dn].filter(Boolean).join(' '));
+    items.push(item);
+  }
+  return items;
+}
+
+// Прайс Ballu ONEAIR (очистители воздуха): лист «ONEAIR». Секции — повторяющиеся
+// строки-заголовки с «НС-код» в кол.1 и названием серии в кол.2 (ASP-200Х и т.п.).
+// Колонки позиции: 1=НС-код, 2=наименование, 3=примечание (наличие/для какой
+// модели), 5=РРЦ (розница; НАША база расчёта), 9=дилерская Д (квартал <800 тыс),
+// 12=дилерская Д1 (квартал ≥800 тыс). Дилерские цены — ЗАКУПОЧНЫЕ: хранятся в
+// dealer_price/dealer_price_2 справочно, discount_price НЕ заполняем, чтобы
+// расчёт КП по умолчанию шёл по РРЦ, а не по закупке. Лист «Конкуренты» игнорируем.
+function parseBalluRows(rows) {
+  const prefix = SUPPLIERS.ballu.synthetic_prefix;
+  const items = [];
+  let currentSection = null;
+  let seenHeader = false;
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i] || [];
+    const rowNumber = i + 1;
+    const rawSku = clean(row[1]);
+    if (rawSku === 'НС-код') {
+      currentSection = clean(row[2]) || currentSection;
+      seenHeader = true;
+      continue;
+    }
+    if (!seenHeader) continue; // шапка таблицы до первой секции
+    const name = clean(row[2]);
+    const price = numeric(row[5]);
+    if (!rawSku || !name || price == null || price <= 0) continue;
+    const note = clean(row[3]);
+    const item = {
+      row_number: rowNumber,
+      series: currentSection,
+      sku: syntheticSku(rawSku, rowNumber, prefix),
+      source_sku: null,
+      load_class: null,
+      name,
+      dn: null,
+      length_mm: null,
+      width_mm: null,
+      height_mm: null,
+      weight_kg: null,
+      pallet_qty: null,
+      retail_price: price,
+      discount_price: null,
+      dealer_price: numeric(row[9]),
+      dealer_price_2: numeric(row[12]),
+      currency: 'KZT',
+    };
+    item.norm_key = normKey([item.sku, item.series, item.name, note].filter(Boolean).join(' '));
     items.push(item);
   }
   return items;

@@ -404,6 +404,8 @@ async function initTables() {
       pallet_qty   VARCHAR(32)   NULL,
       retail_price DECIMAL(14,2) NOT NULL,
       discount_price DECIMAL(14,2) NULL,
+      dealer_price   DECIMAL(14,2) NULL,
+      dealer_price_2 DECIMAL(14,2) NULL,
       currency     CHAR(3)       NOT NULL DEFAULT 'KZT',
       norm_key     TEXT          NOT NULL,
       created_at   TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
@@ -641,6 +643,9 @@ async function initTables() {
     ["ALTER TABLE orch_price_items ADD COLUMN supplier VARCHAR(32) NOT NULL DEFAULT 'aquastok' AFTER import_id", [1060]],
     ['CREATE INDEX idx_price_supplier_active ON orch_price_items (supplier, active)', [1061]],
     ['ALTER TABLE orch_price_changes ADD COLUMN supplier VARCHAR(32) NULL AFTER sku', [1060]],
+    // Дилерские (закупочные) цены Ballu: Д (<800 тыс/квартал) и Д1 (≥800 тыс).
+    ['ALTER TABLE orch_price_items ADD COLUMN dealer_price DECIMAL(14,2) NULL AFTER discount_price', [1060]],
+    ['ALTER TABLE orch_price_items ADD COLUMN dealer_price_2 DECIMAL(14,2) NULL AFTER dealer_price', [1060]],
   ]) {
     try {
       await dbQuery(sql);
@@ -714,7 +719,7 @@ async function verifyCriticalSchema() {
     'SELECT deadline, dispatched_at, completed_at FROM orch_tasks LIMIT 0',
     'SELECT version FROM bot_chat_history LIMIT 0',
     'SELECT supplier, source_hash FROM orch_price_imports LIMIT 0',
-    'SELECT supplier, source_sku, sku_norm, pallet_qty, discount_price FROM orch_price_items LIMIT 0',
+    'SELECT supplier, source_sku, sku_norm, pallet_qty, discount_price, dealer_price, dealer_price_2 FROM orch_price_items LIMIT 0',
     'SELECT supplier, change_type, old_discount_price, new_discount_price FROM orch_price_changes LIMIT 0',
     'SELECT role, content FROM bot_message_archive LIMIT 0',
     'SELECT tool, summary FROM bot_events LIMIT 0',
@@ -2435,11 +2440,13 @@ async function importPriceCatalog(parsed, opts = {}) {
       await q(
         `INSERT INTO orch_price_items
          (import_id, supplier, active, row_number, series_name, sku, source_sku, sku_norm, load_class, name, dn,
-          length_mm, width_mm, height_mm, weight_kg, pallet_qty, retail_price, discount_price, currency, norm_key)
-         VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          length_mm, width_mm, height_mm, weight_kg, pallet_qty, retail_price, discount_price,
+          dealer_price, dealer_price_2, currency, norm_key)
+         VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [importId, supplier, item.row_number, item.series, item.sku, item.source_sku || null, normalizeSku(item.sku),
           item.load_class, item.name, item.dn, item.length_mm, item.width_mm, item.height_mm, item.weight_kg,
-          item.pallet_qty || null, item.retail_price, item.discount_price, item.currency || 'KZT', item.norm_key]
+          item.pallet_qty || null, item.retail_price, item.discount_price,
+          item.dealer_price ?? null, item.dealer_price_2 ?? null, item.currency || 'KZT', item.norm_key]
       );
     }
     return { imported: true, supplier, import_id: importId, row_count: parsed.items.length };

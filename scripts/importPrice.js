@@ -1,6 +1,6 @@
 'use strict';
-// Импорт прайсов в БД: node scripts/importPrice.js [файл.xlsx] [--force] [--supplier=aquastok|gidrolica]
-// Без файла импортирует ОБА известных прайса из корня репо (Аквасток + Gidrolica).
+// Импорт прайсов в БД: node scripts/importPrice.js [файл.xlsx] [--force] [--supplier=aquastok|gidrolica|ballu]
+// Без файла импортирует ВСЕ известные прайсы из корня репо (Аквасток + Gidrolica + Ballu).
 // Поставщик определяется по листу файла (detectSupplier), --supplier переопределяет.
 
 require('dotenv').config();
@@ -12,6 +12,7 @@ const { importPriceWorkbook } = require('../src/services/priceCatalog');
 const KNOWN_FILES = [
   /аквасток.*январь.*2026.*продажн.*\.xlsx$/iu,
   /гидро.*июль.*2025.*розница.*\.xlsx$/iu,
+  /ballu.*oneair.*\.xlsx$/iu,
 ];
 
 async function main() {

@@ -15,6 +15,7 @@ const items = [
   { sku: '1101', supplier: 'gidrolica', name: 'Лоток водоотводный VS LINE DN100.14.07 с решеткой В125', dn: 'DN100', retail_price: 18000, discount_price: null, currency: 'KZT', source_file: 'gidro.xlsx', price_date: '2025-07-01' },
   { sku: '080096', supplier: 'gidrolica', name: 'Комплект Gidrolica Light: лоток с решеткой оцинкованной, кл. A15', dn: 'DN100', load_class: 'A15', retail_price: 6600, discount_price: null, currency: 'KZT', source_file: 'gidro.xlsx', price_date: '2025-07-01' },
   { sku: 'GD-NOART-R042', supplier: 'gidrolica', source_sku: null, name: 'Заглушка универсальная Gidrolica', retail_price: 700, discount_price: null, currency: 'KZT', source_file: 'gidro.xlsx', price_date: '2025-07-01' },
+  { sku: 'НС-1428459', supplier: 'ballu', name: 'Очиститель воздуха приточный Ballu ONEAIR ASP-200S', retail_price: 327590, discount_price: null, dealer_price: 262072, dealer_price_2: 245693, currency: 'KZT', source_file: 'ballu.xlsx', price_date: '2026-02-16' },
 ];
 function normalizeSku(sku) {
   return String(sku || '').trim().toUpperCase().replace(/С/g, 'C');
@@ -128,4 +129,15 @@ test('смешанный расчёт двух поставщиков помеч
   assert.equal(result.success, true);
   assert.equal(result.mixed_suppliers, true);
   assert.match(result.note, /РАЗНЫХ поставщиков/);
+});
+
+test('Ballu: расчёт по РРЦ, дилерские Д/Д1 отдаются справочно и не влияют на сумму', async () => {
+  const result = await handler({ action: 'calculate', supplier: 'ballu', lines: [{ query: 'НС-1428459', qty: 2 }] });
+  assert.equal(result.success, true);
+  assert.equal(result.lines[0].supplier_label, 'Ballu ONEAIR (16.02.2026)');
+  assert.equal(result.lines[0].price_basis, 'retail', 'discount_price пуст → база РРЦ');
+  assert.equal(result.lines[0].unit_price, 327590, 'НЕ по дилерской закупке');
+  assert.equal(result.total, 655180);
+  assert.equal(result.lines[0].dealer_price, 262072);
+  assert.equal(result.lines[0].dealer_price_2, 245693);
 });
