@@ -7,8 +7,9 @@ const baileys = require('../services/baileys');
 const tgClient = require('../channels/telegram');
 const wazzup = require('../services/wazzup');
 
-// desc = { type:'image'|'document'|'voice', channel, ref, file_id, source_url,
-//          baileys_media_obj, file_name, mime }
+// desc = { type:'image'|'document'|'voice'|'video'|'video_note'|'animation'|'sticker',
+//          channel, ref, file_id, source_url, baileys_media_obj, baileys_media_type,
+//          file_name, mime }
 // → { buffer, mime, fileName }. Бросает понятную ошибку, если скачать нечем.
 async function downloadIncoming(desc) {
   if (!desc || !desc.type) throw new Error('downloadIncoming: пустой дескриптор медиа');
@@ -25,7 +26,7 @@ async function downloadIncoming(desc) {
 
   if (channel === 'whatsapp') {
     if (!desc.baileys_media_obj) throw new Error('downloadIncoming(whatsapp): нет baileys_media_obj');
-    const waType = desc.type === 'voice' ? 'audio' : desc.type; // image|audio|document
+    const waType = desc.baileys_media_type || WA_TYPE[desc.type] || desc.type;
     const buffer = await baileys.downloadMedia(desc.baileys_media_obj, waType);
     return { buffer, mime: desc.mime || null, fileName };
   }
@@ -40,9 +41,21 @@ async function downloadIncoming(desc) {
   throw new Error(`downloadIncoming: неизвестный канал «${desc.channel}»`);
 }
 
+// Тип медиа для baileys.downloadMedia по типу дескриптора.
+const WA_TYPE = {
+  voice: 'audio',
+  video: 'video',
+  video_note: 'ptv',
+  animation: 'video',
+  sticker: 'sticker',
+};
+
 function defaultName(type) {
   if (type === 'image') return 'photo.jpg';
   if (type === 'voice') return 'voice.ogg';
+  if (type === 'video' || type === 'video_note') return 'video.mp4';
+  if (type === 'animation') return 'animation.mp4';
+  if (type === 'sticker') return 'sticker.webp';
   return 'файл';
 }
 

@@ -20,10 +20,14 @@ function getClient() {
 
 function detectAudioFormat(mimeType) {
   if (!mimeType) return 'ogg';
+  if (mimeType.includes('webm')) return 'webm';
   if (mimeType.includes('ogg')) return 'ogg';
-  if (mimeType.includes('mp3') || mimeType.includes('mpeg')) return 'mp3';
+  if (mimeType.includes('mp3')) return 'mp3';
+  // ВАЖНО: video/mp4 и audio/mp4 → 'mp4' (Whisper понимает mp4-контейнер и
+  // берёт из него аудиодорожку — так транскрибируются видео и кружки).
+  if (mimeType.includes('mp4') || mimeType.includes('m4a') || mimeType.includes('quicktime')) return 'mp4';
+  if (mimeType.includes('mpeg')) return 'mp3';
   if (mimeType.includes('wav')) return 'wav';
-  if (mimeType.includes('mp4') || mimeType.includes('m4a')) return 'mp4';
   if (mimeType.includes('aac')) return 'aac';
   if (mimeType.includes('flac')) return 'flac';
   return 'ogg';
@@ -98,4 +102,33 @@ async function analyzeImageUrl(imageUrl, prompt) {
   return analyzeImageBase64(buffer.toString('base64'), mimeType, prompt);
 }
 
-module.exports = { transcribeAudio, analyzeImageUrl, analyzeImageBase64 };
+// Видео (обычное, кружок, гифка) — Gemini смотрит его целиком через OpenRouter
+// content type video_url с base64 data-URL (OpenRouter маршрутизирует в провайдера
+// с поддержкой видео; форматы mp4/mpeg/mov/webm).
+async function analyzeVideoBase64(base64, mimeType = 'video/mp4', prompt) {
+  const dataUrl = `data:${mimeType};base64,${base64}`;
+  const messages = [
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: prompt },
+        { type: 'video_url', video_url: { url: dataUrl } },
+      ],
+    },
+  ];
+  const chain = modelChain(config.VIDEO_MODEL, config.VIDEO_FALLBACK_MODEL);
+
+  let lastErr;
+  for (const model of chain) {
+    try {
+      const response = await getClient().chat.completions.create({ model, messages });
+      return (response.choices[0]?.message?.content || '').trim();
+    } catch (err) {
+      lastErr = err;
+      console.error(`[Video] модель ${model} не сработала: ${err.message}`);
+    }
+  }
+  throw lastErr || new Error('Video: не задана ни одна модель');
+}
+
+module.exports = { transcribeAudio, analyzeImageUrl, analyzeImageBase64, analyzeVideoBase64 };

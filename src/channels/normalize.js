@@ -28,6 +28,12 @@ function normalizeInbound(raw) {
     image_source: null, image_url: null, image_caption: null,
     document_source_url: null, document_file_id: null, document_file_name: null,
     document_mime_type: null, document_extension: null, document_family: null,
+    // Видео-подобные: video (обычное), video_note (кружок), animation (гифка), sticker.
+    has_video: false, video_source_url: null, video_file_id: null,
+    video_mime_type: null, video_duration: null,
+    // Какой тип медиа скачивать у Baileys для видео-подобных (video|sticker|ptv).
+    baileys_media_type: null,
+    sticker_emoji: null, sticker_format: null, // webp | webm | tgs
     is_outgoing: false, is_self_message: false, is_supported: false, unsupported_reason: '',
     // Baileys-specific: carries the media sub-object for downloadMedia()
     baileys_raw_msg: null,
@@ -80,6 +86,27 @@ function normalizeInbound(raw) {
       n.image_caption = msg.caption || '';
       n.message = msg.caption || '';
       n.message_text_for_buffer = msg.caption || '[изображение]';
+    } else if (msg.video || msg.video_note || msg.animation) {
+      const v = msg.video || msg.video_note || msg.animation;
+      n.message_type = msg.video_note ? 'video_note' : (msg.animation ? 'animation' : 'video');
+      n.original_message_type = n.message_type;
+      n.has_video = true;
+      n.video_file_id = v.file_id;
+      n.video_mime_type = v.mime_type || 'video/mp4';
+      n.video_duration = String(v.duration || '');
+      n.image_caption = msg.caption || '';
+      n.message = msg.caption || '';
+      n.message_text_for_buffer = msg.caption
+        || (n.message_type === 'video_note' ? '[видеокружок]' : (n.message_type === 'animation' ? '[гифка]' : '[видео]'));
+    } else if (msg.sticker) {
+      const st = msg.sticker;
+      n.message_type = 'sticker';
+      n.original_message_type = 'sticker';
+      n.video_file_id = st.file_id; // скачивается тем же путём, что видео
+      n.sticker_emoji = st.emoji || null;
+      n.sticker_format = st.is_animated ? 'tgs' : (st.is_video ? 'webm' : 'webp');
+      n.message = '';
+      n.message_text_for_buffer = `[стикер${st.emoji ? ` ${st.emoji}` : ''}]`;
     } else if (msg.document) {
       const doc = msg.document;
       const mimeType = doc.mime_type || '';
@@ -91,6 +118,14 @@ function normalizeInbound(raw) {
         n.image_caption = msg.caption || '';
         n.message = msg.caption || '';
         n.message_text_for_buffer = msg.caption || '[изображение]';
+      } else if (mimeType.startsWith('video/')) {
+        n.message_type = 'video';
+        n.original_message_type = 'document_video';
+        n.has_video = true;
+        n.video_file_id = doc.file_id;
+        n.video_mime_type = mimeType;
+        n.message = msg.caption || '';
+        n.message_text_for_buffer = msg.caption || '[видео]';
       } else {
         n.message_type = 'document';
         n.original_message_type = 'document';
@@ -163,6 +198,29 @@ function normalizeInbound(raw) {
       n.baileys_media_obj = waMsg.imageMessage;
       n.message = n.image_caption;
       n.message_text_for_buffer = n.image_caption || '[изображение]';
+    } else if (waMsg.videoMessage || waMsg.ptvMessage) {
+      // ptvMessage — видеокружок WhatsApp (push-to-video); gifPlayback — гифка.
+      const v = waMsg.videoMessage || waMsg.ptvMessage;
+      n.message_type = waMsg.ptvMessage ? 'video_note' : (v.gifPlayback ? 'animation' : 'video');
+      n.original_message_type = n.message_type;
+      n.has_video = true;
+      n.video_mime_type = v.mimetype || 'video/mp4';
+      n.video_duration = String(v.seconds || '');
+      n.baileys_media_obj = v;
+      n.baileys_media_type = waMsg.ptvMessage ? 'ptv' : 'video';
+      n.image_caption = v.caption || '';
+      n.message = v.caption || '';
+      n.message_text_for_buffer = v.caption
+        || (n.message_type === 'video_note' ? '[видеокружок]' : (n.message_type === 'animation' ? '[гифка]' : '[видео]'));
+    } else if (waMsg.stickerMessage) {
+      const st = waMsg.stickerMessage;
+      n.message_type = 'sticker';
+      n.original_message_type = 'sticker';
+      n.baileys_media_obj = st;
+      n.baileys_media_type = 'sticker';
+      n.sticker_format = 'webp'; // WA-стикеры (в т.ч. анимированные) — webp
+      n.message = '';
+      n.message_text_for_buffer = '[стикер]';
     } else if (waMsg.documentMessage) {
       const doc = waMsg.documentMessage;
       const mimeType = doc.mimetype || '';
@@ -175,6 +233,15 @@ function normalizeInbound(raw) {
         n.baileys_media_obj = doc;
         n.message = n.image_caption;
         n.message_text_for_buffer = n.image_caption || '[изображение]';
+      } else if (mimeType.startsWith('video/')) {
+        n.message_type = 'video';
+        n.original_message_type = 'document_video';
+        n.has_video = true;
+        n.video_mime_type = mimeType;
+        n.baileys_media_obj = doc;
+        n.baileys_media_type = 'document';
+        n.message = doc.caption || '';
+        n.message_text_for_buffer = doc.caption || '[видео]';
       } else {
         n.message_type = 'document';
         n.original_message_type = 'document';
@@ -272,12 +339,18 @@ function normalizeInbound(raw) {
       n.document_family = getDocumentFamily('', fileName);
       n.message = text;
       n.message_text_for_buffer = `[документ: ${fileName}]`;
-    } else if (['video', 'vcard', 'geo', 'unsupported', 'missing_call', 'unknown', 'wapi_template'].includes(type)) {
-      // Эти типы Instagram у нас не разбираются (нет vision для видео, нет
-      // парсера для vCard и т.д.). Отвечаем заглушкой, чтобы клиент не
-      // подумал что мы его игнорируем.
+    } else if (type === 'video') {
+      n.message_type = 'video';
+      n.original_message_type = 'video';
+      n.has_video = true;
+      n.video_source_url = contentUri;
+      n.video_mime_type = 'video/mp4'; // Wazzup mime не отдаёт — IG-видео это mp4
+      n.message = text;
+      n.message_text_for_buffer = text || '[видео]';
+    } else if (['vcard', 'geo', 'unsupported', 'missing_call', 'unknown', 'wapi_template'].includes(type)) {
+      // Эти типы Instagram у нас не разбираются (нет парсера для vCard и т.д.).
+      // Отвечаем заглушкой, чтобы клиент не подумал что мы его игнорируем.
       const map = {
-        video: 'Видео я пока не разбираю.',
         vcard: 'Визитку я открыть не могу.',
         geo: 'Геолокацию я не использую.',
         missing_call: 'Я не могу принимать звонки.',
@@ -285,7 +358,7 @@ function normalizeInbound(raw) {
         unknown: 'Я не понял тип сообщения.',
         wapi_template: 'Шаблонные сообщения я не обрабатываю.',
       };
-      n.unsupported_canned_message = `${map[type] || 'Этот формат я не разбираю.'} Пожалуйста, напишите текстом — или отправьте фото / голосовое, я их понимаю.`;
+      n.unsupported_canned_message = `${map[type] || 'Этот формат я не разбираю.'} Пожалуйста, напишите текстом — или отправьте фото / видео / голосовое, я их понимаю.`;
       n.unsupported_reason = `ig_type_${type}`;
     } else {
       n.unsupported_canned_message = 'Этот формат сообщений я пока не обрабатываю. Напишите, пожалуйста, текстом — или отправьте фото / голосовое.';

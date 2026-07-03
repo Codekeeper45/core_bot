@@ -80,6 +80,50 @@ async function sendDocument(chatId, buffer, fileName = 'файл') {
   }
 }
 
+// Отправить видео (mp4-буфер) с подписью.
+async function sendVideo(chatId, buffer, caption = '') {
+  try {
+    await getBot().telegram.sendVideo(chatId, { source: buffer }, caption ? { caption } : {});
+    return true;
+  } catch (err) {
+    console.error('[TG] sendVideo error:', err.message);
+    return false;
+  }
+}
+
+// Отправить видеокружок (круглое видео). Подписей у кружков не бывает.
+async function sendVideoNote(chatId, buffer) {
+  try {
+    await getBot().telegram.sendVideoNote(chatId, { source: buffer });
+    return true;
+  } catch (err) {
+    console.error('[TG] sendVideoNote error:', err.message);
+    return false;
+  }
+}
+
+// Отправить гифку/анимацию (mp4/gif-буфер).
+async function sendAnimation(chatId, buffer, caption = '') {
+  try {
+    await getBot().telegram.sendAnimation(chatId, { source: buffer }, caption ? { caption } : {});
+    return true;
+  } catch (err) {
+    console.error('[TG] sendAnimation error:', err.message);
+    return false;
+  }
+}
+
+// Отправить стикер (webp/webm-буфер).
+async function sendSticker(chatId, buffer) {
+  try {
+    await getBot().telegram.sendSticker(chatId, { source: buffer });
+    return true;
+  } catch (err) {
+    console.error('[TG] sendSticker error:', err.message);
+    return false;
+  }
+}
+
 async function sendChatAction(chatId, action = 'typing') {
   try {
     await getBot().telegram.sendChatAction(chatId, action);
@@ -108,4 +152,8 @@ async function deleteMessage(chatId, messageId) {
   try { await getBot().telegram.deleteMessage(chatId, messageId); } catch {}
 }
 
-module.exports = { getBot, sendMessage, sendPhoto, sendVoice, sendDocument, splitForTelegram, sendChatAction, downloadFile, getFileUrl, deleteMessage };
+module.exports = {
+  getBot, sendMessage, sendPhoto, sendVoice, sendDocument,
+  sendVideo, sendVideoNote, sendAnimation, sendSticker,
+  splitForTelegram, sendChatAction, downloadFile, getFileUrl, deleteMessage,
+};

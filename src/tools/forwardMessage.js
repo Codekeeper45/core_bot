@@ -13,8 +13,9 @@ const definition = {
   function: {
     name: 'forward_message',
     description:
-      'Переслать сотруднику то, что прислали В ТЕКУЩЕМ сообщении: фото, файл/документ, голосовое '
-      + 'и/или текст — реальными вложениями, не описанием. Доступно ВСЕМ (и боссу, и сотруднику). '
+      'Переслать сотруднику то, что прислали В ТЕКУЩЕМ сообщении: фото, видео, видеокружок, гифку, '
+      + 'стикер, файл/документ, голосовое и/или текст — реальными вложениями, не описанием. '
+      + 'Доступно ВСЕМ (и боссу, и сотруднику). '
       + 'Используй, когда просят «передай это Ивану», «скинь файл бухгалтеру», «перешли фото на склад». '
       + 'Адресат to: id / имя / роль из штата. to_all=true — переслать всем по роли. message — '
       + 'необязательный комментарий к пересылке. Пересылается ровно то, что пришло сейчас; '
@@ -81,6 +82,8 @@ async function handler(args, context = {}) {
       images: loaded.filter((m) => m.type === 'image').length,
       documents: loaded.filter((m) => m.type === 'document').length,
       voice: loaded.filter((m) => m.type === 'voice').length,
+      videos: loaded.filter((m) => ['video', 'video_note', 'animation'].includes(m.type)).length,
+      stickers: loaded.filter((m) => m.type === 'sticker').length,
       text: text ? 1 : 0,
     };
     const okCount = sent_to.filter((s) => s.sent).length;

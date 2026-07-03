@@ -212,3 +212,94 @@ test('normalizeInbound — WA LID без remoteJidAlt: остаётся lid, н�
   assert.equal(r.chat_id, '123456789012345@lid');
   assert.equal(r.is_supported, true);
 });
+
+// ─── Мультимодальность: видео / кружки / гифки / стикеры ───
+describe('normalizeInbound — видео-подобные типы', () => {
+  test('TG video → message_type=video, file_id/mime заполнены', () => {
+    const n = normalizeInbound({ update_id: 1, message: {
+      message_id: 5, chat: { id: 10, type: 'private' }, from: { first_name: 'A' },
+      video: { file_id: 'V1', mime_type: 'video/mp4', duration: 12 }, caption: 'смотри',
+    } });
+    assert.equal(n.message_type, 'video');
+    assert.equal(n.has_video, true);
+    assert.equal(n.video_file_id, 'V1');
+    assert.equal(n.video_mime_type, 'video/mp4');
+    assert.equal(n.message, 'смотри');
+    assert.equal(n.is_supported, true);
+  });
+
+  test('TG video_note → message_type=video_note', () => {
+    const n = normalizeInbound({ update_id: 1, message: {
+      message_id: 5, chat: { id: 10, type: 'private' }, from: { first_name: 'A' },
+      video_note: { file_id: 'VN1', duration: 30 },
+    } });
+    assert.equal(n.message_type, 'video_note');
+    assert.equal(n.message_text_for_buffer, '[видеокружок]');
+    assert.equal(n.is_supported, true);
+  });
+
+  test('TG animation (гифка) → message_type=animation', () => {
+    const n = normalizeInbound({ update_id: 1, message: {
+      message_id: 5, chat: { id: 10, type: 'private' }, from: { first_name: 'A' },
+      animation: { file_id: 'G1', mime_type: 'video/mp4' },
+    } });
+    assert.equal(n.message_type, 'animation');
+    assert.equal(n.message_text_for_buffer, '[гифка]');
+  });
+
+  test('TG sticker: статичный webp / анимированный tgs / видео webm', () => {
+    const base = { message_id: 5, chat: { id: 10, type: 'private' }, from: { first_name: 'A' } };
+    const st = normalizeInbound({ update_id: 1, message: { ...base, sticker: { file_id: 'S1', emoji: '👍' } } });
+    assert.equal(st.message_type, 'sticker');
+    assert.equal(st.sticker_format, 'webp');
+    assert.equal(st.sticker_emoji, '👍');
+    assert.equal(st.message_text_for_buffer, '[стикер 👍]');
+    const tgs = normalizeInbound({ update_id: 1, message: { ...base, sticker: { file_id: 'S2', is_animated: true } } });
+    assert.equal(tgs.sticker_format, 'tgs');
+    const webm = normalizeInbound({ update_id: 1, message: { ...base, sticker: { file_id: 'S3', is_video: true } } });
+    assert.equal(webm.sticker_format, 'webm');
+  });
+
+  test('TG document с mime video/ → video', () => {
+    const n = normalizeInbound({ update_id: 1, message: {
+      message_id: 5, chat: { id: 10, type: 'private' }, from: { first_name: 'A' },
+      document: { file_id: 'D1', file_name: 'clip.mp4', mime_type: 'video/mp4' },
+    } });
+    assert.equal(n.message_type, 'video');
+    assert.equal(n.original_message_type, 'document_video');
+  });
+
+  test('WA videoMessage → video; gifPlayback → animation; ptvMessage → video_note', () => {
+    const key = { remoteJid: '77071234567@s.whatsapp.net', fromMe: false, id: 'V' };
+    const vid = normalizeInbound({ __baileys: true, baileysMsg: { key, pushName: 'И', message: { videoMessage: { mimetype: 'video/mp4', seconds: 9, caption: 'вот' } } } });
+    assert.equal(vid.message_type, 'video');
+    assert.equal(vid.baileys_media_type, 'video');
+    assert.equal(vid.message, 'вот');
+    assert.equal(vid.is_supported, true);
+    const gif = normalizeInbound({ __baileys: true, baileysMsg: { key, pushName: 'И', message: { videoMessage: { mimetype: 'video/mp4', gifPlayback: true } } } });
+    assert.equal(gif.message_type, 'animation');
+    const ptv = normalizeInbound({ __baileys: true, baileysMsg: { key, pushName: 'И', message: { ptvMessage: { mimetype: 'video/mp4', seconds: 15 } } } });
+    assert.equal(ptv.message_type, 'video_note');
+    assert.equal(ptv.baileys_media_type, 'ptv');
+  });
+
+  test('WA stickerMessage → sticker (webp)', () => {
+    const key = { remoteJid: '77071234567@s.whatsapp.net', fromMe: false, id: 'S' };
+    const n = normalizeInbound({ __baileys: true, baileysMsg: { key, pushName: 'И', message: { stickerMessage: { mimetype: 'image/webp' } } } });
+    assert.equal(n.message_type, 'sticker');
+    assert.equal(n.sticker_format, 'webp');
+    assert.equal(n.baileys_media_type, 'sticker');
+    assert.equal(n.is_supported, true);
+  });
+
+  test('IG video теперь ПОДДЕРЖИВАЕТСЯ (contentUri → video_source_url)', () => {
+    const n = normalizeInbound({ __wazzup: true, wazzupMsg: {
+      chatType: 'instagram', chatId: 'user1', messageId: 'm1', type: 'video',
+      contentUri: 'https://cdn/x.mp4', text: 'глянь',
+    } });
+    assert.equal(n.message_type, 'video');
+    assert.equal(n.video_source_url, 'https://cdn/x.mp4');
+    assert.equal(n.is_supported, true);
+    assert.equal(n.unsupported_canned_message, null);
+  });
+});

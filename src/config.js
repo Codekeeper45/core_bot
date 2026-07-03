@@ -42,6 +42,16 @@ module.exports = {
   STT_FALLBACK_MODEL: process.env.STT_FALLBACK_MODEL || 'google/chirp-3',
   VISION_MODEL: process.env.VISION_MODEL || 'google/gemini-3.1-flash-lite-preview',
   VISION_FALLBACK_MODEL: process.env.VISION_FALLBACK_MODEL || 'qwen/qwen3.5-flash-02-23',
+  // Видео (обычное, кружки, гифки) смотрит Gemini через OpenRouter (content type
+  // video_url, base64 data-URL — маршрутизируется в провайдера с поддержкой видео).
+  // Дополнительно к описанию Gemini речь из видео транскрибируется Whisper'ом
+  // (тот же STT-эндпоинт; mp4-контейнер Whisper понимает).
+  VIDEO_MODEL: process.env.VIDEO_MODEL || 'google/gemini-3.1-flash-lite-preview',
+  VIDEO_FALLBACK_MODEL: process.env.VIDEO_FALLBACK_MODEL || 'google/gemini-2.5-flash',
+  // Потолок размера видео для анализа, МБ. У Telegram Bot API скачивание всё
+  // равно ограничено 20 МБ — держим тот же предел для всех каналов.
+  VIDEO_MAX_MB: parseInt(process.env.VIDEO_MAX_MB || '20', 10),
+  DAILY_VIDEO_LIMIT: parseInt(process.env.DAILY_VIDEO_LIMIT || '10', 10),
 
   // Контакты, которые ВСЕГДА считаются боссом (chat_id / телефон), даже если есть
   // в реестре сотрудников. Список через запятую. Босс может писать и в TG, и в WA.

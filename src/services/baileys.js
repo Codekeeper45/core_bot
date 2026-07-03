@@ -194,6 +194,25 @@ class BaileysService extends EventEmitter {
     return true;
   }
 
+  // Видео. opts: { caption, gifPlayback (гифка), ptv (видеокружок) }.
+  async sendVideo(jid, buffer, opts = {}) {
+    if (!this.sock) throw new Error('[Baileys] Сокет не инициализирован');
+    await this.sock.sendMessage(jid, {
+      video: buffer,
+      caption: opts.caption || undefined,
+      gifPlayback: opts.gifPlayback || undefined,
+      ptv: opts.ptv || undefined,
+    });
+    return true;
+  }
+
+  // Стикер (webp-буфер).
+  async sendSticker(jid, buffer) {
+    if (!this.sock) throw new Error('[Baileys] Сокет не инициализирован');
+    await this.sock.sendMessage(jid, { sticker: buffer });
+    return true;
+  }
+
   async sendTyping(jid) {
     if (!this.sock) return;
     try {

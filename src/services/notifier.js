@@ -11,6 +11,10 @@ function describeMedia(media) {
   if (media.kind === 'image') return '[фото]';
   if (media.kind === 'document') return `[файл: ${media.fileName || 'документ'}]`;
   if (media.kind === 'voice') return '[голосовое]';
+  if (media.kind === 'video') return '[видео]';
+  if (media.kind === 'video_note') return '[видеокружок]';
+  if (media.kind === 'animation') return '[гифка]';
+  if (media.kind === 'sticker') return '[стикер]';
   return '[вложение]';
 }
 
@@ -36,6 +40,16 @@ async function deliver(channel, contact, text, media = null, opts = {}) {
       else if (media && media.kind === 'voice') {
         const textOk = text ? await tg.sendMessage(String(contact), text) : true;
         delivered = textOk && await tg.sendVoice(String(contact), media.buffer);
+      } else if (media && media.kind === 'video') {
+        delivered = await tg.sendVideo(String(contact), media.buffer, media.caption || text || '');
+      } else if (media && media.kind === 'video_note') {
+        const textOk = text ? await tg.sendMessage(String(contact), text) : true;
+        delivered = textOk && await tg.sendVideoNote(String(contact), media.buffer);
+      } else if (media && media.kind === 'animation') {
+        delivered = await tg.sendAnimation(String(contact), media.buffer, media.caption || text || '');
+      } else if (media && media.kind === 'sticker') {
+        const textOk = text ? await tg.sendMessage(String(contact), text) : true;
+        delivered = textOk && await tg.sendSticker(String(contact), media.buffer);
       } else if (media && media.kind === 'document') {
         const textOk = text ? await tg.sendMessage(String(contact), text) : true;
         delivered = textOk && await tg.sendDocument(String(contact), media.buffer, media.fileName);
@@ -47,6 +61,22 @@ async function deliver(channel, contact, text, media = null, opts = {}) {
       else if (media && media.kind === 'voice') {
         const textOk = text ? await wa.sendMessage(jid, text) : true;
         delivered = textOk && await wa.sendVoice(jid, media.buffer);
+      } else if (media && media.kind === 'video') {
+        delivered = await wa.sendVideo(jid, media.buffer, { caption: media.caption || text || '' });
+      } else if (media && media.kind === 'video_note') {
+        const textOk = text ? await wa.sendMessage(jid, text) : true;
+        delivered = textOk && await wa.sendVideo(jid, media.buffer, { ptv: true });
+      } else if (media && media.kind === 'animation') {
+        delivered = await wa.sendVideo(jid, media.buffer, { caption: media.caption || text || '', gifPlayback: true });
+      } else if (media && media.kind === 'sticker') {
+        const textOk = text ? await wa.sendMessage(jid, text) : true;
+        // Telegram-стикеры бывают webm/tgs — WhatsApp принимает только webp;
+        // несовместимый формат шлём документом, чтобы не потерять содержимое.
+        if (media.mimetype && media.mimetype !== 'image/webp') {
+          delivered = textOk && await wa.sendDocument(jid, media.buffer, media.fileName || 'sticker', media.mimetype);
+        } else {
+          delivered = textOk && await wa.sendSticker(jid, media.buffer);
+        }
       } else if (media && media.kind === 'document') {
         const textOk = text ? await wa.sendMessage(jid, text) : true;
         delivered = textOk && await wa.sendDocument(jid, media.buffer, media.fileName, media.mimetype);

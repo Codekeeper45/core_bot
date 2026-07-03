@@ -41,6 +41,24 @@ describe('downloadIncoming: диспетчеризация по каналу', (
     assert.equal(r.buffer.toString(), 'wa:image');
   });
 
+  test('whatsapp: видео-подобные типы → верный тип baileys (video/ptv/sticker)', async () => {
+    assert.equal((await downloadIncoming({ type: 'video', channel: 'whatsapp', baileys_media_obj: {} })).buffer.toString(), 'wa:video');
+    assert.equal((await downloadIncoming({ type: 'video_note', channel: 'whatsapp', baileys_media_obj: {} })).buffer.toString(), 'wa:ptv');
+    assert.equal((await downloadIncoming({ type: 'animation', channel: 'whatsapp', baileys_media_obj: {} })).buffer.toString(), 'wa:video');
+    assert.equal((await downloadIncoming({ type: 'sticker', channel: 'whatsapp', baileys_media_obj: {} })).buffer.toString(), 'wa:sticker');
+  });
+
+  test('whatsapp: baileys_media_type из дескриптора важнее маппинга', async () => {
+    const r = await downloadIncoming({ type: 'video', channel: 'whatsapp', baileys_media_obj: {}, baileys_media_type: 'document' });
+    assert.equal(r.buffer.toString(), 'wa:document');
+  });
+
+  test('дефолтные имена файлов для новых типов', async () => {
+    assert.equal((await downloadIncoming({ type: 'video', channel: 'whatsapp', baileys_media_obj: {} })).fileName, 'video.mp4');
+    assert.equal((await downloadIncoming({ type: 'animation', channel: 'whatsapp', baileys_media_obj: {} })).fileName, 'animation.mp4');
+    assert.equal((await downloadIncoming({ type: 'sticker', channel: 'whatsapp', baileys_media_obj: {} })).fileName, 'sticker.webp');
+  });
+
   test('instagram: source_url', async () => {
     const r = await downloadIncoming({ type: 'image', channel: 'instagram', source_url: 'https://x/y.jpg' });
     assert.equal(r.buffer.toString(), 'ig:https://x/y.jpg');

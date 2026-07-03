@@ -43,6 +43,7 @@ const { startTypingLoop, stopTypingLoop } = require('./middleware/typing');
 const { transcribeVoice } = require('./media/voice');
 const { analyzeImages, checkDailyImageLimit, incrementDailyImageCount } = require('./media/image');
 const { processDocument } = require('./media/document');
+const { processVideo, processSticker } = require('./media/video');
 
 const { runAgent, _internals: agentInternals } = require('./agent/agent');
 
@@ -276,6 +277,34 @@ async function processMessage(rawPayload) {
       source_url: n.document_source_url || null,
       baileys_media_obj: n.baileys_media_obj || null,
       file_name: n.document_file_name || 'файл', mime: n.document_mime_type || null,
+    };
+  } else if (message_type === 'video' || message_type === 'video_note' || message_type === 'animation') {
+    const videoResult = await processVideo(n);
+    if (videoResult.error) {
+      await sendReply(channel, chat_id, videoResult.error);
+      return;
+    }
+    messageContent = videoResult.text;
+    mediaDescriptor = {
+      type: message_type, channel,
+      file_id: n.video_file_id || null,
+      source_url: n.video_source_url || null,
+      baileys_media_obj: n.baileys_media_obj || null,
+      baileys_media_type: n.baileys_media_type || null,
+      file_name: message_type === 'animation' ? 'animation.mp4' : 'video.mp4',
+      mime: n.video_mime_type || 'video/mp4',
+    };
+  } else if (message_type === 'sticker') {
+    const stickerResult = await processSticker(n);
+    messageContent = stickerResult.text;
+    mediaDescriptor = {
+      type: 'sticker', channel,
+      file_id: n.video_file_id || null,
+      baileys_media_obj: n.baileys_media_obj || null,
+      baileys_media_type: n.baileys_media_type || null,
+      file_name: `sticker.${n.sticker_format || 'webp'}`,
+      mime: n.sticker_format === 'webm' ? 'video/webm' : 'image/webp',
+      sticker_format: n.sticker_format || 'webp',
     };
   }
 
