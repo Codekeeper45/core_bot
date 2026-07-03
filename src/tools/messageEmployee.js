@@ -1,6 +1,7 @@
 'use strict';
 const { findEmployees } = require('../services/mysql');
 const notifier = require('../services/notifier');
+const { senderSignature } = require('../services/senderIdentity');
 const { handleToolDbError } = require('../utils/toolError');
 
 // ─── Tool definition ─────────────────────────────────────────────────────────
@@ -13,7 +14,8 @@ const definition = {
       + 'рабочей задаче (для задач есть dispatch_task). Адресат указывается в to: id, имя или роль '
       + '(напр. «Директор», «кладовщик», «Мякота»). По умолчанию пишет ОДНОМУ (первому подходящему '
       + 'с контактом). Чтобы написать ВСЕМ по роли (напр. всем кладовщикам) — поставь to_all=true. '
-      + 'Доступно всем (и боссу, и сотруднику — иерархии нет).',
+      + 'Доступно всем (и боссу, и сотруднику — иерархии нет). Сообщение АВТОМАТИЧЕСКИ подписывается '
+      + '«От: имя (роль, контакт)» отправителя — самому добавлять подпись в message не нужно.',
     parameters: {
       type: 'object',
       properties: {
@@ -35,7 +37,7 @@ const definition = {
   },
 };
 
-async function handler(args) {
+async function handler(args, context = {}) {
   try {
     const to = String(args.to || '').trim();
     const message = String(args.message || '').trim();
@@ -53,10 +55,15 @@ async function handler(args) {
       };
     }
 
+    // Обязательная программная подпись: получатель всегда знает, от кого это,
+    // и подпись остаётся в записанной истории (контексте бота).
+    const sig = await senderSignature(context);
+    const signedMessage = `${sig.line}\n\n${message}`;
+
     const targets = args.to_all ? withContact : [withContact[0]];
     const sent_to = [];
     for (const emp of targets) {
-      const ok = await notifier.deliver(emp.channel || 'whatsapp', emp.contact, message, null, { record: true });
+      const ok = await notifier.deliver(emp.channel || 'whatsapp', emp.contact, signedMessage, null, { record: true });
       sent_to.push({ id: emp.id, name: emp.name, sent: ok });
     }
     const okCount = sent_to.filter((r) => r.sent).length;
@@ -66,6 +73,7 @@ async function handler(args) {
       count: okCount,
       total: targets.length,
       sent_to,
+      signed_as: sig.line,
       note: okCount === targets.length
         ? 'доставлено'
         : `доставлено ${okCount} из ${targets.length} (см. sent_to)`,

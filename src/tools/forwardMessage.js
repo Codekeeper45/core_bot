@@ -6,6 +6,7 @@
 const { findEmployees } = require('../services/mysql');
 const notifier = require('../services/notifier');
 const { downloadIncoming } = require('../media/incomingMedia');
+const { senderSignature } = require('../services/senderIdentity');
 const { handleToolDbError } = require('../utils/toolError');
 
 const definition = {
@@ -18,7 +19,8 @@ const definition = {
       + 'Доступно ВСЕМ (и боссу, и сотруднику). '
       + 'Используй, когда просят «передай это Ивану», «скинь файл бухгалтеру», «перешли фото на склад». '
       + 'Адресат to: id / имя / роль из штата. to_all=true — переслать всем по роли. message — '
-      + 'необязательный комментарий к пересылке. Пересылается ровно то, что пришло сейчас; '
+      + 'необязательный комментарий к пересылке. Пересылка АВТОМАТИЧЕСКИ подписывается «От: имя (роль, '
+      + 'контакт)» отправителя — самому это в message не писать. Пересылается ровно то, что пришло сейчас; '
       + 'в Instagram вложения уходят текстом (ограничение канала). Получатель — только из штата.',
     parameters: {
       type: 'object',
@@ -49,6 +51,12 @@ async function handler(args, context = {}) {
       return { success: false, message: 'Нечего пересылать — во входящем сообщении нет вложений, и текст не задан.' };
     }
 
+    // Обязательная программная подпись отправителя: уходит ПЕРВОЙ строкой всегда —
+    // и при тексте, и при пересылке «только медиа» (получатель знает, от кого это;
+    // record:true кладёт подпись и в историю — контекст бота).
+    const sig = await senderSignature(context);
+    const signedText = text ? `${sig.line}\n\n${text}` : sig.line;
+
     // Предзагрузка медиа ОДИН раз (для to_all не качаем по разу на каждого).
     const loaded = [];
     const failed_media = [];
@@ -67,7 +75,7 @@ async function handler(args, context = {}) {
     for (const r of targets) {
       const ch = r.channel || 'whatsapp';
       let okAny = false;
-      if (text) okAny = (await notifier.deliver(ch, r.contact, text, null, { record: true })) || okAny;
+      okAny = (await notifier.deliver(ch, r.contact, signedText, null, { record: true })) || okAny;
       for (const m of loaded) {
         const ok = await notifier.deliver(ch, r.contact, '', {
           kind: m.type, buffer: m.buffer, caption: '', fileName: m.fileName, mimetype: m.mimetype,
@@ -97,6 +105,7 @@ async function handler(args, context = {}) {
       count: okCount,
       total: targets.length,
       sent_to,
+      signed_as: sig.line,
       failed_media: failed_media.length ? failed_media : undefined,
       note: notes.length ? notes.join('; ') : 'переслано',
     };

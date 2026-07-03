@@ -12,6 +12,7 @@ const notifierMock = {
     return true;
   },
 };
+const senderIdentityMock = { senderSignature: async () => ({ line: '📨 От: Босс (руководитель, WhatsApp +77070000000)', name: 'Босс' }) };
 const incomingMock = {
   downloadIncoming: async (desc) => {
     if (desc.type === 'document' && desc.__fail) throw new Error('download failed');
@@ -25,6 +26,7 @@ Module.prototype.require = function (id) {
   if (id === '../services/mysql') return mysqlMock;
   if (id === '../services/notifier') return notifierMock;
   if (id === '../media/incomingMedia') return incomingMock;
+  if (id === '../services/senderIdentity') return senderIdentityMock;
   return orig.apply(this, arguments);
 };
 delete require.cache[require.resolve('../../src/tools/forwardMessage')];
@@ -47,9 +49,13 @@ describe('forward_message', () => {
     assert.equal(r.success, true);
     assert.equal(r.forwarded.images, 1);
     assert.equal(r.forwarded.documents, 1);
-    assert.equal(delivered.length, 2);
-    assert.deepEqual(delivered.map((d) => d.kind).sort(), ['document', 'image']);
+    // Первым всегда уходит подпись «От: …» (даже без комментария), затем вложения.
+    assert.equal(delivered.length, 3);
+    assert.match(delivered[0].text, /^📨 От: Босс/);
+    assert.ok(!delivered[0].kind);
+    assert.deepEqual(delivered.slice(1).map((d) => d.kind).sort(), ['document', 'image']);
     assert.equal(delivered.every((d) => d.contact === '77071112233'), true);
+    assert.match(r.signed_as, /От: Босс/);
   });
 
   test('с комментарием: сначала текст, потом вложение', async () => {
@@ -58,7 +64,8 @@ describe('forward_message', () => {
     const r = await handler({ to: 'Иван', message: 'смотри смету' }, { incomingMedia: [doc] });
     assert.equal(r.success, true);
     assert.equal(delivered.length, 2);
-    assert.equal(delivered[0].text, 'смотри смету'); // текст первым
+    // Текст первым и с подписью отправителя первой строкой.
+    assert.equal(delivered[0].text, '📨 От: Босс (руководитель, WhatsApp +77070000000)\n\nсмотри смету');
     assert.ok(!delivered[0].kind); // текстовое — без media
     assert.equal(delivered[1].kind, 'document');
   });
@@ -89,7 +96,7 @@ describe('forward_message', () => {
     const r = await handler({ to: 'кладовщик', to_all: true }, { incomingMedia: [img] });
     assert.equal(r.success, true);
     assert.equal(r.total, 2); // только с контактом
-    assert.equal(delivered.length, 2);
+    assert.equal(delivered.length, 4); // каждому: подпись + вложение
   });
 
   test('ошибка скачивания одного вложения не валит остальное', async () => {
@@ -97,8 +104,8 @@ describe('forward_message', () => {
     delivered.length = 0;
     const r = await handler({ to: 'Иван' }, { incomingMedia: [img, { ...doc, __fail: true }] });
     assert.equal(r.success, true); // фото ушло
-    assert.equal(delivered.length, 1);
-    assert.equal(delivered[0].kind, 'image');
+    assert.equal(delivered.length, 2); // подпись + фото
+    assert.equal(delivered[1].kind, 'image');
     assert.ok(Array.isArray(r.failed_media) && r.failed_media.length === 1);
     assert.match(r.note, /не удалось скачать/);
   });
@@ -109,6 +116,6 @@ describe('forward_message', () => {
     const r = await handler({ to: 'Иван', message: 'привет' }, { incomingMedia: [] });
     assert.equal(r.success, true);
     assert.equal(delivered.length, 1);
-    assert.equal(delivered[0].text, 'привет');
+    assert.equal(delivered[0].text, '📨 От: Босс (руководитель, WhatsApp +77070000000)\n\nпривет');
   });
 });
