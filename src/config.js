@@ -123,6 +123,15 @@ module.exports = {
   DAILY_IMAGE_LIMIT: 10,
   DAILY_DOC_LIMIT: 10,
   DOCUMENT_CHAR_LIMIT: 20000,
+  // Файловая память: полный текст документа кладём в буфер (docStash) целиком до
+  // DOC_KB_CHAR_LIMIT — чтобы в базу знаний влезали крупные таблицы/прайсы, а не
+  // только 20k. В контекст LLM при этом отдаём лишь превью первых
+  // DOC_INLINE_PREVIEW_CHARS символов (полный текст остаётся в буфере для save).
+  DOC_KB_CHAR_LIMIT: parseInt(process.env.DOC_KB_CHAR_LIMIT || String(2 * 1000 * 1000), 10),
+  DOC_INLINE_PREVIEW_CHARS: parseInt(process.env.DOC_INLINE_PREVIEW_CHARS || '8000', 10),
+  // Логистика: вес пустого поддона (кг) — добавляется к весу товара при подборе
+  // машины (в файлах «Вес одной палеты» = 25 кг).
+  PALLET_TARE_KG: 25,
   // Стэш распарсенных документов (docStash): последние N файлов на чат, TTL —
   // сколько текст живёт в памяти, чтобы manage_files action=save мог сохранить
   // файл в базу знаний без повторной пересылки текста через LLM.

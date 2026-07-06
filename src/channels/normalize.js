@@ -10,9 +10,13 @@ function getDocumentFamily(mimeType = '', fileName = '') {
   const ext = (fileName.split('.').pop() || '').toLowerCase();
   if (mt === 'application/pdf' || ext === 'pdf') return 'pdf';
   if (mt.includes('word') || mt.includes('officedocument.wordprocessing') || ['doc', 'docx'].includes(ext)) return 'doc';
-  if (mt === 'text/plain' || ['txt', 'csv', 'tsv'].includes(ext)) return 'text';
-  if (mt === 'text/csv' || mt === 'text/tab-separated-values') return 'text';
-  if (mt.includes('spreadsheet') || mt.includes('excel') || ['xls', 'xlsx'].includes(ext)) return 'spreadsheet';
+  // Табличные форматы (xlsx читаются библиотекой xlsx как есть; ODS — тоже).
+  if (mt.includes('opendocument.spreadsheet') || mt.includes('spreadsheet') || mt.includes('excel')
+    || ['xls', 'xlsx', 'ods', 'ots'].includes(ext)) return 'spreadsheet';
+  // Текстовые/структурные форматы — читаем как utf-8, годятся для базы знаний.
+  if (mt === 'text/plain' || mt === 'text/csv' || mt === 'text/tab-separated-values'
+    || mt.includes('json') || mt.includes('xml') || mt.includes('yaml') || mt.includes('markdown') || mt.includes('html')
+    || ['txt', 'csv', 'tsv', 'md', 'markdown', 'json', 'xml', 'yaml', 'yml', 'log', 'ini', 'html', 'htm'].includes(ext)) return 'text';
   if (mt.includes('presentation') || mt.includes('powerpoint') || ['ppt', 'pptx'].includes(ext)) return 'presentation';
   return 'unsupported';
 }
@@ -378,4 +382,4 @@ function normalizeInbound(raw) {
   return n;
 }
 
-module.exports = { normalizeInbound };
+module.exports = { normalizeInbound, getDocumentFamily };

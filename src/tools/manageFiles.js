@@ -13,17 +13,21 @@ const definition = {
   function: {
     name: 'manage_files',
     description:
-      'База знаний по файлам: сохранять присланные документы (pdf/docx/txt/xlsx) в векторное хранилище '
-      + 'и управлять ими. save — сохранить присланный файл: текст УЖЕ у инструмента, передай только имя '
-      + 'из [ИЗ ДОКУМЕНТА: …] (или "last" = последний присланный). Нарезку выбирай САМ по структуре: '
-      + 'связный текст → split=paragraph, chunk_size~1500; документ с разделами или листами [Лист: …] → '
-      + 'heading; таблицы/прайсы → fixed, chunk_size~2000. visibility: public (все, по умолчанию) / '
-      + 'private (владелец + руководитель). list — список файлов; delete / set_visibility / rename — '
-      + 'только владелец файла или руководитель. Поиск ПО СОДЕРЖИМОМУ — инструмент search_files.',
+      'База знаний по файлам: сохранять присланные документы, таблицы и текст в векторное хранилище '
+      + 'и управлять ими. Принимает любые pdf/docx/txt/csv/xlsx/ods/md/json/xml/yaml — в т.ч. крупные '
+      + 'таблицы и прайсы (полный текст берётся из буфера, даже если в чате показан лишь фрагмент). '
+      + 'save — сохранить присланный файл: текст УЖЕ у инструмента, передай только имя из '
+      + '[ИЗ ДОКУМЕНТА: …] (или "last" = последний присланный); повтор save с тем же именем ОБНОВЛЯЕТ файл. '
+      + 'Нарезку выбирай САМ по структуре: связный текст → split=paragraph, chunk_size~1500; документ '
+      + 'с разделами или листами [Лист: …] → heading; таблицы/прайсы/CSV → fixed, chunk_size~2000. '
+      + 'visibility: public (все, по умолчанию) / private (владелец + руководитель). list — список файлов; '
+      + 'delete / set_visibility / rename — только владелец файла или руководитель; clear — удалить ВСЕ '
+      + 'СВОИ файлы из базы (сначала вернёт confirm_required с числом — подтверди у человека, потом '
+      + 'повтори с confirm=true). Поиск ПО СОДЕРЖИМОМУ — инструмент search_files.',
     parameters: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['save', 'list', 'delete', 'set_visibility', 'rename'] },
+        action: { type: 'string', enum: ['save', 'list', 'delete', 'set_visibility', 'rename', 'clear'] },
         file_name: { type: 'string', description: 'Имя файла. Для save — из [ИЗ ДОКУМЕНТА: …] или "last" (по умолчанию — последний присланный).' },
         file_id: { type: 'integer', description: 'id файла из list (альтернатива file_name для delete/set_visibility/rename).' },
         text: { type: 'string', description: 'ТОЛЬКО если save вернул not_in_stash (бот перезапускался): передай содержимое файла явно.' },
@@ -33,6 +37,7 @@ const definition = {
         visibility: { type: 'string', enum: ['public', 'private'], description: 'Видимость файла (по умолчанию public).' },
         description: { type: 'string', description: 'Короткое описание файла — что внутри (для list, опционально).' },
         new_name: { type: 'string', description: 'Новое имя файла (для rename).' },
+        confirm: { type: 'boolean', description: 'Для clear: true = подтверждаю удаление всех своих файлов (без него вернётся confirm_required).' },
       },
       required: ['action'],
     },
@@ -118,6 +123,25 @@ async function handler(args, context = {}) {
         })),
         note: rows.length ? 'Поиск по содержимому — search_files.' : 'База знаний пуста — сохрани присланный файл через save.',
       };
+    }
+
+    if (action === 'clear') {
+      // Массовая очистка — только СВОИ файлы. Двухшаговое подтверждение.
+      const viewer = { channel: context.channel, chatId: context.chatId, isBoss: context.role === 'boss' };
+      const own = (await mysql.listFiles({ viewer }))
+        .filter((f) => f.channel === context.channel && String(f.chat_id) === String(context.chatId));
+      if (!own.length) return { success: true, action, deleted: 0, note: 'В твоей базе нет файлов — очищать нечего.' };
+      if (args.confirm !== true) {
+        return {
+          success: false,
+          reason: 'confirm_required',
+          count: own.length,
+          files: own.map((f) => f.file_name),
+          message: `Удалить все свои файлы из базы знаний (${own.length} шт.)? Это необратимо — подтверди у человека, затем повтори с confirm=true.`,
+        };
+      }
+      const r = await mysql.clearFiles({ channel: context.channel, chatId: context.chatId });
+      return { success: true, action, deleted: r.deleted, note: `Удалено файлов из твоей базы знаний: ${r.deleted}.` };
     }
 
     if (action === 'delete' || action === 'set_visibility' || action === 'rename') {

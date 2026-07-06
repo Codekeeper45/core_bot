@@ -48,6 +48,13 @@ const mysqlMock = {
     f.file_name = name;
     return true;
   },
+  clearFiles: async ({ channel, chatId }) => {
+    const before = files.length;
+    for (let i = files.length - 1; i >= 0; i--) {
+      if (files[i].channel === channel && String(files[i].chat_id) === String(chatId)) files.splice(i, 1);
+    }
+    return { deleted: before - files.length };
+  },
 };
 
 const orig = Module.prototype.require;
@@ -144,5 +151,29 @@ describe('manage_files', () => {
     const r = await handler({ action: 'rename', file_id: 1, new_name: 'прайс-2025.xlsx' }, OWNER);
     assert.equal(r.success, true);
     assert.equal(files.find((f) => f.id === 1).file_name, 'прайс-2025.xlsx');
+  });
+
+  test('clear без confirm → confirm_required с числом своих файлов', async () => {
+    const r = await handler({ action: 'clear' }, OWNER);
+    assert.equal(r.success, false);
+    assert.equal(r.reason, 'confirm_required');
+    assert.equal(r.count, 2);
+    assert.equal(files.length, 2, 'ничего не удалено до подтверждения');
+  });
+
+  test('clear c confirm=true удаляет только свои файлы', async () => {
+    files.push({ id: 3, channel: 'whatsapp', chat_id: '222', file_name: 'чужой.txt', visibility: 'public', owner_name: 'Берик', chunk_count: 1, char_count: 5, description: null, created_at: 'x' });
+    const r = await handler({ action: 'clear', confirm: true }, OWNER);
+    assert.equal(r.success, true);
+    assert.equal(r.deleted, 2);
+    // Остался только чужой файл (chat_id 222).
+    assert.deepEqual(files.map((f) => f.id), [3]);
+  });
+
+  test('clear при пустой базе → deleted 0 без подтверждения', async () => {
+    files.length = 0;
+    const r = await handler({ action: 'clear' }, OWNER);
+    assert.equal(r.success, true);
+    assert.equal(r.deleted, 0);
   });
 });

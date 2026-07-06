@@ -5,8 +5,8 @@ const config = require('../config');
 
 const FALLBACK_MESSAGES = {
   doc_daily_limit: 'Сегодня можно отправить не больше 10 документов. Попробуйте продолжить завтра.',
-  doc_char_limit: 'Документ слишком большой для обработки. Максимум — 20000 символов текста в одном файле.',
-  doc_unsupported: 'Этот формат файла пока не поддерживается. Можно отправить PDF, DOC/DOCX или TXT.',
+  doc_char_limit: 'Документ слишком большой даже для базы знаний. Пришлите его частями.',
+  doc_unsupported: 'Этот формат файла пока не поддерживается. Можно отправить PDF, DOC/DOCX, TXT/CSV, XLSX/ODS-таблицы, а также MD/JSON/XML/YAML.',
   doc_parse_failed: (name) => `Не удалось обработать файл ${name}. Попробуйте отправить его ещё раз или в PDF.`,
 };
 
@@ -105,18 +105,33 @@ async function processDocument(normalized) {
     return { error: FALLBACK_MESSAGES.doc_parse_failed(document_file_name) };
   }
 
-  if (parsedText.length > config.DOCUMENT_CHAR_LIMIT) {
-    return { error: FALLBACK_MESSAGES.doc_char_limit };
-  }
+  // Полный текст держим в буфере (в пределах DOC_KB_CHAR_LIMIT) — чтобы в базу
+  // знаний влезали крупные таблицы/прайсы целиком, а не только первые 20k.
+  const fullText = parsedText.length > config.DOC_KB_CHAR_LIMIT
+    ? parsedText.slice(0, config.DOC_KB_CHAR_LIMIT)
+    : parsedText;
+  const stashTruncated = parsedText.length > config.DOC_KB_CHAR_LIMIT;
 
-  // Кладём текст в стэш: инструмент manage_files (база знаний) сможет сохранить
-  // этот файл в векторное хранилище, не гоняя текст через аргументы LLM.
+  // Кладём ПОЛНЫЙ текст в стэш: инструмент manage_files (база знаний) сохранит
+  // файл в векторное хранилище, не гоняя текст через аргументы LLM.
   try {
-    require('../services/docStash').put(channel, chat_id, { fileName: document_file_name, text: parsedText });
+    require('../services/docStash').put(channel, chat_id, { fileName: document_file_name, text: fullText });
   } catch (err) { console.error('[Doc] docStash:', err.message); }
 
+  // В контекст модели отдаём только превью: сырой CSV/большой документ не должен
+  // раздувать окно. Полный текст остаётся в буфере для сохранения.
+  const preview = fullText.length > config.DOC_INLINE_PREVIEW_CHARS
+    ? fullText.slice(0, config.DOC_INLINE_PREVIEW_CHARS)
+    : fullText;
+  const shortened = preview.length < fullText.length;
+  const lineCount = (fullText.match(/\n/g) || []).length + 1;
   const caption = message || '';
-  const result = `[ИЗ ДОКУМЕНТА: ${document_file_name}]\n\ncaption: ${caption || 'нет'}\n\n${parsedText}`;
+
+  const header = `[ИЗ ДОКУМЕНТА: ${document_file_name}] (${fullText.length} симв., ~${lineCount} строк`
+    + `${stashTruncated ? '; файл огромный — в буфер взят фрагмент' : ''}; `
+    + `полный текст в буфере — чтобы сохранить в базу знаний, вызови manage_files save)`;
+  const footer = shortened ? '\n\n…(показан фрагмент; полный текст доступен для сохранения в базу знаний)' : '';
+  const result = `${header}\n\ncaption: ${caption || 'нет'}\n\n${preview}${footer}`;
   return { text: result };
 }
 

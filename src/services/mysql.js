@@ -439,6 +439,49 @@ async function initTables() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
+  // Логистика/паллетировка — ОТДЕЛЬНАЯ справочная база (вес, объём, кол-во на
+  // паллете), не связана с прайсами. Грузится полным рефрешем из 3 файлов
+  // (см. services/logistics.js + scripts/importLogistics.js). Строки тегируются
+  // источником (source); дубли артикула из разных файлов сохраняются намеренно,
+  // дедуп по приоритету источника — при чтении (logisticsGetByArticle).
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS orch_logistics_items (
+      id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+      source        VARCHAR(32)   NOT NULL,
+      article       VARCHAR(64)   NOT NULL,
+      article_norm  VARCHAR(64)   NOT NULL,
+      name          TEXT          NOT NULL,
+      series        VARCHAR(128)  NULL,
+      load_class    VARCHAR(64)   NULL,
+      dn            VARCHAR(32)   NULL,
+      length_mm     DECIMAL(12,3) NULL,
+      width_mm      DECIMAL(12,3) NULL,
+      height_mm     DECIMAL(12,3) NULL,
+      volume_m3     DECIMAL(12,5) NULL,
+      weight_kg     DECIMAL(12,3) NULL,
+      qty_per_pallet INT          NULL,
+      pallet_weight_kg DECIMAL(12,3) NULL,
+      note          TEXT          NULL,
+      norm_key      VARCHAR(255)  NOT NULL,
+      created_at    TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_logi_article (article_norm),
+      INDEX idx_logi_norm (norm_key)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  // Справочник машин для подбора транспорта под заказ (лист «РАЗМЕЩЕНИЕ ПАЛЕТ»).
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS orch_trucks (
+      id             BIGINT AUTO_INCREMENT PRIMARY KEY,
+      name           VARCHAR(128) NOT NULL,
+      payload_t      DECIMAL(8,2) NULL,
+      volume_m3      DECIMAL(8,2) NULL,
+      inner_length_m DECIMAL(6,2) NULL,
+      inner_width_m  DECIMAL(6,2) NULL,
+      inner_height_m DECIMAL(6,2) NULL,
+      pallet_places  INT          NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
   // Технические события и ручная обратная связь. Запись создаётся до попытки
   // доставки разработчику, поэтому сбой WhatsApp не теряет сообщение.
   await dbQuery(`
@@ -732,6 +775,8 @@ async function verifyCriticalSchema() {
     'SELECT privacy FROM bot_chat_privacy LIMIT 0',
     'SELECT visibility, chunk_count FROM bot_files LIMIT 0',
     'SELECT embedding, dims FROM bot_file_chunks LIMIT 0',
+    'SELECT source, article_norm, qty_per_pallet, volume_m3 FROM orch_logistics_items LIMIT 0',
+    'SELECT payload_t, pallet_places FROM orch_trucks LIMIT 0',
   ];
   for (const sql of probes) {
     try {
@@ -2182,6 +2227,21 @@ async function deleteFile(id) {
   } catch (err) { throw dbError(err, 'deleteFile'); }
 }
 
+// Массовая очистка — ТОЛЬКО свои файлы (owner-scope, без scope=all).
+async function clearFiles({ channel, chatId } = {}) {
+  try {
+    return await withTransaction(async (q) => {
+      const own = await q('SELECT id FROM bot_files WHERE channel = ? AND chat_id = ?', [channel, String(chatId)]);
+      if (!own.length) return { deleted: 0 };
+      const ids = own.map((r) => r.id);
+      const placeholders = ids.map(() => '?').join(',');
+      await q(`DELETE FROM bot_file_chunks WHERE file_id IN (${placeholders})`, ids);
+      const res = await q(`DELETE FROM bot_files WHERE id IN (${placeholders})`, ids);
+      return { deleted: res.affectedRows || ids.length };
+    });
+  } catch (err) { throw dbError(err, 'clearFiles'); }
+}
+
 async function setFileVisibility(id, visibility) {
   const value = visibility === 'private' ? 'private' : 'public';
   try {
@@ -2494,6 +2554,121 @@ async function priceSearch(query, limit = 20, supplier = null) {
       params
     );
   } catch (err) { throw dbError(err, 'priceSearch'); }
+}
+
+// ── Логистика/паллетировка: отдельная справочная база ───────────────────────
+// Полный рефреш: импорт чистит обе таблицы и перезаливает из файлов. Дедуп по
+// приоритету источника (palletirovka — самый полный) делается при чтении.
+
+const LOGI_SOURCE_PRIORITY = ['palletirovka', 'raspal_tde', 'raspal_beton', 'raspal_yartsevo', 'ves_plastik'];
+
+// Разбивает массив на чанки для bulk-INSERT (conn.execute не поддерживает `VALUES ?`).
+function chunk(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+async function importLogistics(items, trucks) {
+  const { normKey } = require('../utils/stockKey');
+  return withTransaction(async (q) => {
+    await q('DELETE FROM orch_logistics_items');
+    await q('DELETE FROM orch_trucks');
+
+    const itemCols = 16; // число плейсхолдеров на строку ниже
+    for (const batch of chunk(items, 200)) {
+      const placeholders = batch.map(() => `(${Array(itemCols).fill('?').join(',')})`).join(',');
+      const params = [];
+      for (const it of batch) {
+        const normedKey = it.norm_key
+          || normKey([it.article, it.name, it.series, it.dn, it.load_class].filter(Boolean).join(' '));
+        params.push(
+          it.source, it.article, normalizeSku(it.article), it.name,
+          it.series ?? null, it.load_class ?? null, it.dn ?? null,
+          it.length_mm ?? null, it.width_mm ?? null, it.height_mm ?? null,
+          it.volume_m3 ?? null, it.weight_kg ?? null, it.qty_per_pallet ?? null,
+          it.pallet_weight_kg ?? null, it.note ?? null, normedKey
+        );
+      }
+      await q(
+        `INSERT INTO orch_logistics_items
+         (source, article, article_norm, name, series, load_class, dn,
+          length_mm, width_mm, height_mm, volume_m3, weight_kg, qty_per_pallet,
+          pallet_weight_kg, note, norm_key)
+         VALUES ${placeholders}`,
+        params
+      );
+    }
+
+    const truckCols = 7;
+    for (const batch of chunk(trucks, 200)) {
+      const placeholders = batch.map(() => `(${Array(truckCols).fill('?').join(',')})`).join(',');
+      const params = [];
+      for (const t of batch) {
+        params.push(
+          t.name, t.payload_t ?? null, t.volume_m3 ?? null,
+          t.inner_length_m ?? null, t.inner_width_m ?? null, t.inner_height_m ?? null,
+          t.pallet_places ?? null
+        );
+      }
+      await q(
+        `INSERT INTO orch_trucks
+         (name, payload_t, volume_m3, inner_length_m, inner_width_m, inner_height_m, pallet_places)
+         VALUES ${placeholders}`,
+        params
+      );
+    }
+
+    return { items_count: items.length, trucks_count: trucks.length };
+  });
+}
+
+// Все строки одного артикула, самый полный источник — первым.
+async function logisticsGetByArticle(article) {
+  const normalized = normalizeSku(article);
+  try {
+    return await dbQuery(
+      `SELECT * FROM orch_logistics_items
+        WHERE article_norm = ? OR UPPER(article) = UPPER(?)
+        ORDER BY FIELD(source, ${LOGI_SOURCE_PRIORITY.map(() => '?').join(',')})`,
+      [normalized, String(article || '').trim(), ...LOGI_SOURCE_PRIORITY]
+    );
+  } catch (err) { throw dbError(err, 'logisticsGetByArticle'); }
+}
+
+// Поиск по названию/DN/классу: AND по токенам запроса (как priceSearch).
+async function logisticsSearch(query, limit = 6) {
+  const { normKey } = require('../utils/stockKey');
+  const artNorm = normalizeSku(query);
+  const tokens = normKey(query).split(' ').filter(Boolean).slice(0, 8);
+  const where = [];
+  const params = [];
+  if (tokens.length) {
+    const tokenWhere = [];
+    for (const token of tokens) { tokenWhere.push('norm_key LIKE ?'); params.push(`%${token}%`); }
+    where.push(`(article_norm = ? OR (${tokenWhere.join(' AND ')}))`);
+    params.splice(params.length - tokenWhere.length, 0, artNorm);
+  } else {
+    where.push('article_norm = ?');
+    params.push(artNorm);
+  }
+  // Приоритет источника: подставляем список в FIELD() перед LIMIT.
+  const priorityParams = [...LOGI_SOURCE_PRIORITY];
+  const sql =
+    `SELECT * FROM orch_logistics_items
+      WHERE ${where.join(' AND ')}
+      ORDER BY FIELD(source, ${LOGI_SOURCE_PRIORITY.map(() => '?').join(',')}), article ASC
+      LIMIT ?`;
+  const limitParam = Math.max(1, Math.min(Number(limit) || 6, 50));
+  try {
+    return await dbQuery(sql, [...params, ...priorityParams, limitParam]);
+  } catch (err) { throw dbError(err, 'logisticsSearch'); }
+}
+
+async function listTrucks() {
+  try {
+    return await dbQuery('SELECT * FROM orch_trucks ORDER BY payload_t ASC, volume_m3 ASC');
+  } catch (err) { throw dbError(err, 'listTrucks'); }
 }
 
 // ── Прайс: ручные правки активного каталога ─────────────────────────────────
@@ -2913,7 +3088,7 @@ module.exports = {
   setQuiet, clearQuiet, getQuiet, listActiveQuiet,
   setChatPrivacy, getChatPrivacy,
   // База знаний по файлам
-  replaceFile, listFiles, findFile, deleteFile, setFileVisibility, renameFile,
+  replaceFile, listFiles, findFile, deleteFile, clearFiles, setFileVisibility, renameFile,
   loadFileChunkVectors, fileKeywordSearch,
   // Оркестратор: задачи
   createTasksBulk, getTask, listTasksForProject, assignTask, markDispatched, updateTaskStatus,
@@ -2924,6 +3099,8 @@ module.exports = {
   // Прайс
   importPriceCatalog, priceGetBySku, priceSearch,
   priceSetPrice, priceSetDiscountPrice, priceAddItem, priceRemove, priceRename, priceListChanges,
+  // Логистика/паллетировка (отдельная справочная база)
+  importLogistics, logisticsGetByArticle, logisticsSearch, listTrucks,
   // Склад: остатки
   stockSearch, stockList, stockGetById, stockGetByKey, stockUpsertSet, stockAdjust,
   listStockAlerts,

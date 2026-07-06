@@ -6,7 +6,7 @@ process.env.EXCLUDED_CHAT_ID = '77073230970@s.whatsapp.net';
 
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
-const { normalizeInbound } = require('../src/channels/normalize');
+const { normalizeInbound, getDocumentFamily } = require('../src/channels/normalize');
 
 // ─── Baileys WhatsApp fixtures ───
 const WA_TEXT = {
@@ -301,5 +301,24 @@ describe('normalizeInbound — видео-подобные типы', () => {
     assert.equal(n.video_source_url, 'https://cdn/x.mp4');
     assert.equal(n.is_supported, true);
     assert.equal(n.unsupported_canned_message, null);
+  });
+});
+
+describe('getDocumentFamily — форматы для базы знаний', () => {
+  test('таблицы: xlsx/ods/xls → spreadsheet', () => {
+    assert.equal(getDocumentFamily('', 'прайс.xlsx'), 'spreadsheet');
+    assert.equal(getDocumentFamily('', 'Паллетировка.ods'), 'spreadsheet');
+    assert.equal(getDocumentFamily('application/vnd.oasis.opendocument.spreadsheet', 'x'), 'spreadsheet');
+  });
+  test('текст/структура: txt/csv/md/json/xml/yaml → text', () => {
+    for (const name of ['a.txt', 'b.csv', 'c.md', 'd.json', 'e.xml', 'f.yaml', 'g.yml', 'h.log']) {
+      assert.equal(getDocumentFamily('', name), 'text', name);
+    }
+  });
+  test('без регресса: pdf/docx/pptx/картинка', () => {
+    assert.equal(getDocumentFamily('', 'r.pdf'), 'pdf');
+    assert.equal(getDocumentFamily('', 'r.docx'), 'doc');
+    assert.equal(getDocumentFamily('', 'r.pptx'), 'presentation');
+    assert.equal(getDocumentFamily('', 'r.png'), 'unsupported');
   });
 });
