@@ -2059,6 +2059,44 @@ async function archiveByDateRange({ channel, chatId, scope = 'chat', fromUtc, to
   } catch (err) { throw dbError(err, 'archiveByDateRange'); }
 }
 
+// Переписка КОНКРЕТНОГО человека с ботом (инструмент read_person). person =
+// {channel, contact, name} из orch_employees. Матч по его чату: chat_id совпадает с
+// контактом/цифрами/JID (WA), либо actor_name = имя (фолбэк для WA-LID-раздвоения).
+// Возвращаем весь диалог чата (реплики человека + ответы бота) хронологически.
+// viewer — та же граница приватности, что и в recall: не-босс не увидит человека,
+// если тот пометил свой чат приватным (privacyExclusion). fromUtc/toUtc/tokens — опц.
+async function archiveByPerson({ person, fromUtc = null, toUtc = null, tokens = [], limit = 100, viewer = null } = {}) {
+  if (!person || !person.channel) return [];
+  const fmt = (d) => (d instanceof Date ? d.toISOString().slice(0, 19).replace('T', ' ') : d);
+  const contact = String(person.contact || '');
+  const digits = contact.replace(/\D/g, '');
+  const where = ['a.channel = ?'];
+  const params = [String(person.channel)];
+  // Идентификация чата человека (устойчиво к каналам и WA-LID).
+  const ors = [];
+  if (contact) { ors.push('a.chat_id = ?'); params.push(contact); }
+  if (digits && digits !== contact) { ors.push('a.chat_id = ?'); params.push(digits); }
+  if (digits) { ors.push('a.chat_id LIKE ?'); params.push(`${digits}@%`); }
+  if (person.name) { ors.push('a.actor_name = ?'); params.push(String(person.name)); }
+  if (!ors.length) return []; // нечем идентифицировать
+  where.push(`(${ors.join(' OR ')})`);
+  if (fromUtc) { where.push('a.created_at >= ?'); params.push(fmt(fromUtc)); }
+  if (toUtc) { where.push('a.created_at <= ?'); params.push(fmt(toUtc)); }
+  for (const t of (tokens || [])) { where.push('a.content LIKE ?'); params.push(`%${t}%`); }
+  const privacy = privacyExclusion('a', viewer); // всегда: читаем чужой чат
+  params.push(...privacy.params);
+  params.push(Math.max(1, Math.min(Number(limit) || 100, 500)));
+  try {
+    return await dbQuery(
+      `SELECT a.id, a.channel, a.chat_id, a.role, a.actor_name, a.content, a.created_at
+         FROM bot_message_archive a
+        WHERE ${where.join(' AND ')}${privacy.sql}
+        ORDER BY a.created_at ASC, a.id ASC LIMIT ?`,
+      params
+    );
+  } catch (err) { throw dbError(err, 'archiveByPerson'); }
+}
+
 // ── Семантический индекс архива (bot_archive_chunks) ─────────────────────────
 // Чаты, где накопилось ≥ chunkSize ещё не заэмбедженных сообщений (есть бэклог).
 async function listChatsWithBacklog(chunkSize = 10, limit = 50) {
@@ -3066,7 +3104,7 @@ module.exports = {
   getPool, dbQuery, withTransaction, initTables, _mergeHistory,
   loadHistory, saveHistory, clearHistory,
   // Долгая память: архив переписки + журнал действий + recall
-  archiveMessage, logBotEvent, recallSearch, archiveByDateRange,
+  archiveMessage, logBotEvent, recallSearch, archiveByDateRange, archiveByPerson,
   // Семантический индекс архива (RAG)
   listChatsWithBacklog, archiveMessagesAfter, insertArchiveChunk, loadChunkVectors,
   checkDailyCount, incrementDailyCount,

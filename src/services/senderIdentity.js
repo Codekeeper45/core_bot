@@ -1,9 +1,10 @@
 'use strict';
 // Подпись отправителя для исходящих «от имени человека» (message_employee,
-// forward_message): получатель ВСЕГДА видит, от какого контакта и имени по
-// реестру пришло сообщение, а подпись попадает в записанную историю (record:true)
-// — то есть и в контекст бота. Имя берём из реестра сотрудников (по контакту),
-// роль «руководитель» — из BOSS_CONTACTS; фолбэк — имя из мессенджера.
+// forward_message): получатель видит, ОТ КОГО пришло — краткой подписью «имя
+// (роль)», без номера телефона и канала, чтобы не мешать. Подпись попадает и в
+// записанную историю (record:true) — то есть в контекст бота. Имя берём из
+// реестра сотрудников (по контакту), роль «руководитель» — из BOSS_CONTACTS;
+// фолбэк — имя из мессенджера.
 const config = require('../config');
 
 const CHANNEL_LABEL = { whatsapp: 'WhatsApp', telegram: 'Telegram', instagram: 'Instagram' };
@@ -39,8 +40,9 @@ async function senderSignature(context = {}) {
   const contact = contactLabel(context);
   const channel = CHANNEL_LABEL[String(context.channel || '').toLowerCase()] || '';
 
-  const details = [role, [channel, contact].filter(Boolean).join(' ')].filter(Boolean).join(', ');
-  const line = `📨 От: ${name}${details ? ` (${details})` : ''}`;
+  // Подпись намеренно краткая: только имя (и роль, если известна) — без канала и
+  // номера телефона, чтобы не засорять сообщение получателю.
+  const line = `📨 От: ${name}${role ? ` (${role})` : ''}`;
   return { name, role, contact, channel, line };
 }
 

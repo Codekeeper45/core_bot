@@ -7,7 +7,7 @@ let employees = [];
 const delivered = [];
 const mysqlMock = { findEmployees: async () => employees };
 const notifierMock = { deliver: async (channel, contact, text) => { delivered.push({ channel, contact, text }); return true; } };
-const senderIdentityMock = { senderSignature: async () => ({ line: '📨 От: Али (кладовщик, WhatsApp +77071234567)', name: 'Али' }) };
+const senderIdentityMock = { senderSignature: async () => ({ line: '📨 От: Али (кладовщик)', name: 'Али' }) };
 
 const Module = require('module');
 const originalRequire = Module.prototype.require;
@@ -34,7 +34,7 @@ describe('message_employee', () => {
     assert.equal(delivered.length, 1);
     assert.equal(delivered[0].contact, '77075301259');
     // Сообщение автоматически подписано отправителем.
-    assert.equal(delivered[0].text, '📨 От: Али (кладовщик, WhatsApp +77071234567)\n\nПривет');
+    assert.equal(delivered[0].text, '📨 От: Али (кладовщик)\n\nПривет');
     assert.match(r.signed_as, /От: Али/);
   });
 

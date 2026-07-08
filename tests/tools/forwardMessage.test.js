@@ -12,7 +12,7 @@ const notifierMock = {
     return true;
   },
 };
-const senderIdentityMock = { senderSignature: async () => ({ line: '📨 От: Босс (руководитель, WhatsApp +77070000000)', name: 'Босс' }) };
+const senderIdentityMock = { senderSignature: async () => ({ line: '📨 От: Босс (руководитель)', name: 'Босс' }) };
 const incomingMock = {
   downloadIncoming: async (desc) => {
     if (desc.type === 'document' && desc.__fail) throw new Error('download failed');
@@ -65,7 +65,7 @@ describe('forward_message', () => {
     assert.equal(r.success, true);
     assert.equal(delivered.length, 2);
     // Текст первым и с подписью отправителя первой строкой.
-    assert.equal(delivered[0].text, '📨 От: Босс (руководитель, WhatsApp +77070000000)\n\nсмотри смету');
+    assert.equal(delivered[0].text, '📨 От: Босс (руководитель)\n\nсмотри смету');
     assert.ok(!delivered[0].kind); // текстовое — без media
     assert.equal(delivered[1].kind, 'document');
   });
@@ -116,6 +116,6 @@ describe('forward_message', () => {
     const r = await handler({ to: 'Иван', message: 'привет' }, { incomingMedia: [] });
     assert.equal(r.success, true);
     assert.equal(delivered.length, 1);
-    assert.equal(delivered[0].text, '📨 От: Босс (руководитель, WhatsApp +77070000000)\n\nпривет');
+    assert.equal(delivered[0].text, '📨 От: Босс (руководитель)\n\nпривет');
   });
 });
