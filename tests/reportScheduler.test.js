@@ -46,7 +46,8 @@ test('buildEveningReminders: группирует по исполнителю, �
   const out = buildEveningReminders(employees, tasks);
   assert.strictEqual(out.length, 1);
   assert.strictEqual(out[0].employee.id, 1);
-  assert.ok(out[0].text.startsWith('Владимир, конец дня'));
+  assert.ok(out[0].text.startsWith('Конец дня — отпишись по задачам:'));
+  assert.ok(!out[0].text.includes('Владимир'));
   assert.ok(out[0].text.includes('№10 «Собрать лотки на Шабыт» (в работе)'));
   assert.ok(out[0].text.includes('№11'));
   assert.ok(!out[0].text.includes('№12'));

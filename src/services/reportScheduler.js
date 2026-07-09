@@ -96,7 +96,7 @@ function buildEveningReminders(employees, tasks) {
     const more = list.length > MAX_LINES ? `\n…и ещё ${list.length - MAX_LINES}` : '';
     out.push({
       employee: e,
-      text: `${firstName(e.name)}, конец дня — отпишись по задачам:\n`
+      text: 'Конец дня — отпишись по задачам:\n'
         + `${lines.join('\n')}${more}\n`
         + 'Ответь по номерам, например: «№10 — в работе, сделано 70%, дальше упаковка» или «№11 — блокер: нет машины».',
     });

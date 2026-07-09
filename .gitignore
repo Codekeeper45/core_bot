@@ -9,6 +9,8 @@ auth_info_baileys/
 
 # Employee roster (real PII — names + phone numbers)
 *.xlsx
+!src/templates/
+!src/templates/neodrain-quote.xlsx
 
 # Logs
 *.log
