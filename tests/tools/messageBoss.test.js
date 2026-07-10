@@ -23,6 +23,7 @@ const orig = Module.prototype.require;
 Module.prototype.require = function (id) {
   if (id === '../services/mysql') return mysqlMock;
   if (id === '../services/notifier') return notifierMock;
+  if (id === '../services/senderIdentity') return { shouldSignOutbound: (context = {}) => context.messageOrigin !== 'scheduled' };
   if (id === '../config') return configMock;
   return orig.apply(this, arguments);
 };
@@ -51,6 +52,18 @@ describe('message_boss: маршрутизация', () => {
     const r = await handler({ message: 'вопрос', kind: 'question' }, ctx);
     assert.equal(r.success, true);
     assert.equal(delivered[0].contact, '77770000001');
+  });
+
+  test('scheduled-эскалация не подписывается именем владельца', async () => {
+    reset();
+    mysqlMock._boss = { channel: 'whatsapp', contact: '77775477227' };
+    const r = await handler(
+      { message: 'Нет отчёта по задаче.', kind: 'problem' },
+      { ...ctx, messageOrigin: 'scheduled' }
+    );
+    assert.equal(r.success, true);
+    assert.doesNotMatch(delivered[0].text, /от Имирали/i);
+    assert.equal(delivered[0].text, '📨 Проблема:\nНет отчёта по задаче.');
   });
 
   test('явный task_id → уходит владельцу точного проекта с пометкой плана', async () => {

@@ -7,7 +7,10 @@ let employees = [];
 const delivered = [];
 const mysqlMock = { findEmployees: async () => employees };
 const notifierMock = { deliver: async (channel, contact, text) => { delivered.push({ channel, contact, text }); return true; } };
-const senderIdentityMock = { senderSignature: async () => ({ line: '📨 От: Али (кладовщик)', name: 'Али' }) };
+const senderIdentityMock = {
+  senderSignature: async () => ({ line: '📨 От: Али (кладовщик)', name: 'Али' }),
+  shouldSignOutbound: (context = {}) => context.messageOrigin !== 'scheduled',
+};
 
 const Module = require('module');
 const originalRequire = Module.prototype.require;
@@ -49,6 +52,18 @@ describe('message_employee', () => {
     assert.equal(r.success, true);
     assert.equal(r.count, 2);
     assert.equal(delivered.length, 2);
+  });
+
+  test('scheduled-рассылка уходит без подписи владельца', async () => {
+    employees = [{ id: 2, name: 'Кладовщик', contact: '7700000001', channel: 'whatsapp' }];
+    delivered.length = 0;
+    const r = await handler(
+      { to: 'Кладовщик', message: 'Напоминаю закрыть отчёт.' },
+      { messageOrigin: 'scheduled', clientName: 'Босс' }
+    );
+    assert.equal(r.success, true);
+    assert.equal(delivered[0].text, 'Напоминаю закрыть отчёт.');
+    assert.equal(r.signed_as, null);
   });
 
   test('fails cleanly when nobody has a contact', async () => {

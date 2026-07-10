@@ -455,6 +455,7 @@ async function deliverInstruction({ channel, chatId, phone, clientName, instruct
         phone,
         clientName: clientName || (role === 'boss' ? 'boss' : ''),
         role,
+        messageOrigin: 'scheduled',
         // Прогон по расписанию — короче интерактивного: отдельный меньший потолок итераций.
         maxIterations: config.AI_MAX_ITERATIONS_SCHEDULED,
         emit: (text) => sendReply(channel, chatId, text),

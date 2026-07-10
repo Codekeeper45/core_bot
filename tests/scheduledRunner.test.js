@@ -61,8 +61,10 @@ describe('tick', () => {
   test('успех recurring → markRun со следующим next_run_at', async () => {
     mysqlMock._rows = [row({ id: 1, kind: 'daily', at_hour: 9, at_minute: 0, next_run_at: '2026-06-08 04:00:00' })];
     calls.length = 0;
-    setDeliver(async () => ({ ok: true }));
+    let delivered;
+    setDeliver(async (payload) => { delivered = payload; return { ok: true }; });
     await tick(utc(2026, 6, 8, 4, 0));
+    assert.equal(delivered.messageOrigin, 'scheduled');
     const mark = calls.find((c) => c[0] === 'markRun');
     assert.deepEqual(mark.slice(0, 3), ['markRun', 1, 'ok']);
     assert.equal(mark[3], '2026-06-09 04:00:00'); // завтра 9:00 локально

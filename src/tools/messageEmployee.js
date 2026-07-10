@@ -1,7 +1,7 @@
 'use strict';
 const { findEmployees } = require('../services/mysql');
 const notifier = require('../services/notifier');
-const { senderSignature } = require('../services/senderIdentity');
+const { senderSignature, shouldSignOutbound } = require('../services/senderIdentity');
 const { handleToolDbError } = require('../utils/toolError');
 
 // ─── Tool definition ─────────────────────────────────────────────────────────
@@ -14,8 +14,9 @@ const definition = {
       + 'рабочей задаче (для задач есть dispatch_task). Адресат указывается в to: id, имя или роль '
       + '(напр. «Директор», «кладовщик», «Мякота»). По умолчанию пишет ОДНОМУ (первому подходящему '
       + 'с контактом). Чтобы написать ВСЕМ по роли (напр. всем кладовщикам) — поставь to_all=true. '
-      + 'Доступно всем (и боссу, и сотруднику — иерархии нет). Сообщение АВТОМАТИЧЕСКИ подписывается '
-      + 'краткой строкой «От: имя (роль)» отправителя (без номера) — самому добавлять подпись в message не нужно.',
+      + 'Доступно всем (и боссу, и сотруднику — иерархии нет). При прямой просьбе человека сообщение '
+      + 'подписывается строкой «От: имя (роль)». Автоматические запланированные действия отправляются '
+      + 'без подписи — самому добавлять подпись в message не нужно.',
     parameters: {
       type: 'object',
       properties: {
@@ -55,15 +56,14 @@ async function handler(args, context = {}) {
       };
     }
 
-    // Обязательная программная подпись: получатель всегда знает, от кого это,
-    // и подпись остаётся в записанной истории (контексте бота).
-    const sig = await senderSignature(context);
-    const signedMessage = `${sig.line}\n\n${message}`;
+    const signed = shouldSignOutbound(context);
+    const sig = signed ? await senderSignature(context) : null;
+    const outgoingMessage = sig ? `${sig.line}\n\n${message}` : message;
 
     const targets = args.to_all ? withContact : [withContact[0]];
     const sent_to = [];
     for (const emp of targets) {
-      const ok = await notifier.deliver(emp.channel || 'whatsapp', emp.contact, signedMessage, null, { record: true });
+      const ok = await notifier.deliver(emp.channel || 'whatsapp', emp.contact, outgoingMessage, null, { record: true });
       sent_to.push({ id: emp.id, name: emp.name, sent: ok });
     }
     const okCount = sent_to.filter((r) => r.sent).length;
@@ -73,7 +73,7 @@ async function handler(args, context = {}) {
       count: okCount,
       total: targets.length,
       sent_to,
-      signed_as: sig.line,
+      signed_as: sig ? sig.line : null,
       note: okCount === targets.length
         ? 'доставлено'
         : `доставлено ${okCount} из ${targets.length} (см. sent_to)`,

@@ -2,6 +2,7 @@
 const { findEmployeeByContact, getTask, getProject, findBossRoute } = require('../services/mysql');
 const notifier = require('../services/notifier');
 const config = require('../config');
+const { shouldSignOutbound } = require('../services/senderIdentity');
 
 const definition = {
   type: 'function',
@@ -67,7 +68,8 @@ async function handler(args, context = {}) {
 
   for (const r of routes) {
     const where = r.label ? ` ${r.label}` : '';
-    const text = `📨 ${kindRu} от ${emp.name} (${emp.roles})${where}:\n${args.message}`;
+    const from = shouldSignOutbound(context) ? ` от ${emp.name} (${emp.roles})` : '';
+    const text = `📨 ${kindRu}${from}${where}:\n${args.message}`;
     const ok = await notifier.deliver(r.channel, r.contact, text);
     if (ok) {
       return { success: true, routed_to: 'boss', project: proj ? proj.title : null, note: 'передано руководителю' };

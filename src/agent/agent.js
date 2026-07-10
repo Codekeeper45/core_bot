@@ -204,9 +204,10 @@ function capToolCall(name, counts, limits = {}) {
   return { capped: false };
 }
 
-async function runAgent({ combinedMessage, channel, chatId, phone, clientName, role, emit, media, maxIterations }) {
+async function runAgent({ combinedMessage, channel, chatId, phone, clientName, role, emit, media, maxIterations, messageOrigin }) {
   const context = {
     channel, chatId, phone, clientName, role: role || 'employee',
+    messageOrigin: messageOrigin === 'scheduled' ? 'scheduled' : 'interactive',
     incomingMedia: Array.isArray(media) ? media : [], // вложения текущего сообщения — для forward_message
   };
   // Тулы по роли: сотруднику не отдаём схемы boss-only (экономия токенов + меньше путаницы).

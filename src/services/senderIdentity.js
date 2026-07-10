@@ -9,6 +9,12 @@ const config = require('../config');
 
 const CHANNEL_LABEL = { whatsapp: 'WhatsApp', telegram: 'Telegram', instagram: 'Instagram' };
 
+// Интерактивные «скажи/перешли» идут от имени человека. Автоматические
+// расписания и ежедневные ритуалы — от самого бота, без подписи владельца.
+function shouldSignOutbound(context = {}) {
+  return context.messageOrigin !== 'scheduled';
+}
+
 function digitsOf(v) { return String(v || '').replace(/\D/g, ''); }
 
 // Человекочитаемый контакт отправителя: телефон → +7…, IG — @username, TG — @username/id.
@@ -46,4 +52,4 @@ async function senderSignature(context = {}) {
   return { name, role, contact, channel, line };
 }
 
-module.exports = { senderSignature };
+module.exports = { senderSignature, shouldSignOutbound };

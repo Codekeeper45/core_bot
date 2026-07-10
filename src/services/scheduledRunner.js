@@ -117,6 +117,7 @@ function deliverRow(row, instruction, extra = {}) {
     chatId: row.owner_chat_id,
     phone: row.owner_phone,
     clientName: 'boss',
+    messageOrigin: 'scheduled',
     instruction,
     title: row.title,
     ...extra,

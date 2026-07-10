@@ -12,7 +12,10 @@ const notifierMock = {
     return true;
   },
 };
-const senderIdentityMock = { senderSignature: async () => ({ line: '📨 От: Босс (руководитель)', name: 'Босс' }) };
+const senderIdentityMock = {
+  senderSignature: async () => ({ line: '📨 От: Босс (руководитель)', name: 'Босс' }),
+  shouldSignOutbound: (context = {}) => context.messageOrigin !== 'scheduled',
+};
 const incomingMock = {
   downloadIncoming: async (desc) => {
     if (desc.type === 'document' && desc.__fail) throw new Error('download failed');
@@ -117,5 +120,27 @@ describe('forward_message', () => {
     assert.equal(r.success, true);
     assert.equal(delivered.length, 1);
     assert.equal(delivered[0].text, '📨 От: Босс (руководитель)\n\nпривет');
+  });
+
+  test('scheduled-пересылка текста и медиа не добавляет отдельную подпись', async () => {
+    employees = [{ id: 2, name: 'Иван', contact: 'c', channel: 'whatsapp' }];
+    delivered.length = 0;
+    const textResult = await handler(
+      { to: 'Иван', message: 'Автоматическая проверка.' },
+      { incomingMedia: [], messageOrigin: 'scheduled' }
+    );
+    assert.equal(textResult.success, true);
+    assert.equal(delivered[0].text, 'Автоматическая проверка.');
+    assert.equal(textResult.signed_as, null);
+
+    delivered.length = 0;
+    const mediaResult = await handler(
+      { to: 'Иван' },
+      { incomingMedia: [img], messageOrigin: 'scheduled' }
+    );
+    assert.equal(mediaResult.success, true);
+    assert.equal(delivered.length, 1);
+    assert.equal(delivered[0].kind, 'image');
+    assert.equal(mediaResult.signed_as, null);
   });
 });

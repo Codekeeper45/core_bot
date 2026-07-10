@@ -17,7 +17,7 @@ Module.prototype.require = function (id) {
   return orig.apply(this, arguments);
 };
 delete require.cache[require.resolve('../../src/services/senderIdentity')];
-const { senderSignature } = require('../../src/services/senderIdentity');
+const { senderSignature, shouldSignOutbound } = require('../../src/services/senderIdentity');
 
 describe('senderSignature', () => {
   beforeEach(() => { empByContact = {}; });
@@ -66,5 +66,13 @@ describe('senderSignature', () => {
   test('совсем пустой контекст не падает', async () => {
     const sig = await senderSignature({});
     assert.match(sig.line, /От: неизвестный отправитель/);
+  });
+});
+
+describe('shouldSignOutbound', () => {
+  test('интерактивный вызов подписывается, scheduled — нет', () => {
+    assert.equal(shouldSignOutbound({}), true);
+    assert.equal(shouldSignOutbound({ messageOrigin: 'interactive' }), true);
+    assert.equal(shouldSignOutbound({ messageOrigin: 'scheduled' }), false);
   });
 });
