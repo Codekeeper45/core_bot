@@ -118,6 +118,17 @@ async function processDocument(normalized) {
     require('../services/docStash').put(channel, chat_id, { fileName: document_file_name, text: fullText });
   } catch (err) { console.error('[Doc] docStash:', err.message); }
 
+  // Настоящие Office-файлы (.docx/.xlsx — это zip, сигнатура «PK») дополнительно
+  // держим бинарником: manage_document правит договор на месте, а
+  // financial_analysis считает по исходной таблице 1С, а не по лоссовому тексту.
+  try {
+    if (buffer && buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
+      require('../services/docBinaryStash').put(channel, chat_id, {
+        fileName: document_file_name, buffer, mimetype: normalized.document_mime_type || null,
+      });
+    }
+  } catch (err) { console.error('[Doc] docBinaryStash:', err.message); }
+
   // В контекст модели отдаём только превью: сырой CSV/большой документ не должен
   // раздувать окно. Полный текст остаётся в буфере для сохранения.
   const preview = fullText.length > config.DOC_INLINE_PREVIEW_CHARS

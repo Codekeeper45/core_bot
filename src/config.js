@@ -137,6 +137,11 @@ module.exports = {
   // файл в базу знаний без повторной пересылки текста через LLM.
   DOC_STASH_MAX: parseInt(process.env.DOC_STASH_MAX || '5', 10),
   DOC_STASH_TTL_MS: parseInt(process.env.DOC_STASH_TTL_MS || String(6 * 3600 * 1000), 10),
+  // Стэш ОРИГИНАЛЬНЫХ бинарников присланных .docx/.xlsx (docBinaryStash): нужен
+  // для хирургической правки Word и точной арифметики по таблицам 1С. Буферы
+  // тяжёлые — держим меньше файлов, чем текстовый стэш.
+  DOC_BINARY_STASH_MAX: parseInt(process.env.DOC_BINARY_STASH_MAX || '3', 10),
+  DOC_BINARY_STASH_TTL_MS: parseInt(process.env.DOC_BINARY_STASH_TTL_MS || String(6 * 3600 * 1000), 10),
   // Сколько последних сообщений держим в активной истории (bot_chat_history).
   // ВСЯ переписка дополнительно архивируется в bot_message_archive (не режется),
   // и бот ищет по ней инструментом recall — так «помнит всё», а не только окно.
