@@ -4,6 +4,7 @@
 // для сообщений в чаты, которые сейчас не активны (сотрудник ↔ босс).
 const { getProject } = require('./mysql');
 const config = require('../config');
+const { isObservedGroupId } = require('./groupObserver');
 
 // Короткое описание медиа для записи в историю, когда текста нет (пересылка файла/фото).
 function describeMedia(media) {
@@ -32,6 +33,10 @@ async function deliver(channel, contact, text, media = null, opts = {}) {
     ? (String(contact).includes('@') ? String(contact) : `${String(contact).replace(/\D/g, '')}@s.whatsapp.net`)
     : null;
   const recordKey = waJid || String(contact);
+  if (ch === 'whatsapp' && isObservedGroupId(waJid)) {
+    console.warn(`[Notifier] Наблюдаемая группа read-only: исходящее сообщение заблокировано (${waJid})`);
+    return false;
+  }
   try {
     let delivered;
     if (ch === 'telegram') {

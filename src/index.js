@@ -37,7 +37,8 @@ const { acquireLock, enqueue, releaseLockAndProcessQueue } = require('./middlewa
 const { checkRateLimit } = require('./middleware/rateLimit');
 const { isDuplicate } = require('./middleware/deduplication');
 const { isAllowedSender } = require('./middleware/access');
-const { clearHistory, initTables, setQuiet, clearQuiet, getQuiet } = require('./services/mysql');
+const { clearHistory, initTables, setQuiet, clearQuiet, getQuiet, archiveMessage } = require('./services/mysql');
+const { isObservedGroupId } = require('./services/groupObserver');
 const { startTypingLoop, stopTypingLoop } = require('./middleware/typing');
 
 const { transcribeVoice } = require('./media/voice');
@@ -143,6 +144,20 @@ async function processMessage(rawPayload) {
     try { await sendReply(n.channel, n.chat_id, n.unsupported_canned_message); } catch (_) {}
     return;
   }
+  // Наблюдаемая складская группа — read-only вход: сохраняем сообщения для
+  // последующего отчёта, но не запускаем access/LLM/typing/send pipeline.
+  if (n.is_observed_group) {
+    if (isDuplicate(n.channel, n.chat_id, n.message_text_for_buffer || n.message || '', n.message_id)) return;
+    await archiveMessage(
+      n.channel,
+      n.chat_id,
+      'user',
+      n.message_text_for_buffer || n.message || `[${n.message_type || 'сообщение'}]`,
+      n.client_name
+    );
+    return;
+  }
+
   if (!n.is_supported) return;
 
   const { channel, chat_id, phone, client_name, message_type } = n;
@@ -411,6 +426,10 @@ const { systemTimestamp } = require('./utils/localTime');
 // Отправка ответа по каналу
 // =====================================================================
 async function sendReply(channel, chatId, text) {
+  if (String(channel || '').toLowerCase() === 'whatsapp' && isObservedGroupId(chatId)) {
+    console.warn(`[SendReply] Наблюдаемая группа read-only: исходящее сообщение заблокировано (${chatId})`);
+    return false;
+  }
   try {
     let delivered;
     if (channel === 'telegram') {

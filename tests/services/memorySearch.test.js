@@ -52,6 +52,15 @@ describe('semanticRecall', () => {
     assert.deepEqual(loadArgs.viewer, viewer);
   });
 
+  test('период пробрасывается в vector search', async () => {
+    const fromUtc = new Date('2026-07-01T00:00:00Z');
+    const toUtc = new Date('2026-07-02T00:00:00Z');
+    await semanticRecall({ channel: 'whatsapp', chatId: 'group@g.us', query: 'задержка', fromUtc, toUtc });
+    assert.equal(loadArgs.fromUtc, fromUtc);
+    assert.equal(loadArgs.toUtc, toUtc);
+    assert.equal(loadArgs.chatId, 'group@g.us');
+  });
+
   test('пустой запрос → ok:false без обращения к БД', async () => {
     const r = await semanticRecall({ channel: 'whatsapp', chatId: 'boss', query: '  ' });
     assert.equal(r.ok, false);

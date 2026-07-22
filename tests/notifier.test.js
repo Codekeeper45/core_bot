@@ -1,4 +1,5 @@
 'use strict';
+process.env.OBSERVE_ONLY_GROUP_WA = '120363000000000000@g.us';
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 
@@ -44,6 +45,13 @@ describe('deliver: запись исходящего (record) под верны�
   test('без record → в историю НЕ пишем (ops-алерты, эхо и т.п.)', async () => {
     recorded.length = 0;
     await notifier.deliver('whatsapp', '77071234567', 'Просто сообщение');
+    assert.equal(recorded.length, 0);
+  });
+
+  test('наблюдаемая группа read-only → исходящее сообщение блокируется', async () => {
+    recorded.length = 0;
+    const ok = await notifier.deliver('whatsapp', '120363000000000000@g.us', 'не писать в группу');
+    assert.equal(ok, false);
     assert.equal(recorded.length, 0);
   });
 

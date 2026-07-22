@@ -3,6 +3,7 @@
 // Set env vars before requiring config-dependent modules so blocked/excluded tests work
 process.env.BLOCKED_PHONES = '87771351258';
 process.env.EXCLUDED_CHAT_ID = '77073230970@s.whatsapp.net';
+process.env.OBSERVE_ONLY_GROUP_WA = '120363000000000000@g.us';
 
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
@@ -85,6 +86,14 @@ const TG_VOICE = { update_id: 125, message: { message_id: 3, from: { id: 12345, 
 const TG_DOC = { update_id: 126, message: { message_id: 4, from: { id: 12345, first_name: 'Алексей' }, chat: { id: 12345, type: 'private' }, document: { file_id: 'doc123', file_name: 'file.pdf', mime_type: 'application/pdf', file_size: 100000 } } };
 const TG_DOC_IMAGE = { update_id: 127, message: { message_id: 5, from: { id: 12345, first_name: 'Алексей' }, chat: { id: 12345, type: 'private' }, document: { file_id: 'docimg', file_name: 'photo.png', mime_type: 'image/png' } } };
 const TG_GROUP = { update_id: 128, message: { message_id: 6, from: { id: 12345, first_name: 'Алексей' }, chat: { id: -100500, type: 'group' }, text: 'Групповое' } };
+const WA_OBSERVED_GROUP = {
+  __baileys: true,
+  baileysMsg: {
+    key: { remoteJid: '120363000000000000@g.us', participant: '77071234567@s.whatsapp.net', fromMe: false, id: 'GROUP1' },
+    pushName: 'Иван Иванов',
+    message: { conversation: 'Отгрузка DN200 готова' },
+  },
+};
 
 describe('normalizeInbound — WhatsApp (Baileys)', () => {
   test('текстовое сообщение — channel=whatsapp, is_supported=true, текст извлечён', () => {
@@ -134,6 +143,14 @@ describe('normalizeInbound — WhatsApp (Baileys)', () => {
     assert.equal(r.document_family, 'pdf');
     assert.equal(r.document_file_name, 'проект.pdf');
     assert.equal(r.is_supported, true);
+  });
+
+  test('наблюдаемая группа поддерживается только для архивирования', () => {
+    const r = normalizeInbound(WA_OBSERVED_GROUP);
+    assert.equal(r.is_private, false);
+    assert.equal(r.is_observed_group, true);
+    assert.equal(r.is_supported, true);
+    assert.equal(r.chat_id, '120363000000000000@g.us');
   });
 });
 

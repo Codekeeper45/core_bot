@@ -67,6 +67,18 @@ module.exports = {
   // WhatsApp (Baileys WebSocket)
   WA_AUTH_DIR: process.env.WA_AUTH_DIR || 'auth_info_baileys',
   WA_PAIRING_PHONE: process.env.WA_PAIRING_PHONE || '',  // номер для pairing code, только цифры
+  // Группы WhatsApp, которые бот только наблюдает и архивирует. Можно указать
+  // точный JID (120...@g.us) и/или название группы, через запятую.
+  OBSERVE_ONLY_GROUP_WA: (process.env.OBSERVE_ONLY_GROUP_WA || '')
+    .split(',').map((s) => s.trim()).filter(Boolean),
+  OBSERVE_ONLY_GROUP_NAMES: (process.env.OBSERVE_ONLY_GROUP_NAMES || 'Склад отгрузки')
+    .split(',').map((s) => s.trim()).filter(Boolean),
+  // Кто может запросить отчёт по наблюдаемой группе в личном чате.
+  // Имена — запасной вариант; для строгой идентификации укажи номера.
+  GROUP_REPORT_REQUESTERS_WA: (process.env.GROUP_REPORT_REQUESTERS_WA || '')
+    .split(',').map((s) => s.trim().replace(/\D/g, '')).filter(Boolean),
+  GROUP_REPORT_REQUESTER_NAMES: (process.env.GROUP_REPORT_REQUESTER_NAMES || 'Стас')
+    .split(',').map((s) => s.trim()).filter(Boolean),
 
   // Remote pairing web page (/pair) — публичная HTTPS-страница для удалённой
   // привязки WhatsApp. PAIR_TOKEN обязателен (минимум 16 случайных символов);

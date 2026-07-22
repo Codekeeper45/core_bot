@@ -1,6 +1,7 @@
 'use strict';
 const config = require('../config');
 const { normalizePhone } = require('../utils/helpers');
+const { isObservedGroup, rememberObservedGroup } = require('../services/groupObserver');
 
 const BLOCKED_PHONES = new Set(config.BLOCKED_PHONES.map(normalizePhone).filter(Boolean));
 const EXCLUDED_CHAT_ID = config.EXCLUDED_CHAT_ID;
@@ -28,6 +29,7 @@ function normalizeInbound(raw) {
     message: null, message_text_for_buffer: null, message_id: null,
     message_type: 'text', original_message_type: null,
     is_private: false, has_voice: false, has_image: false, has_document: false,
+    is_observed_group: false, group_subject: null,
     voice_source_url: null, voice_file_id: null, voice_mime_type: null, voice_duration: null,
     image_source: null, image_url: null, image_caption: null,
     document_source_url: null, document_file_id: null, document_file_name: null,
@@ -164,11 +166,15 @@ function normalizeInbound(raw) {
 
     n.chat_id = phoneJid || jid;
     n.is_private = !jid.endsWith('@g.us');
+    n.group_subject = msg.__groupSubject || null;
     n.is_outgoing = msg.key.fromMe === true;
     n.is_self_message = false;
     n.client_name = msg.pushName || 'Неизвестно';
     n.message_id = msg.key.id || '';
     n.baileys_raw_msg = msg;
+    n.is_observed_group = !n.is_outgoing
+      && isObservedGroup({ chatId: n.chat_id, subject: n.group_subject });
+    if (n.is_observed_group) rememberObservedGroup({ chatId: n.chat_id, subject: n.group_subject });
 
     n.phone = (phoneJid || jid).replace(/@.*$/, '').replace(/\D/g, '');
 
@@ -264,7 +270,8 @@ function normalizeInbound(raw) {
 
     const blocked = BLOCKED_PHONES.has(normalizePhone(n.phone));
     const isExcluded = n.chat_id === EXCLUDED_CHAT_ID;
-    n.is_supported = n.is_private && !n.is_outgoing && !blocked && !isExcluded && !n.unsupported_reason;
+    n.is_supported = (n.is_private || n.is_observed_group) && !n.is_outgoing
+      && !blocked && !isExcluded && !n.unsupported_reason;
     if (blocked) n.unsupported_reason = 'blocked';
     if (isExcluded) n.unsupported_reason = 'excluded_chat';
 

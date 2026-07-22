@@ -12,6 +12,7 @@ const pino = require('pino');
 const qrcode = require('qrcode-terminal');
 const fs = require('fs');
 const config = require('../config');
+const groupObserver = require('./groupObserver');
 
 function inboundBatch(messages) {
   return (Array.isArray(messages) ? messages : []).filter((msg) => msg
@@ -31,6 +32,7 @@ class BaileysService extends EventEmitter {
     this.lastQR = null;              // raw QR string from connection.update; consumed by /pair/qr.png
     this.lastPairingCode = null;     // 8-char human code from requestPairingCode
     this.pairingExpiresAt = 0;       // epoch ms; codes are valid ~60s on WA side
+    this.groupSubjects = new Map();  // group JID -> current subject
   }
 
   async connect() {
@@ -60,6 +62,9 @@ class BaileysService extends EventEmitter {
     this.sock.ev.on('messages.upsert', async ({ messages, type }) => {
       if (type !== 'notify') return;
       for (const msg of inboundBatch(messages)) {
+        const groupJid = msg.key.remoteJid || '';
+        const subject = this.groupSubjects.get(groupJid);
+        if (subject) msg.__groupSubject = subject;
         if (msg.key.remoteJid.endsWith('@g.us')) {
           console.log(`[Baileys] Группа: ${msg.key.remoteJid} | ${msg.pushName}: ${msg.message?.conversation || ''}`);
         }
@@ -104,15 +109,23 @@ class BaileysService extends EventEmitter {
         const phone = jid.split(':')[0].split('@')[0];
         if (phone) this.savedPhone = phone;
         console.log(`[Baileys] ✅ Подключено к WhatsApp! Номер: +${phone ? phone.slice(0, 3) + '****' + phone.slice(-2) : 'неизвестен'}`);
-        this.sock.groupFetchAllParticipating()
-          .then(groups => {
-            const ids = Object.keys(groups);
-            console.log(`[Baileys] Групп загружено: ${ids.length}`);
-            ids.forEach(id => console.log(`[Baileys] Группа: ${id} — ${groups[id].subject}`));
-          })
+        this.refreshGroupSubjects()
           .catch(e => console.warn('[Baileys] Не удалось загрузить группы:', e.message));
       }
     });
+  }
+
+  async refreshGroupSubjects() {
+    if (!this.sock) return;
+    const groups = await this.sock.groupFetchAllParticipating();
+    const ids = Object.keys(groups);
+    for (const id of ids) {
+      const subject = groups[id]?.subject || '';
+      this.groupSubjects.set(id, subject);
+      groupObserver.rememberObservedGroup({ chatId: id, subject });
+    }
+    console.log(`[Baileys] Групп загружено: ${ids.length}`);
+    ids.forEach((id) => console.log(`[Baileys] Группа: ${id} — ${groups[id].subject}`));
   }
 
   // Request an 8-character pairing code for the given phone number.

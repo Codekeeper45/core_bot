@@ -2059,6 +2059,30 @@ async function archiveByDateRange({ channel, chatId, scope = 'chat', fromUtc, to
   } catch (err) { throw dbError(err, 'archiveByDateRange'); }
 }
 
+// Постраничная выборка одного чата. В отличие от archiveByDateRange допускает
+// открытые границы времени и курсор по monotonically increasing archive.id.
+// Используется отчётами, которым нужно пройти длинный архив без скрытого LIMIT.
+async function archiveChatPage({ channel, chatId, afterId = 0, fromUtc = null, toUtc = null, tokens = [], limit = 200 } = {}) {
+  const fmt = (d) => (d instanceof Date ? d.toISOString().slice(0, 19).replace('T', ' ') : d);
+  const where = ['a.channel = ?', 'a.chat_id = ?'];
+  const params = [channel, String(chatId)];
+  const cursor = Number(afterId) || 0;
+  if (cursor > 0) { where.push('a.id > ?'); params.push(cursor); }
+  if (fromUtc) { where.push('a.created_at >= ?'); params.push(fmt(fromUtc)); }
+  if (toUtc) { where.push('a.created_at <= ?'); params.push(fmt(toUtc)); }
+  for (const t of (tokens || [])) { where.push('a.content LIKE ?'); params.push(`%${t}%`); }
+  params.push(Math.max(1, Math.min(Number(limit) || 200, 501)));
+  try {
+    return await dbQuery(
+      `SELECT a.id, a.channel, a.chat_id, a.role, a.actor_name, a.content, a.created_at
+         FROM bot_message_archive a
+        WHERE ${where.join(' AND ')}
+        ORDER BY a.id ASC LIMIT ?`,
+      params
+    );
+  } catch (err) { throw dbError(err, 'archiveChatPage'); }
+}
+
 // Переписка КОНКРЕТНОГО человека с ботом (инструмент read_person). person =
 // {channel, contact, name} из orch_employees. Матч по его чату: chat_id совпадает с
 // контактом/цифрами/JID (WA), либо actor_name = имя (фолбэк для WA-LID-раздвоения).
@@ -2148,10 +2172,14 @@ async function insertArchiveChunk(row) {
 
 // Загрузить чанки-кандидаты для поиска (с эмбеддингами). scope='all' — по всем чатам;
 // viewer — см. recallSearch: не-боссу скрываются чужие private-чаты.
-async function loadChunkVectors({ channel, chatId, scope = 'chat', model, dims, limit = 5000, viewer = null } = {}) {
+async function loadChunkVectors({ channel, chatId, scope = 'chat', model, dims, limit = 5000, viewer = null, fromUtc = null, toUtc = null } = {}) {
   const where = ['a.model = ?', 'a.dims = ?'];
   const params = [model, dims];
   if (scope !== 'all') { where.push('a.channel = ?', 'a.chat_id = ?'); params.push(channel, chatId); }
+  const fmt = (d) => (d instanceof Date ? d.toISOString().slice(0, 19).replace('T', ' ') : d);
+  // A chunk matches a period when its time interval overlaps the requested one.
+  if (fromUtc) { where.push('a.last_at >= ?'); params.push(fmt(fromUtc)); }
+  if (toUtc) { where.push('a.first_at <= ?'); params.push(fmt(toUtc)); }
   const privacy = scope === 'all' ? privacyExclusion('a', viewer) : { sql: '', params: [] };
   params.push(...privacy.params);
   params.push(Math.max(1, Math.min(Number(limit) || 5000, 20000)));
@@ -3104,7 +3132,7 @@ module.exports = {
   getPool, dbQuery, withTransaction, initTables, _mergeHistory,
   loadHistory, saveHistory, clearHistory,
   // Долгая память: архив переписки + журнал действий + recall
-  archiveMessage, logBotEvent, recallSearch, archiveByDateRange, archiveByPerson,
+  archiveMessage, logBotEvent, recallSearch, archiveByDateRange, archiveChatPage, archiveByPerson,
   // Семантический индекс архива (RAG)
   listChatsWithBacklog, archiveMessagesAfter, insertArchiveChunk, loadChunkVectors,
   checkDailyCount, incrementDailyCount,
