@@ -99,3 +99,19 @@ test('buildMorningSummary: показывает сроки, отсутствие
   assert.match(text, /Загрузка:/);
   assert.match(text, /Склад:/);
 });
+
+test('buildGroupDailySummary: форматирует сводку сообщений группы склад отгрузки', () => {
+  const { buildGroupDailySummary } = _internals;
+  const messages = [
+    { who: 'Иван', text: '[ГОЛОСОВОЕ | ОБЕЩАНИЕ/СРОК]\nТранскрипция: Обещал привезти 5 паллет к 15:00' },
+    { who: 'Заиндин', text: '[ИЗОБРАЖЕНИЕ | НАКЛАДНАЯ/ДОКУМЕНТ]\nПодпись: нет\nОписание: Накладная №454, водитель Нурлан' },
+    { who: 'Али', text: 'У нас задержка по доставке' },
+  ];
+  const summary = buildGroupDailySummary(messages, '2026-07-22');
+  assert.match(summary, /Ежедневная сводка по группе «Склад отгрузки»/);
+  assert.match(summary, /Всего сообщений: 3/);
+  assert.match(summary, /Иван, Заиндин, Али/);
+  assert.match(summary, /Голосовые сообщения/);
+  assert.match(summary, /Документы и накладные/);
+  assert.match(summary, /Внимание \/ Задержки/);
+});

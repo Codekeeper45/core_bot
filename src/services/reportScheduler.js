@@ -56,7 +56,7 @@ function localNow(now, tzOffsetMin) {
 
 // Состояние «когда джоба успешно отстрелялась» (ключ = локальная дата YYYY-MM-DD).
 // Персистится в orch_settings, чтобы рестарт не дублировал и не терял рассылку.
-const lastRun = { morning: '', evening: '' };
+const lastRun = { morning: '', evening: '', group_summary: '' };
 
 function localDateKey(now = new Date()) {
   return localNow(now).toISOString().slice(0, 10);
@@ -206,6 +206,85 @@ async function runMorningSummary() {
   return { sent, total: targets.length };
 }
 
+// ── Вечер: ежедневная сводка по наблюдаемой группе ─────────────────────────
+function buildGroupDailySummary(messages = [], dateStr = '') {
+  if (!messages.length) {
+    return `Сводка по группе «Склад отгрузки» за ${dateStr}:\nАктивности и сообщений за сегодня не зафиксировано.`;
+  }
+  const participants = [...new Set(messages.map((m) => m.who || m.actor_name).filter(Boolean))];
+  const voices = messages.filter((m) => String(m.text || m.content || '').includes('[ГОЛОСОВОЕ'));
+  const docs = messages.filter((m) => String(m.text || m.content || '').includes('[ИЗОБРАЖЕНИЕ'));
+  const issues = messages.filter((m) => /(задержк|брак|ошибк|не успе|нет машин|пробк|отмен)/i.test(String(m.text || m.content || '')));
+
+  const lines = [
+    `Ежедневная сводка по группе «Склад отгрузки» (${dateStr}):`,
+    `- Всего сообщений: ${messages.length}`,
+    `- Активные участники (${participants.length}): ${participants.join(', ')}`,
+  ];
+
+  if (voices.length) {
+    lines.push(`\n🎙️ Голосовые сообщения (${voices.length}):`);
+    for (const v of voices.slice(0, 5)) {
+      const txt = String(v.text || v.content || '').replace(/\[ГОЛОСОВОЕ.*?\]\s*/, '').trim();
+      lines.push(`- ${v.who || v.actor_name}: ${txt.slice(0, 200)}`);
+    }
+  }
+
+  if (docs.length) {
+    lines.push(`\n📄 Документы и накладные (${docs.length}):`);
+    for (const d of docs.slice(0, 5)) {
+      const txt = String(d.text || d.content || '').replace(/\[ИЗОБРАЖЕНИЕ.*?\]\s*/, '').trim();
+      lines.push(`- ${d.who || d.actor_name}: ${txt.slice(0, 200)}`);
+    }
+  }
+
+  if (issues.length) {
+    lines.push(`\n⚠️ Внимание / Задержки (${issues.length}):`);
+    for (const i of issues.slice(0, 5)) {
+      lines.push(`- ${i.who || i.actor_name}: ${String(i.text || i.content || '').slice(0, 150)}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
+async function runGroupDailySummary(now = new Date()) {
+  const { getObservedGroupIds } = require('./groupObserver');
+  const groupIds = getObservedGroupIds();
+  if (!groupIds.length) return { sent: 0, total: 0 };
+  const groupId = groupIds[0];
+
+  const { archiveChatPage } = require('./mysql');
+  const startOfDay = localNow(now);
+  startOfDay.setUTCHours(0, 0, 0, 0);
+
+  const rows = await archiveChatPage({
+    channel: 'whatsapp',
+    chatId: groupId,
+    fromUtc: startOfDay,
+    toUtc: now,
+    limit: 300,
+  });
+
+  const dateStr = localDateKey(now);
+  const text = buildGroupDailySummary(rows, dateStr);
+
+  const targets = new Set();
+  for (const d of config.GROUP_REPORT_REQUESTERS_WA) targets.add(d);
+  for (const d of config.SCHEDULER_BOSS_WA) targets.add(d);
+  for (const d of config.BOSS_CONTACTS) targets.add(d);
+
+  const quiet = await quietDigitsSet();
+  let sent = 0;
+  for (const digits of targets) {
+    if (!digits || quiet.has(String(digits).replace(/\D/g, ''))) continue;
+    const ok = await notifier.deliver('whatsapp', digits, text);
+    if (ok) sent += 1;
+  }
+  console.log(`[Scheduler] Ежедневная сводка по группе «Склад отгрузки»: ${sent}/${targets.size} отправлено`);
+  return { sent, total: targets.size };
+}
+
 // ── Управление (инструмент manage_scheduler) ───────────────────────────────
 function getState() {
   return {
@@ -215,6 +294,7 @@ function getState() {
     tz: `UTC+${config.SCHEDULER_TZ_OFFSET_MIN / 60}`,
     last_morning: lastRun.morning || null,
     last_evening: lastRun.evening || null,
+    last_group_summary: lastRun.group_summary || null,
     note: 'вс — выходной',
   };
 }
@@ -253,6 +333,7 @@ async function loadOverrides() {
   if (Number.isInteger(eh) && eh >= 0 && eh <= 23) state.eveningHour = eh;
   if (s['scheduler.last_morning']) lastRun.morning = s['scheduler.last_morning'];
   if (s['scheduler.last_evening']) lastRun.evening = s['scheduler.last_evening'];
+  if (s['scheduler.last_group_summary']) lastRun.group_summary = s['scheduler.last_group_summary'];
 }
 
 // ── Цикл ───────────────────────────────────────────────────────────────────
@@ -267,6 +348,8 @@ async function tick(now = new Date()) {
     if (shouldFire('evening', state.eveningHour, now)) {
       const r = await runEveningReminders();
       if (r.sent > 0 || r.total === 0) await markDone('evening', now);
+      const rg = await runGroupDailySummary(now);
+      if (rg.sent > 0 || rg.total === 0) await markDone('group_summary', now);
     }
   } catch (err) {
     console.error('[Scheduler] tick:', err.message);
@@ -293,7 +376,7 @@ async function start() {
 module.exports = {
   start,
   getState, setEnabled, setHours,
-  getMorningSummary, runMorningSummary, runEveningReminders,
+  getMorningSummary, runMorningSummary, runEveningReminders, runGroupDailySummary, buildGroupDailySummary,
   // для тестов
-  _internals: { shouldFire, buildEveningReminders, buildMorningSummary, firstName, state },
+  _internals: { shouldFire, buildEveningReminders, buildMorningSummary, buildGroupDailySummary, firstName, state },
 };

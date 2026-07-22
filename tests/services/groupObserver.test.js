@@ -47,7 +47,7 @@ describe('observedMessageContent', () => {
     const content = await observedMessageContent({
       message_type: 'voice', channel: 'whatsapp', chat_id: '120@g.us', message_id: 'voice-1', client_name: 'Заиндин',
     });
-    assert.equal(content, '[ГОЛОСОВОЕ]\nТранскрипция: Машина будет на складе завтра утром.');
+    assert.equal(content, '[ГОЛОСОВОЕ [НАКЛАДНАЯ/ДОКУМЕНТ]]\nТранскрипция: Машина будет на складе завтра утром.');
     assert.equal(savedAudio.sourceMessageId, 'voice-1');
     assert.equal(savedAudio.actorName, 'Заиндин');
     assert.deepEqual(savedAudio.buffer, Buffer.from('audio'));

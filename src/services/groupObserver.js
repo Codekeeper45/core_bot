@@ -46,6 +46,18 @@ function isObservedGroupId(chatId) {
   return getObservedGroupIds().includes(String(chatId || '').trim());
 }
 
+function detectCommitmentsAndDocuments(text) {
+  const t = String(text || '').toLowerCase();
+  const tags = [];
+  if (/(обещал|приедет|загрузим|отгрузим|довезти|вышел|уехал|прибыл|к \d{1,2}:\d{2}|до \d{1,2}:\d{2})/i.test(t)) {
+    tags.push('ОБЕЩАНИЕ/СРОК');
+  }
+  if (/(накладн|ттн|паллет|рейс|машин|водитель|авто|номер|казыбаев|покровк)/i.test(t)) {
+    tags.push('НАКЛАДНАЯ/ДОКУМЕНТ');
+  }
+  return tags;
+}
+
 // The observed group bypasses the normal agent pipeline, so enrich media here
 // before archiving it. This remains read-only: no reply is ever sent to the group.
 async function observedMessageContent(message = {}) {
@@ -81,7 +93,9 @@ async function observedMessageContent(message = {}) {
         console.error('[Group observer] Transcript storage error:', err.message);
       }
     }
-    return `[ГОЛОСОВОЕ]\nТранскрипция: ${transcript}`;
+    const tags = detectCommitmentsAndDocuments(transcript);
+    const tagHeader = tags.length ? ` [${tags.join(' | ')}]` : '';
+    return `[ГОЛОСОВОЕ${tagHeader}]\nТранскрипция: ${transcript}`;
   }
 
   if (message.message_type === 'image') {
@@ -90,7 +104,10 @@ async function observedMessageContent(message = {}) {
       caption: message.image_caption || '',
       baileys_media_obj: message.baileys_media_obj || null,
     }, message.channel);
-    return `[ИЗОБРАЖЕНИЕ]\nПодпись: ${message.image_caption || 'нет'}\nОписание: ${description}`;
+    const combined = `${message.image_caption || ''} ${description}`;
+    const tags = detectCommitmentsAndDocuments(combined);
+    const tagHeader = tags.length ? ` [${tags.join(' | ')}]` : '';
+    return `[ИЗОБРАЖЕНИЕ${tagHeader}]\nПодпись: ${message.image_caption || 'нет'}\nОписание: ${description}`;
   }
 
   return fallback;
