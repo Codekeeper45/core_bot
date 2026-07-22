@@ -73,6 +73,10 @@ module.exports = {
     .split(',').map((s) => s.trim()).filter(Boolean),
   OBSERVE_ONLY_GROUP_NAMES: (process.env.OBSERVE_ONLY_GROUP_NAMES || 'Склад отгрузки')
     .split(',').map((s) => s.trim()).filter(Boolean),
+  // Оригиналы голосовых наблюдаемой группы сохраняются для повторной расшифровки.
+  // Защита от случайно присланных очень больших файлов.
+  OBSERVED_GROUP_AUDIO_MAX_BYTES: Math.max(1024 * 1024,
+    parseInt(process.env.OBSERVED_GROUP_AUDIO_MAX_BYTES || String(32 * 1024 * 1024), 10) || 32 * 1024 * 1024),
   // Кто может запросить отчёт по наблюдаемой группе в личном чате.
   // Имена — запасной вариант; для строгой идентификации укажи номера.
   GROUP_REPORT_REQUESTERS_WA: (process.env.GROUP_REPORT_REQUESTERS_WA || '')

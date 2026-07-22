@@ -38,7 +38,7 @@ const { checkRateLimit } = require('./middleware/rateLimit');
 const { isDuplicate } = require('./middleware/deduplication');
 const { isAllowedSender } = require('./middleware/access');
 const { clearHistory, initTables, setQuiet, clearQuiet, getQuiet, archiveMessage } = require('./services/mysql');
-const { isObservedGroupId } = require('./services/groupObserver');
+const { isObservedGroupId, observedMessageContent } = require('./services/groupObserver');
 const { startTypingLoop, stopTypingLoop } = require('./middleware/typing');
 
 const { transcribeVoice } = require('./media/voice');
@@ -148,11 +148,18 @@ async function processMessage(rawPayload) {
   // последующего отчёта, но не запускаем access/LLM/typing/send pipeline.
   if (n.is_observed_group) {
     if (isDuplicate(n.channel, n.chat_id, n.message_text_for_buffer || n.message || '', n.message_id)) return;
+    let content;
+    try {
+      content = await observedMessageContent(n);
+    } catch (err) {
+      console.error('[Group observer] Media archive error:', err.message);
+      content = n.message_text_for_buffer || n.message || `[${n.message_type || 'сообщение'}]`;
+    }
     await archiveMessage(
       n.channel,
       n.chat_id,
       'user',
-      n.message_text_for_buffer || n.message || `[${n.message_type || 'сообщение'}]`,
+      content,
       n.client_name
     );
     return;

@@ -523,6 +523,26 @@ async function initTables() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
+  // Оригиналы голосовых из наблюдаемой группы. Храним, чтобы повторная
+  // транскрипция не зависела от краткоживущих WhatsApp media URL.
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS bot_observed_group_audio (
+      id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+      channel           VARCHAR(20)  NOT NULL,
+      chat_id           VARCHAR(255) NOT NULL,
+      source_message_id VARCHAR(255) NOT NULL,
+      actor_name        VARCHAR(120) NULL,
+      mime_type         VARCHAR(120) NULL,
+      audio_data        LONGBLOB     NOT NULL,
+      transcript        MEDIUMTEXT   NULL,
+      transcribed_at    DATETIME     NULL,
+      created_at        TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_observed_audio_source (channel, chat_id, source_message_id),
+      INDEX idx_observed_audio_chat (channel, chat_id, created_at),
+      INDEX idx_observed_audio_actor (channel, chat_id, actor_name, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
   // Журнал ВСЕХ действий бота (вызовов инструментов): что сделал, кто инициатор,
   // успех/ошибка, краткая суть. Бот может поднять «когда и что я делал».
   await dbQuery(`
@@ -1944,6 +1964,53 @@ async function archiveMessage(channel, chatId, role, content, actorName = null) 
   }
 }
 
+async function storeObservedGroupAudio({ channel, chatId, sourceMessageId, actorName = null, mimeType = null, buffer }) {
+  if (!channel || !chatId || !sourceMessageId || !Buffer.isBuffer(buffer) || buffer.length === 0) {
+    throw new Error('invalid_observed_audio');
+  }
+  try {
+    const result = await dbQuery(
+      `INSERT INTO bot_observed_group_audio
+       (channel, chat_id, source_message_id, actor_name, mime_type, audio_data)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         id = LAST_INSERT_ID(id), actor_name = VALUES(actor_name), mime_type = VALUES(mime_type), audio_data = VALUES(audio_data)`,
+      [String(channel), String(chatId), String(sourceMessageId),
+        actorName ? String(actorName).slice(0, 120) : null, mimeType ? String(mimeType).slice(0, 120) : null, buffer]
+    );
+    return Number(result.insertId) || null;
+  } catch (err) { throw dbError(err, 'storeObservedGroupAudio'); }
+}
+
+async function getObservedGroupAudio({ channel, chatId, audioId = null, fromUtc = null, toUtc = null, speaker = null } = {}) {
+  const fmt = (d) => (d instanceof Date ? d.toISOString().slice(0, 19).replace('T', ' ') : d);
+  const where = ['channel = ?', 'chat_id = ?'];
+  const params = [String(channel), String(chatId)];
+  if (audioId != null) { where.push('id = ?'); params.push(Number(audioId)); }
+  if (fromUtc) { where.push('created_at >= ?'); params.push(fmt(fromUtc)); }
+  if (toUtc) { where.push('created_at <= ?'); params.push(fmt(toUtc)); }
+  if (speaker) { where.push('actor_name LIKE ?'); params.push(`%${String(speaker).trim()}%`); }
+  try {
+    const rows = await dbQuery(
+      `SELECT id, actor_name, mime_type, audio_data, transcript, transcribed_at, created_at
+         FROM bot_observed_group_audio
+        WHERE ${where.join(' AND ')}
+        ORDER BY created_at DESC, id DESC LIMIT 1`,
+      params
+    );
+    return rows[0] || null;
+  } catch (err) { throw dbError(err, 'getObservedGroupAudio'); }
+}
+
+async function saveObservedGroupAudioTranscript(audioId, transcript) {
+  try {
+    await dbQuery(
+      'UPDATE bot_observed_group_audio SET transcript = ?, transcribed_at = UTC_TIMESTAMP() WHERE id = ?',
+      [String(transcript || '').slice(0, 60000), Number(audioId)]
+    );
+  } catch (err) { throw dbError(err, 'saveObservedGroupAudioTranscript'); }
+}
+
 async function logBotEvent(data = {}) {
   if (!data.tool) return;
   try {
@@ -3133,6 +3200,7 @@ module.exports = {
   loadHistory, saveHistory, clearHistory,
   // Долгая память: архив переписки + журнал действий + recall
   archiveMessage, logBotEvent, recallSearch, archiveByDateRange, archiveChatPage, archiveByPerson,
+  storeObservedGroupAudio, getObservedGroupAudio, saveObservedGroupAudioTranscript,
   // Семантический индекс архива (RAG)
   listChatsWithBacklog, archiveMessagesAfter, insertArchiveChunk, loadChunkVectors,
   checkDailyCount, incrementDailyCount,

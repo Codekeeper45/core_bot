@@ -1,7 +1,8 @@
 'use strict';
 
-const { archiveChatPage } = require('../services/mysql');
+const { archiveChatPage, getObservedGroupAudio, saveObservedGroupAudioTranscript } = require('../services/mysql');
 const { semanticRecall } = require('../services/memorySearch');
+const { transcribeAudio } = require('../services/openrouterMedia');
 const { localBoundaryToUtc, localStamp } = require('../utils/localTime');
 const { queryTokens } = require('../utils/stockKey');
 const { getObservedGroupIds, isReportRequester } = require('../services/groupObserver');
@@ -17,7 +18,9 @@ const definition = {
     description:
       'Полный поиск и отчёт по наблюдаемой WhatsApp-группе «Склад отгрузки». Используй в ЛС, когда '
       + 'Стас или руководитель просит сводку, историю, поиск сообщения или анализ группы. Группа read-only: бот только '
-      + 'читает и архивирует сообщения, в саму группу никогда не отвечает. mode: all — вся история '
+      + 'читает и архивирует сообщения, в саму группу никогда не отвечает. Голосовые сохраняются с '
+      + 'транскрипцией, изображения — с описанием и извлечённым текстом. mode: audio — повторно '
+      + 'расшифровать последнее или выбранное голосовое. mode: all — вся история '
       + 'постранично; date — точный период from/to; keyword — поиск точных слов по архиву; semantic — '
       + 'поиск по смыслу в эмбеддингах только этой группы. Для all/date/keyword при has_more=true '
       + 'обязательно вызови инструмент повторно с теми же параметрами и cursor=next_cursor, прежде чем '
@@ -27,12 +30,15 @@ const definition = {
       properties: {
         mode: {
           type: 'string',
-          enum: ['all', 'date', 'keyword', 'semantic'],
-          description: 'Режим: all — вся история; date — период; keyword — точные слова; semantic — поиск по смыслу.',
+          enum: ['all', 'date', 'keyword', 'semantic', 'audio'],
+          description: 'Режим: all — вся история; date — период; keyword — точные слова; semantic — поиск по смыслу; audio — расшифровать голосовое.',
         },
         from: { type: 'string', description: 'Начало периода: ГГГГ-ММ-ДД или ГГГГ-ММ-ДД ЧЧ:ММ.' },
         to: { type: 'string', description: 'Конец периода включительно: ГГГГ-ММ-ДД или ГГГГ-ММ-ДД ЧЧ:ММ.' },
         query: { type: 'string', description: 'Запрос для keyword/semantic, например «задержка машины» или «возврат паллет».' },
+        audio_id: { type: 'integer', description: 'ID сохранённого голосового для mode=audio; без него берётся последнее подходящее.' },
+        speaker: { type: 'string', description: 'Автор голосового для mode=audio, например «Заиндин».' },
+        retry: { type: 'boolean', description: 'Для mode=audio: true — повторно отправить сохранённый оригинал в STT, даже если транскрипция уже есть.' },
         cursor: { type: 'integer', description: 'Курсор следующей страницы из next_cursor; начальная страница — 0.' },
         limit: { type: 'integer', description: 'Размер страницы/число семантических фрагментов: 1–300; по умолчанию 250.' },
       },
@@ -129,6 +135,40 @@ async function semanticPage({ groupId, range, query, limit }) {
   };
 }
 
+async function audioReport({ groupId, range, args }) {
+  const audioId = args.audio_id == null || args.audio_id === '' ? null : Number(args.audio_id);
+  if (audioId != null && (!Number.isInteger(audioId) || audioId <= 0)) {
+    return { success: false, reason: 'bad_audio_id', message: 'audio_id должен быть положительным целым числом.' };
+  }
+  const audio = await getObservedGroupAudio({
+    channel: 'whatsapp', chatId: groupId, audioId,
+    fromUtc: range.fromUtc, toUtc: range.toUtc, speaker: args.speaker || null,
+  });
+  if (!audio) {
+    return { success: false, reason: 'audio_not_saved', message: 'Сохранённое голосовое за эти условия не найдено. Старые сообщения, пришедшие до включения хранения аудио, повторно расшифровать нельзя.' };
+  }
+
+  let transcript = String(audio.transcript || '').trim();
+  if (args.retry === true || !transcript) {
+    try {
+      transcript = await transcribeAudio(audio.audio_data, audio.mime_type || 'audio/ogg');
+      if (!transcript) throw new Error('empty_transcript');
+      await saveObservedGroupAudioTranscript(audio.id, transcript);
+    } catch (err) {
+      return {
+        success: false, reason: 'audio_transcription_failed', audio_id: audio.id,
+        message: 'Оригинал голосового найден, но STT не вернул транскрипцию. Его можно попробовать снова позже.',
+      };
+    }
+  }
+
+  return {
+    success: true, group: 'Склад отгрузки', mode: 'audio',
+    audio: { id: audio.id, when: localStamp(audio.created_at), who: audio.actor_name || 'Участник группы', transcript },
+    note: 'Это транскрипция сохранённого оригинала голосового из наблюдаемой группы.',
+  };
+}
+
 async function handler(args = {}, context = {}) {
   if (!isReportRequester(context)) {
     return { success: false, reason: 'not_allowed', message: 'Отчёт по наблюдаемой группе доступен только назначенному запросчику.' };
@@ -140,8 +180,8 @@ async function handler(args = {}, context = {}) {
 
   const query = String(args.query || '').trim();
   const mode = args.mode || (query ? 'semantic' : (args.from || args.to ? 'date' : 'date'));
-  if (!['all', 'date', 'keyword', 'semantic'].includes(mode)) {
-    return { success: false, reason: 'bad_mode', message: 'Режим должен быть all, date, keyword или semantic.' };
+  if (!['all', 'date', 'keyword', 'semantic', 'audio'].includes(mode)) {
+    return { success: false, reason: 'bad_mode', message: 'Режим должен быть all, date, keyword, semantic или audio.' };
   }
   if ((mode === 'keyword' || mode === 'semantic') && !query) {
     return { success: false, reason: 'query_required', message: `Для режима ${mode} нужен query.` };
@@ -150,6 +190,9 @@ async function handler(args = {}, context = {}) {
   const parsed = parseRange(args, mode);
   if (parsed.error) return parsed.error;
   const range = parsed.range;
+  if (mode === 'audio') {
+    try { return await audioReport({ groupId: groupIds[0], range, args }); } catch (err) { return handleToolDbError(err); }
+  }
   const cursor = args.cursor == null || args.cursor === '' ? 0 : Number(args.cursor);
   if (!Number.isInteger(cursor) || cursor < 0) {
     return { success: false, reason: 'bad_cursor', message: 'cursor должен быть неотрицательным целым числом.' };

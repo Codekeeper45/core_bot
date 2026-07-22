@@ -11,11 +11,19 @@ let rows = [];
 let lastArchiveArgs = null;
 let semanticResult = { ok: false, reason: 'disabled', results: [] };
 let lastSemanticArgs = null;
+let observedAudio = null;
+let lastAudioArgs = null;
+let savedTranscript = null;
 const mysqlMock = {
   archiveChatPage: async (args) => {
     lastArchiveArgs = args;
     return rows;
   },
+  getObservedGroupAudio: async (args) => {
+    lastAudioArgs = args;
+    return observedAudio;
+  },
+  saveObservedGroupAudioTranscript: async (id, transcript) => { savedTranscript = { id, transcript }; },
 };
 const memorySearchMock = {
   semanticRecall: async (args) => {
@@ -23,11 +31,13 @@ const memorySearchMock = {
     return semanticResult;
   },
 };
+const mediaMock = { transcribeAudio: async () => 'Повторная транскрипция голосового.' };
 
 const originalRequire = Module.prototype.require;
 Module.prototype.require = function (id) {
   if (id === '../services/mysql') return mysqlMock;
   if (id === '../services/memorySearch') return memorySearchMock;
+  if (id === '../services/openrouterMedia') return mediaMock;
   return originalRequire.apply(this, arguments);
 };
 delete require.cache[require.resolve('../../src/tools/groupReport')];
@@ -43,6 +53,9 @@ describe('group_report', () => {
     lastArchiveArgs = null;
     semanticResult = { ok: false, reason: 'disabled', results: [] };
     lastSemanticArgs = null;
+    observedAudio = null;
+    lastAudioArgs = null;
+    savedTranscript = null;
   });
 
   test('не назначенный пользователь не получает архив группы', async () => {
@@ -127,6 +140,25 @@ describe('group_report', () => {
     assert.equal(result.search_mode, 'keyword_fallback');
     assert.equal(result.fallback_reason, 'disabled');
     assert.equal(lastArchiveArgs.tokens.length, 2);
+  });
+
+  test('audio повторно транскрибирует сохранённый оригинал выбранного автора', async () => {
+    observedAudio = {
+      id: 12, actor_name: 'Заиндин', mime_type: 'audio/ogg', audio_data: Buffer.from('voice'),
+      transcript: null, created_at: '2026-07-22 10:00:00',
+    };
+    const result = await handler({ mode: 'audio', speaker: 'Заиндин', retry: true }, BOSS);
+    assert.equal(result.success, true);
+    assert.equal(result.audio.id, 12);
+    assert.equal(result.audio.transcript, 'Повторная транскрипция голосового.');
+    assert.equal(lastAudioArgs.speaker, 'Заиндин');
+    assert.deepEqual(savedTranscript, { id: 12, transcript: 'Повторная транскрипция голосового.' });
+  });
+
+  test('audio честно сообщает, когда старый оригинал не был сохранён', async () => {
+    const result = await handler({ mode: 'audio', speaker: 'Заиндин' }, BOSS);
+    assert.equal(result.success, false);
+    assert.equal(result.reason, 'audio_not_saved');
   });
 
   test('keyword требует query', async () => {

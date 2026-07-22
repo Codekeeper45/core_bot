@@ -22,6 +22,7 @@ auth_info_baileys/
 .claude/settings.local.json
 .antigravitycli/
 .gemini/
+.sftp-verify/
 
 # Local databases / vector stores
 ruvector.db
