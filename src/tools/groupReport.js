@@ -5,7 +5,7 @@ const { semanticRecall } = require('../services/memorySearch');
 const { transcribeAudio } = require('../services/openrouterMedia');
 const { localBoundaryToUtc, localStamp } = require('../utils/localTime');
 const { queryTokens } = require('../utils/stockKey');
-const { getObservedGroupIds, isReportRequester } = require('../services/groupObserver');
+const { getObservedGroupIds, findObservedGroupId, isReportRequester } = require('../services/groupObserver');
 const { handleToolDbError } = require('../utils/toolError');
 
 const ARCHIVE_PAGE_MAX = 300;
@@ -16,18 +16,19 @@ const definition = {
   function: {
     name: 'group_report',
     description:
-      'Полный поиск и отчёт по наблюдаемой WhatsApp-группе «Склад отгрузки». Используй в ЛС, когда '
-      + 'Стас или руководитель просит сводку, историю, поиск сообщения или анализ группы. Группа read-only: бот только '
+      'Полный поиск и отчёт по наблюдаемым WhatsApp-группам («Склад отгрузки», «Неодрейн Казахстан» / «Neodrain Kazakhstan» и др.). Используй в ЛС, когда '
+      + 'Стас или руководитель просит сводку, историю, поиск сообщения или анализ группы. Группы read-only: бот только '
       + 'читает и архивирует сообщения, в саму группу никогда не отвечает. Голосовые сохраняются с '
       + 'транскрипцией, изображения — с описанием и извлечённым текстом. mode: audio — повторно '
       + 'расшифровать последнее или выбранное голосовое. mode: all — вся история '
       + 'постранично; date — точный период from/to; keyword — поиск точных слов по архиву; semantic — '
-      + 'поиск по смыслу в эмбеддингах только этой группы. Для all/date/keyword при has_more=true '
+      + 'поиск по смыслу в эмбеддингах наблюдаемых групп. Для all/date/keyword при has_more=true '
       + 'обязательно вызови инструмент повторно с теми же параметрами и cursor=next_cursor, прежде чем '
       + 'составлять итоговый отчёт. Не выдумывай данные, даты бери из результата.',
     parameters: {
       type: 'object',
       properties: {
+        group: { type: 'string', description: 'Название или JID наблюдаемой группы (например «Неодрейн Казахстан» или «Склад отгрузки»). Если не указано — поиск идёт по наблюдаемой группе.' },
         mode: {
           type: 'string',
           enum: ['all', 'date', 'keyword', 'semantic', 'audio'],
@@ -35,7 +36,7 @@ const definition = {
         },
         from: { type: 'string', description: 'Начало периода: ГГГГ-ММ-ДД или ГГГГ-ММ-ДД ЧЧ:ММ.' },
         to: { type: 'string', description: 'Конец периода включительно: ГГГГ-ММ-ДД или ГГГГ-ММ-ДД ЧЧ:ММ.' },
-        query: { type: 'string', description: 'Запрос для keyword/semantic, например «задержка машины» или «возврат паллет».' },
+        query: { type: 'string', description: 'Запрос для keyword/semantic, например «задержка машины» или «сертификаты».' },
         audio_id: { type: 'integer', description: 'ID сохранённого голосового для mode=audio; без него берётся последнее подходящее.' },
         speaker: { type: 'string', description: 'Автор голосового для mode=audio, например «Заиндин».' },
         retry: { type: 'boolean', description: 'Для mode=audio: true — повторно отправить сохранённый оригинал в STT, даже если транскрипция уже есть.' },
@@ -178,6 +179,18 @@ async function handler(args = {}, context = {}) {
     return { success: false, reason: 'group_not_configured', message: 'Наблюдаемая группа не настроена.' };
   }
 
+  let groupId = groupIds[0];
+  let groupName = 'Наблюдаемая группа';
+  if (args.group) {
+    const foundJid = findObservedGroupId(args.group);
+    if (foundJid) {
+      groupId = foundJid;
+      groupName = String(args.group).trim();
+    } else {
+      groupName = String(args.group).trim();
+    }
+  }
+
   const query = String(args.query || '').trim();
   const mode = args.mode || (query ? 'semantic' : (args.from || args.to ? 'date' : 'date'));
   if (!['all', 'date', 'keyword', 'semantic', 'audio'].includes(mode)) {
@@ -191,14 +204,13 @@ async function handler(args = {}, context = {}) {
   if (parsed.error) return parsed.error;
   const range = parsed.range;
   if (mode === 'audio') {
-    try { return await audioReport({ groupId: groupIds[0], range, args }); } catch (err) { return handleToolDbError(err); }
+    try { return await audioReport({ groupId, range, args }); } catch (err) { return handleToolDbError(err); }
   }
   const cursor = args.cursor == null || args.cursor === '' ? 0 : Number(args.cursor);
   if (!Number.isInteger(cursor) || cursor < 0) {
     return { success: false, reason: 'bad_cursor', message: 'cursor должен быть неотрицательным целым числом.' };
   }
   const requestedLimit = Math.max(1, Math.min(Number(args.limit) || 250, ARCHIVE_PAGE_MAX));
-  const groupId = groupIds[0];
 
   try {
     let result;
@@ -217,7 +229,7 @@ async function handler(args = {}, context = {}) {
     const hasMore = !!result.page?.has_more;
     return {
       success: true,
-      group: 'Склад отгрузки',
+      group: groupName,
       range: rangeView(range),
       mode,
       fallback_reason: fallbackReason,

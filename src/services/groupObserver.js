@@ -46,6 +46,35 @@ function isObservedGroupId(chatId) {
   return getObservedGroupIds().includes(String(chatId || '').trim());
 }
 
+function findObservedGroupId(targetGroup) {
+  if (!targetGroup) return null;
+  const str = String(targetGroup).trim();
+  if (str.endsWith('@g.us')) return str;
+  const norm = normalizeName(str);
+  for (const [subj, jid] of dynamicGroups.entries()) {
+    if (subj.includes(norm) || norm.includes(subj)) return jid;
+  }
+  return null;
+}
+
+function getObservedGroupsInfo() {
+  const result = [];
+  const seen = new Set();
+  for (const [subj, jid] of dynamicGroups.entries()) {
+    if (!seen.has(jid)) {
+      seen.add(jid);
+      result.push({ id: jid, name: subj });
+    }
+  }
+  for (const jid of config.OBSERVE_ONLY_GROUP_WA) {
+    if (!seen.has(jid)) {
+      seen.add(jid);
+      result.push({ id: jid, name: jid });
+    }
+  }
+  return result;
+}
+
 function detectCommitmentsAndDocuments(text) {
   const t = String(text || '').toLowerCase();
   const tags = [];
@@ -136,6 +165,8 @@ module.exports = {
   rememberObservedGroup,
   getObservedGroupIds,
   isObservedGroupId,
+  findObservedGroupId,
+  getObservedGroupsInfo,
   observedMessageContent,
   isReportRequester,
   normalizeName,

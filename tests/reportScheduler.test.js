@@ -107,7 +107,7 @@ test('buildGroupDailySummary: форматирует сводку сообщен
     { who: 'Заиндин', text: '[ИЗОБРАЖЕНИЕ | НАКЛАДНАЯ/ДОКУМЕНТ]\nПодпись: нет\nОписание: Накладная №454, водитель Нурлан' },
     { who: 'Али', text: 'У нас задержка по доставке' },
   ];
-  const summary = buildGroupDailySummary(messages, '2026-07-22');
+  const summary = buildGroupDailySummary(messages, '2026-07-22', 'Склад отгрузки');
   assert.match(summary, /Ежедневная сводка по группе «Склад отгрузки»/);
   assert.match(summary, /Всего сообщений: 3/);
   assert.match(summary, /Иван, Заиндин, Али/);

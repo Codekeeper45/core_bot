@@ -206,10 +206,10 @@ async function runMorningSummary() {
   return { sent, total: targets.length };
 }
 
-// ── Вечер: ежедневная сводка по наблюдаемой группе ─────────────────────────
-function buildGroupDailySummary(messages = [], dateStr = '') {
+// ── Вечер: ежедневная сводка по наблюдаемым группам ─────────────────────────
+function buildGroupDailySummary(messages = [], dateStr = '', groupName = 'Наблюдаемая группа') {
   if (!messages.length) {
-    return `Сводка по группе «Склад отгрузки» за ${dateStr}:\nАктивности и сообщений за сегодня не зафиксировано.`;
+    return `Сводка по группе «${groupName}» за ${dateStr}:\nАктивности и сообщений за сегодня не зафиксировано.`;
   }
   const participants = [...new Set(messages.map((m) => m.who || m.actor_name).filter(Boolean))];
   const voices = messages.filter((m) => String(m.text || m.content || '').includes('[ГОЛОСОВОЕ'));
@@ -217,7 +217,7 @@ function buildGroupDailySummary(messages = [], dateStr = '') {
   const issues = messages.filter((m) => /(задержк|брак|ошибк|не успе|нет машин|пробк|отмен)/i.test(String(m.text || m.content || '')));
 
   const lines = [
-    `Ежедневная сводка по группе «Склад отгрузки» (${dateStr}):`,
+    `Ежедневная сводка по группе «${groupName}» (${dateStr}):`,
     `- Всего сообщений: ${messages.length}`,
     `- Активные участники (${participants.length}): ${participants.join(', ')}`,
   ];
@@ -249,25 +249,15 @@ function buildGroupDailySummary(messages = [], dateStr = '') {
 }
 
 async function runGroupDailySummary(now = new Date()) {
-  const { getObservedGroupIds } = require('./groupObserver');
+  const { getObservedGroupIds, getObservedGroupsInfo } = require('./groupObserver');
+  const groupsInfo = getObservedGroupsInfo();
   const groupIds = getObservedGroupIds();
   if (!groupIds.length) return { sent: 0, total: 0 };
-  const groupId = groupIds[0];
 
   const { archiveChatPage } = require('./mysql');
   const startOfDay = localNow(now);
   startOfDay.setUTCHours(0, 0, 0, 0);
-
-  const rows = await archiveChatPage({
-    channel: 'whatsapp',
-    chatId: groupId,
-    fromUtc: startOfDay,
-    toUtc: now,
-    limit: 300,
-  });
-
   const dateStr = localDateKey(now);
-  const text = buildGroupDailySummary(rows, dateStr);
 
   const targets = new Set();
   for (const d of config.GROUP_REPORT_REQUESTERS_WA) targets.add(d);
@@ -275,14 +265,31 @@ async function runGroupDailySummary(now = new Date()) {
   for (const d of config.BOSS_CONTACTS) targets.add(d);
 
   const quiet = await quietDigitsSet();
-  let sent = 0;
-  for (const digits of targets) {
-    if (!digits || quiet.has(String(digits).replace(/\D/g, ''))) continue;
-    const ok = await notifier.deliver('whatsapp', digits, text);
-    if (ok) sent += 1;
+  let totalSent = 0;
+
+  const targetGroups = groupsInfo.length ? groupsInfo : groupIds.map((id) => ({ id, name: 'Наблюдаемая группа' }));
+
+  for (const g of targetGroups) {
+    const rows = await archiveChatPage({
+      channel: 'whatsapp',
+      chatId: g.id,
+      fromUtc: startOfDay,
+      toUtc: now,
+      limit: 300,
+    });
+    if (!rows.length) continue;
+
+    const text = buildGroupDailySummary(rows, dateStr, g.name || 'Наблюдаемая группа');
+
+    for (const digits of targets) {
+      if (!digits || quiet.has(String(digits).replace(/\D/g, ''))) continue;
+      const ok = await notifier.deliver('whatsapp', digits, text);
+      if (ok) totalSent += 1;
+    }
   }
-  console.log(`[Scheduler] Ежедневная сводка по группе «Склад отгрузки»: ${sent}/${targets.size} отправлено`);
-  return { sent, total: targets.size };
+
+  console.log(`[Scheduler] Ежедневная сводка по наблюдаемым группам: ${totalSent}/${targets.size} отправлено`);
+  return { sent: totalSent, total: targets.size };
 }
 
 // ── Управление (инструмент manage_scheduler) ───────────────────────────────

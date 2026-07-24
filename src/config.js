@@ -71,7 +71,7 @@ module.exports = {
   // точный JID (120...@g.us) и/или название группы, через запятую.
   OBSERVE_ONLY_GROUP_WA: (process.env.OBSERVE_ONLY_GROUP_WA || '')
     .split(',').map((s) => s.trim()).filter(Boolean),
-  OBSERVE_ONLY_GROUP_NAMES: (process.env.OBSERVE_ONLY_GROUP_NAMES || 'Склад отгрузки')
+  OBSERVE_ONLY_GROUP_NAMES: (process.env.OBSERVE_ONLY_GROUP_NAMES || 'Склад отгрузки, Неодрейн Казахстан, Neodrain Kazakhstan')
     .split(',').map((s) => s.trim()).filter(Boolean),
   // Оригиналы голосовых наблюдаемой группы сохраняются для повторной расшифровки.
   // Защита от случайно присланных очень больших файлов.
