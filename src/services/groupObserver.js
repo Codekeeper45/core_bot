@@ -148,6 +148,21 @@ async function observedMessageContent(message = {}) {
     return `[ИЗОБРАЖЕНИЕ${tagHeader}]\nПодпись: ${message.image_caption || 'нет'}\nОписание: ${description}`;
   }
 
+  if (message.message_type === 'document' && message.document_family && message.document_family !== 'unsupported') {
+    try {
+      const { processDocument } = require('../media/document');
+      const docResult = await processDocument(message);
+      if (docResult && docResult.text) {
+        const tags = detectCommitmentsAndDocuments(docResult.text);
+        const tagHeader = tags.length ? ` [${tags.join(' | ')}]` : '';
+        return `[ДОКУМЕНТ${tagHeader}: ${message.document_file_name || 'файл'}]\n${docResult.text}`;
+      }
+    } catch (err) {
+      console.error('[Group observer] Document parse error:', err.message);
+    }
+    return `[ДОКУМЕНТ: ${message.document_file_name || 'файл'}] (не удалось прочитать)`;
+  }
+
   return fallback;
 }
 
