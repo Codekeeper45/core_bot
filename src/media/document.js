@@ -94,14 +94,16 @@ async function parseDocumentBuffer(buffer, family, fileName) {
     }
     case 'archive': {
       // Распаковываем ZIP и читаем каждый файл внутри
+      console.log(`[Doc] Обработка ZIP-архива: ${fileName}, размер: ${buffer.length} байт`);
       try {
         const JSZip = require('jszip');
         const zip = await JSZip.loadAsync(buffer);
-        const MAX_FILES = 30;       // не больше 30 файлов за раз
-        const MAX_FILE_BYTES = 5 * 1024 * 1024; // 5 МБ на файл
-        const MAX_TOTAL_CHARS = 80000; // общий лимит символов вывода
+        const MAX_FILES = 30;
+        const MAX_FILE_BYTES = 5 * 1024 * 1024;
+        const MAX_TOTAL_CHARS = 80000;
 
         const entries = Object.values(zip.files).filter(f => !f.dir);
+        console.log(`[Doc] ZIP содержит ${entries.length} файлов`);
         const lines = [`[АРХИВ: ${fileName}] Файлов: ${entries.length}`];
         let totalChars = 0;
 
@@ -204,8 +206,9 @@ async function processDocument(normalized) {
   // Настоящие Office-файлы (.docx/.xlsx — это zip, сигнатура «PK») дополнительно
   // держим бинарником: manage_document правит договор на месте, а
   // financial_analysis считает по исходной таблице 1С, а не по лоссовому тексту.
+  // Исключаем настоящие ZIP-архивы (family=archive) — им binary stash не нужен.
   try {
-    if (buffer && buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
+    if (document_family !== 'archive' && buffer && buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
       require('../services/docBinaryStash').put(channel, chat_id, {
         fileName: document_file_name, buffer, mimetype: normalized.document_mime_type || null,
       });
