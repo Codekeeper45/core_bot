@@ -72,6 +72,39 @@ class BaileysService extends EventEmitter {
       }
     });
 
+    // Бот добавлен в новую группу — сразу подхватываем её и запускаем backfill
+    this.sock.ev.on('group-participants.update', async ({ id, action, participants }) => {
+      if (action !== 'add') return;
+      const myJid = this.sock.user?.id || '';
+      const myPhone = myJid.split(':')[0].split('@')[0];
+      const addedSelf = participants.some((p) => p.split('@')[0].split(':')[0] === myPhone);
+      if (!addedSelf) return;
+      try {
+        const meta = await this.sock.groupMetadata(id);
+        const subject = meta?.subject || id;
+        this.groupSubjects.set(id, subject);
+        groupObserver.rememberObservedGroup({ chatId: id, subject });
+        console.log(`[Baileys] Добавлен в группу: ${id} — «${subject}». Запускаю backfill...`);
+        // Запуск backfill истории для новой группы через embeddingWorker
+        try {
+          const { backfillGroup } = require('../services/embeddingWorker');
+          if (typeof backfillGroup === 'function') backfillGroup(id);
+        } catch (_) {}
+      } catch (err) {
+        console.warn('[Baileys] Не удалось получить метаданные новой группы:', err.message);
+      }
+    });
+
+    // Обновление метаданных групп (например, переименование)
+    this.sock.ev.on('groups.update', (updates) => {
+      for (const upd of updates) {
+        if (upd.id && upd.subject) {
+          this.groupSubjects.set(upd.id, upd.subject);
+          groupObserver.rememberObservedGroup({ chatId: upd.id, subject: upd.subject });
+        }
+      }
+    });
+
     this.sock.ev.on('connection.update', (update) => {
       const { connection, lastDisconnect, qr } = update;
       if (qr) {

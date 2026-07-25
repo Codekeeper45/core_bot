@@ -73,6 +73,9 @@ module.exports = {
     .split(',').map((s) => s.trim()).filter(Boolean),
   OBSERVE_ONLY_GROUP_NAMES: (process.env.OBSERVE_ONLY_GROUP_NAMES || 'Склад отгрузки, Неодрейн Казахстан, Neodrain Kazakhstan')
     .split(',').map((s) => s.trim()).filter(Boolean),
+  // Если true — бот наблюдает ВСЕ группы, в которых состоит аккаунт (read-only).
+  // Отдельных настроек OBSERVE_ONLY_GROUP_* в таком случае можно не заполнять.
+  OBSERVE_ALL_GROUPS: (process.env.OBSERVE_ALL_GROUPS || 'true').trim().toLowerCase() === 'true',
   // Оригиналы голосовых наблюдаемой группы сохраняются для повторной расшифровки.
   // Защита от случайно присланных очень больших файлов.
   OBSERVED_GROUP_AUDIO_MAX_BYTES: Math.max(1024 * 1024,

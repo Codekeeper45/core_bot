@@ -6,7 +6,7 @@ const config = require('../config');
 const FALLBACK_MESSAGES = {
   doc_daily_limit: 'Сегодня можно отправить не больше 10 документов. Попробуйте продолжить завтра.',
   doc_char_limit: 'Документ слишком большой даже для базы знаний. Пришлите его частями.',
-  doc_unsupported: 'Этот формат файла пока не поддерживается. Можно отправить PDF, DOC/DOCX, TXT/CSV, XLSX/ODS-таблицы, а также MD/JSON/XML/YAML.',
+  doc_unsupported: 'Этот формат файла пока не поддерживается. Можно отправить PDF, DOC/DOCX/ODT/RTF, XLS/XLSX/ODS, TXT/CSV, MD/JSON/XML/YAML, PPT/PPTX, архивы (ZIP/RAR), email (EML).',
   doc_parse_failed: (name) => `Не удалось обработать файл ${name}. Попробуйте отправить его ещё раз или в PDF.`,
 };
 
@@ -48,9 +48,15 @@ async function parseDocumentBuffer(buffer, family, fileName) {
       return data.text || '';
     }
     case 'doc': {
-      const mammoth = require('mammoth');
-      const result = await mammoth.extractRawText({ buffer });
-      return result.value || '';
+      // mammoth читает docx нативно. Для .doc/.odt/.rtf побеждем ошибку и вернём подсказку
+      try {
+        const mammoth = require('mammoth');
+        const result = await mammoth.extractRawText({ buffer });
+        if (result.value) return result.value;
+      } catch (_) {}
+      // Для старых .doc/RTF попытаемся вычитать текст как UTF-8 (RTF очащает ASCII-переходы)
+      const raw = buffer.toString('latin1').replace(/\\[a-z]+\d* ?|[{}]/g, ' ').replace(/\s+/g, ' ').trim();
+      return raw.length > 20 ? raw : `[Формат файла: ${fileName}] Не удалось извлечь текст. Конвертируйте в PDF.`;
     }
     case 'text': {
       return buffer.toString('utf-8');
@@ -64,7 +70,30 @@ async function parseDocumentBuffer(buffer, family, fileName) {
       }).join('\n\n');
     }
     case 'presentation': {
+      // Попытаемся читать pptx через xlsx (ZIP+XML)
+      try {
+        const XLSX = require('xlsx');
+        const wb = XLSX.read(buffer, { type: 'buffer' });
+        if (wb.SheetNames.length) {
+          return wb.SheetNames.map(n => `[Слайд: ${n}]\n` + XLSX.utils.sheet_to_csv(wb.Sheets[n])).join('\n\n');
+        }
+      } catch (_) {}
       return `[Файл презентации: ${fileName}] Содержимое не удалось извлечь. Конвертируйте в PDF.`;
+    }
+    case 'archive': {
+      // Перечисляем файлы внутри ZIP
+      try {
+        const XLSX = require('xlsx');
+        const zip = XLSX.read(buffer, { type: 'buffer' });
+        const files = Object.keys(zip.Sheets);
+        if (files.length) return `[Архив: ${fileName}]\nФайлы: ${files.join(', ')}`;
+      } catch (_) {}
+      return `[Архив: ${fileName}] Чтение содержимого архивов не поддерживается. Распакуйте и отправьте файлы отдельно.`;
+    }
+    case 'email': {
+      // Читаем EML как текст (RFC-822 — plain text)
+      const raw = buffer.toString('utf-8');
+      return raw.slice(0, 50000);
     }
     default:
       return null;

@@ -9,18 +9,53 @@ const EXCLUDED_CHAT_ID = config.EXCLUDED_CHAT_ID;
 function getDocumentFamily(mimeType = '', fileName = '') {
   const mt = mimeType.toLowerCase();
   const ext = (fileName.split('.').pop() || '').toLowerCase();
+
+  // PDF
   if (mt === 'application/pdf' || ext === 'pdf') return 'pdf';
-  if (mt.includes('word') || mt.includes('officedocument.wordprocessing') || ['doc', 'docx'].includes(ext)) return 'doc';
-  // Табличные форматы (xlsx читаются библиотекой xlsx как есть; ODS — тоже).
-  if (mt.includes('opendocument.spreadsheet') || mt.includes('spreadsheet') || mt.includes('excel')
-    || ['xls', 'xlsx', 'ods', 'ots'].includes(ext)) return 'spreadsheet';
-  // Текстовые/структурные форматы — читаем как utf-8, годятся для базы знаний.
-  if (mt === 'text/plain' || mt === 'text/csv' || mt === 'text/tab-separated-values'
-    || mt.includes('json') || mt.includes('xml') || mt.includes('yaml') || mt.includes('markdown') || mt.includes('html')
-    || ['txt', 'csv', 'tsv', 'md', 'markdown', 'json', 'xml', 'yaml', 'yml', 'log', 'ini', 'html', 'htm'].includes(ext)) return 'text';
-  if (mt.includes('presentation') || mt.includes('powerpoint') || ['ppt', 'pptx'].includes(ext)) return 'presentation';
+
+  // Word-документы: новые (.docx) и старые (.doc), а также .odt, .rtf
+  if (mt.includes('officedocument.wordprocessing')
+    || mt === 'application/msword'
+    || mt === 'application/rtf' || mt === 'text/rtf'
+    || mt === 'application/vnd.oasis.opendocument.text'
+    || ['doc', 'docx', 'odt', 'rtf'].includes(ext)) return 'doc';
+
+  // Таблицы: xlsx, xls, ods, ots, csv (MIME), Numbers
+  if (mt.includes('opendocument.spreadsheet')
+    || mt.includes('spreadsheetml')
+    || mt.includes('ms-excel')
+    || mt.includes('vnd.ms-excel')
+    || mt === 'text/csv' || mt === 'text/tab-separated-values'
+    || mt === 'application/vnd.apple.numbers'
+    || ['xls', 'xlsx', 'ods', 'ots', 'numbers'].includes(ext)) return 'spreadsheet';
+
+  // Текстовые и структурные форматы
+  if (mt === 'text/plain'
+    || mt.includes('json') || mt.includes('xml') || mt.includes('yaml')
+    || mt.includes('markdown') || mt.includes('html') || mt.includes('javascript')
+    || mt.includes('typescript') || mt.includes('x-python') || mt.includes('x-sh')
+    || ['txt', 'csv', 'tsv', 'md', 'markdown', 'json', 'xml', 'yaml', 'yml',
+        'log', 'ini', 'html', 'htm', 'js', 'ts', 'py', 'sh', 'sql'].includes(ext)) return 'text';
+
+  // Презентации: pptx, ppt, odp, key
+  if (mt.includes('presentationml') || mt.includes('ms-powerpoint')
+    || mt === 'application/vnd.oasis.opendocument.presentation'
+    || mt === 'application/vnd.apple.keynote'
+    || ['ppt', 'pptx', 'odp', 'key'].includes(ext)) return 'presentation';
+
+  // Архивы — сохраним как архив (не парсим содержимое)
+  if (mt === 'application/zip' || mt === 'application/x-zip-compressed'
+    || mt === 'application/x-rar-compressed' || mt === 'application/x-7z-compressed'
+    || mt === 'application/gzip' || mt === 'application/x-tar'
+    || ['zip', 'rar', '7z', 'gz', 'tar', 'tgz'].includes(ext)) return 'archive';
+
+  // Email / сообщения
+  if (mt === 'message/rfc822' || mt === 'application/vnd.ms-outlook'
+    || ['eml', 'msg'].includes(ext)) return 'email';
+
   return 'unsupported';
 }
+
 
 function normalizeInbound(raw) {
   const isBlocked = (phone) => BLOCKED_PHONES.has(normalizePhone(phone));

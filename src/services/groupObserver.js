@@ -24,15 +24,24 @@ function configuredGroupNames() {
 function isObservedGroup({ chatId, subject } = {}) {
   const jid = String(chatId || '').trim();
   if (!jid || !jid.endsWith('@g.us')) return false;
+  if (config.OBSERVE_ALL_GROUPS) return true;
   if (config.OBSERVE_ONLY_GROUP_WA.includes(jid)) return true;
   const normalizedSubject = normalizeName(subject);
   return !!normalizedSubject && configuredGroupNames().includes(normalizedSubject);
 }
 
 function rememberObservedGroup({ chatId, subject } = {}) {
-  if (!isObservedGroup({ chatId, subject })) return false;
+  const jid = String(chatId || '').trim();
+  if (!jid || !jid.endsWith('@g.us')) return false;
+  // В режиме OBSERVE_ALL_GROUPS запоминаем все группы с названием
+  if (config.OBSERVE_ALL_GROUPS) {
+    const key = normalizeName(subject) || jid;
+    dynamicGroups.set(key, jid);
+    return true;
+  }
+  if (!isObservedGroup({ chatId: jid, subject })) return false;
   const normalizedSubject = normalizeName(subject);
-  if (normalizedSubject) dynamicGroups.set(normalizedSubject, String(chatId));
+  if (normalizedSubject) dynamicGroups.set(normalizedSubject, jid);
   return true;
 }
 
