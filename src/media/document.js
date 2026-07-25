@@ -40,6 +40,18 @@ async function downloadDocumentBuffer(normalized) {
   throw new Error('No document source available');
 }
 
+// Определяем family файла по имени (без MIME — у файлов внутри ZIP нет MIME-типов)
+function familyByName(name) {
+  const ext = (name.split('.').pop() || '').toLowerCase();
+  if (ext === 'pdf') return 'pdf';
+  if (['doc', 'docx', 'odt', 'rtf'].includes(ext)) return 'doc';
+  if (['xls', 'xlsx', 'ods', 'ots', 'numbers', 'csv'].includes(ext)) return 'spreadsheet';
+  if (['txt', 'md', 'json', 'xml', 'yaml', 'yml', 'log', 'ini', 'html', 'htm', 'js', 'ts', 'py', 'sh', 'sql', 'tsv'].includes(ext)) return 'text';
+  if (['ppt', 'pptx', 'odp', 'key'].includes(ext)) return 'presentation';
+  if (['eml', 'msg'].includes(ext)) return 'email';
+  return null; // пропускаем бинарники (изображения, медиа и т.д.)
+}
+
 async function parseDocumentBuffer(buffer, family, fileName) {
   switch (family) {
     case 'pdf': {
@@ -54,7 +66,7 @@ async function parseDocumentBuffer(buffer, family, fileName) {
         const result = await mammoth.extractRawText({ buffer });
         if (result.value) return result.value;
       } catch (_) {}
-      // Для старых .doc/RTF попытаемся вычитать текст как UTF-8 (RTF очащает ASCII-переходы)
+      // Для старых .doc/RTF попытаемся вычитать текст как latin1 (RTF — ASCII-переходы)
       const raw = buffer.toString('latin1').replace(/\\[a-z]+\d* ?|[{}]/g, ' ').replace(/\s+/g, ' ').trim();
       return raw.length > 20 ? raw : `[Формат файла: ${fileName}] Не удалось извлечь текст. Конвертируйте в PDF.`;
     }
@@ -81,14 +93,55 @@ async function parseDocumentBuffer(buffer, family, fileName) {
       return `[Файл презентации: ${fileName}] Содержимое не удалось извлечь. Конвертируйте в PDF.`;
     }
     case 'archive': {
-      // Перечисляем файлы внутри ZIP
+      // Распаковываем ZIP и читаем каждый файл внутри
       try {
-        const XLSX = require('xlsx');
-        const zip = XLSX.read(buffer, { type: 'buffer' });
-        const files = Object.keys(zip.Sheets);
-        if (files.length) return `[Архив: ${fileName}]\nФайлы: ${files.join(', ')}`;
-      } catch (_) {}
-      return `[Архив: ${fileName}] Чтение содержимого архивов не поддерживается. Распакуйте и отправьте файлы отдельно.`;
+        const JSZip = require('jszip');
+        const zip = await JSZip.loadAsync(buffer);
+        const MAX_FILES = 30;       // не больше 30 файлов за раз
+        const MAX_FILE_BYTES = 5 * 1024 * 1024; // 5 МБ на файл
+        const MAX_TOTAL_CHARS = 80000; // общий лимит символов вывода
+
+        const entries = Object.values(zip.files).filter(f => !f.dir);
+        const lines = [`[АРХИВ: ${fileName}] Файлов: ${entries.length}`];
+        let totalChars = 0;
+
+        for (const entry of entries.slice(0, MAX_FILES)) {
+          const entryName = entry.name;
+          const entryFamily = familyByName(entryName);
+
+          lines.push(`\n--- ${entryName} ---`);
+
+          if (!entryFamily) {
+            lines.push(`(бинарный файл, чтение не поддерживается)`);
+            continue;
+          }
+
+          try {
+            const entryBuf = Buffer.from(await entry.async('arraybuffer'));
+            if (entryBuf.length > MAX_FILE_BYTES) {
+              lines.push(`(файл слишком большой: ${Math.round(entryBuf.length / 1024)} КБ — пропущен)`);
+              continue;
+            }
+            let text = await parseDocumentBuffer(entryBuf, entryFamily, entryName);
+            if (!text) { lines.push(`(не удалось прочитать)`); continue; }
+            const remaining = MAX_TOTAL_CHARS - totalChars;
+            if (remaining <= 0) { lines.push(`(лимит вывода достигнут)`); break; }
+            if (text.length > remaining) { text = text.slice(0, remaining) + '\n…(обрезано)'; }
+            lines.push(text);
+            totalChars += text.length;
+          } catch (err) {
+            lines.push(`(ошибка чтения: ${err.message})`);
+          }
+        }
+
+        if (entries.length > MAX_FILES) {
+          lines.push(`\n…ещё ${entries.length - MAX_FILES} файлов не показаны (лимит ${MAX_FILES})`);
+        }
+
+        return lines.join('\n');
+      } catch (err) {
+        return `[Архив: ${fileName}] Не удалось распаковать ZIP: ${err.message}. Возможно, архив повреждён или зашифрован.`;
+      }
     }
     case 'email': {
       // Читаем EML как текст (RFC-822 — plain text)
@@ -99,6 +152,7 @@ async function parseDocumentBuffer(buffer, family, fileName) {
       return null;
   }
 }
+
 
 async function processDocument(normalized) {
   const { channel, chat_id, document_family, document_file_name, message } = normalized;
