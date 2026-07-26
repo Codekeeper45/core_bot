@@ -165,7 +165,14 @@ async function processMessage(rawPayload) {
     return;
   }
 
-  if (!n.is_supported) return;
+  if (!n.is_supported) {
+    // Тихий дроп — но пишем причину: иначе ZIP/документы «просто не работают» без следа.
+    if (n.channel && n.unsupported_reason && n.unsupported_reason !== 'outgoing') {
+      console.log(`[Drop] ${n.channel}/${n.chat_id || '?'} type=${n.message_type || '?'} reason=${n.unsupported_reason}`
+        + (n.document_file_name ? ` file=${n.document_file_name}` : ''));
+    }
+    return;
+  }
 
   const { channel, chat_id, phone, client_name, message_type } = n;
 

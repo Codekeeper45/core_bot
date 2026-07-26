@@ -79,6 +79,45 @@ const WA_DOC = {
   },
 };
 
+// WhatsApp часто шлёт файлы в обёртке documentWithCaptionMessage — без разворота
+// normalize раньше ставил unsupported_baileys_type и бот молчал в ЛС.
+const WA_DOC_CAPTION_ZIP = {
+  __baileys: true,
+  baileysMsg: {
+    key: { remoteJid: '77071234567@s.whatsapp.net', fromMe: false, id: 'DZ1' },
+    pushName: 'Иван',
+    message: {
+      documentWithCaptionMessage: {
+        message: {
+          documentMessage: {
+            fileName: 'подпись.zip',
+            mimetype: 'application/zip',
+            caption: 'вот архив',
+          },
+        },
+      },
+    },
+  },
+};
+
+const WA_DOC_EPHEMERAL_ZIP = {
+  __baileys: true,
+  baileysMsg: {
+    key: { remoteJid: '77071234567@s.whatsapp.net', fromMe: false, id: 'DZ2' },
+    pushName: 'Иван',
+    message: {
+      ephemeralMessage: {
+        message: {
+          documentMessage: {
+            fileName: 'data.zip',
+            mimetype: 'application/zip',
+          },
+        },
+      },
+    },
+  },
+};
+
 // ─── Telegram fixtures (unchanged) ───
 const TG_TEXT = { update_id: 123, message: { message_id: 1, from: { id: 12345, first_name: 'Алексей', username: 'alex' }, chat: { id: 12345, type: 'private' }, text: 'Привет' } };
 const TG_PHOTO = { update_id: 124, message: { message_id: 2, from: { id: 12345, first_name: 'Алексей' }, chat: { id: 12345, type: 'private' }, photo: [{ file_id: 'small', width: 90 }, { file_id: 'large', width: 800, file_unique_id: 'uid' }], caption: 'Вот фото' } };
@@ -142,6 +181,25 @@ describe('normalizeInbound — WhatsApp (Baileys)', () => {
     assert.equal(r.message_type, 'document');
     assert.equal(r.document_family, 'pdf');
     assert.equal(r.document_file_name, 'проект.pdf');
+    assert.equal(r.is_supported, true);
+  });
+
+  test('ZIP в documentWithCaptionMessage — document/archive, is_supported=true (ЛС)', () => {
+    const r = normalizeInbound(WA_DOC_CAPTION_ZIP);
+    assert.equal(r.message_type, 'document');
+    assert.equal(r.document_family, 'archive');
+    assert.equal(r.document_file_name, 'подпись.zip');
+    assert.equal(r.is_private, true);
+    assert.equal(r.is_supported, true);
+    assert.equal(r.message, 'вот архив');
+    assert.ok(r.baileys_media_obj, 'media obj для скачивания');
+  });
+
+  test('ZIP в ephemeralMessage — тоже document/archive', () => {
+    const r = normalizeInbound(WA_DOC_EPHEMERAL_ZIP);
+    assert.equal(r.message_type, 'document');
+    assert.equal(r.document_family, 'archive');
+    assert.equal(r.document_file_name, 'data.zip');
     assert.equal(r.is_supported, true);
   });
 

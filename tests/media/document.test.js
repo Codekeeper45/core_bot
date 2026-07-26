@@ -68,3 +68,66 @@ test('огромный файл (>DOC_KB_CHAR_LIMIT) усекается в бу�
   assert.equal(stashed.text.length, config.DOC_KB_CHAR_LIMIT, 'буфер обрезан до кэпа');
   assert.match(r.text, /файл огромный/);
 });
+
+// ─── OLE .doc / RTF / ZIP: не бинарный dump, а читаемый русский текст ───
+const fs = require('fs');
+const path = require('path');
+const FIXTURE_ZIP = [
+  path.join('/var/home/emir/Загрузки', 'test_rtf_and_doc_large (1).zip'),
+  path.join('/var/home/emir/Загрузки', 'test_rtf_and_doc_large.zip'),
+].find((p) => fs.existsSync(p));
+
+test('OLE .doc: извлекается читаемый текст, без бинарного dump', async () => {
+  if (!FIXTURE_ZIP) { console.log('skip: нет fixture zip'); return; }
+  const JSZip = require('jszip');
+  const zip = await JSZip.loadAsync(fs.readFileSync(FIXTURE_ZIP));
+  const entry = zip.file('test_document.doc');
+  assert.ok(entry, 'в fixture есть test_document.doc');
+  const buf = Buffer.from(await entry.async('arraybuffer'));
+  telegramMock.downloadFile = async () => ({ buffer: buf });
+  const r = await processDocument({
+    channel: 'telegram', chat_id: '111',
+    document_family: 'doc', document_file_name: 'test_document.doc',
+    document_file_id: 'DOC', message: '',
+  });
+  assert.ok(!r.error, r.error);
+  assert.match(r.text, /Большой тестовый документ/);
+  assert.match(r.text, /Алматы/);
+  assert.doesNotMatch(r.text, /Root Entry|MSWordDoc|ÐÏ/);
+});
+
+test('RTF: извлекается читаемый кириллический текст', async () => {
+  if (!FIXTURE_ZIP) { console.log('skip: нет fixture zip'); return; }
+  const JSZip = require('jszip');
+  const zip = await JSZip.loadAsync(fs.readFileSync(FIXTURE_ZIP));
+  const entry = zip.file('test_document.rtf');
+  assert.ok(entry, 'в fixture есть test_document.rtf');
+  const buf = Buffer.from(await entry.async('arraybuffer'));
+  telegramMock.downloadFile = async () => ({ buffer: buf });
+  const r = await processDocument({
+    channel: 'telegram', chat_id: '111',
+    document_family: 'doc', document_file_name: 'test_document.rtf',
+    document_file_id: 'RTF', message: '',
+  });
+  assert.ok(!r.error, r.error);
+  assert.match(r.text, /Большой тестовый документ/);
+  assert.match(r.text, /Алматы/);
+});
+
+test('ZIP с .doc+.rtf: оба файла читаются, без OLE-мусора', async () => {
+  if (!FIXTURE_ZIP) { console.log('skip: нет fixture zip'); return; }
+  const buf = fs.readFileSync(FIXTURE_ZIP);
+  telegramMock.downloadFile = async () => ({ buffer: buf });
+  const r = await processDocument({
+    channel: 'telegram', chat_id: '111',
+    document_family: 'archive', document_file_name: 'test_rtf_and_doc_large.zip',
+    document_file_id: 'ZIP', message: '',
+  });
+  assert.ok(!r.error, r.error);
+  assert.match(r.text, /test_document\.doc/);
+  assert.match(r.text, /Большой тестовый документ/);
+  assert.doesNotMatch(r.text, /Root Entry|MSWordDoc/);
+  // полный текст в stash содержит оба файла
+  assert.match(stashed.text, /test_document\.rtf/);
+  assert.match(stashed.text, /Большой тестовый документ/);
+});

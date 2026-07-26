@@ -3,6 +3,16 @@ const config = require('../config');
 const { normalizePhone } = require('../utils/helpers');
 const { isObservedGroup, rememberObservedGroup } = require('../services/groupObserver');
 
+// Baileys часто оборачивает документы/медиа: documentWithCaptionMessage,
+// ephemeralMessage, viewOnceMessageV2 и т.п. Без разворота normalize видит
+// «чужой» ключ → unsupported_baileys_type → тихий дроп в ЛС.
+let normalizeMessageContent;
+try {
+  ({ normalizeMessageContent } = require('@whiskeysockets/baileys'));
+} catch (_) {
+  normalizeMessageContent = (m) => m;
+}
+
 const BLOCKED_PHONES = new Set(config.BLOCKED_PHONES.map(normalizePhone).filter(Boolean));
 const EXCLUDED_CHAT_ID = config.EXCLUDED_CHAT_ID;
 
@@ -218,7 +228,12 @@ function normalizeInbound(raw) {
       return n;
     }
 
-    const waMsg = msg.message || {};
+    // Разворачиваем вложенные типы (documentWithCaptionMessage, ephemeral, viewOnce…).
+    // Иначе ZIP/PDF с подписью в ЛС WhatsApp падают в unsupported и бот молчит.
+    const rawWaMsg = msg.message || {};
+    const waMsg = (typeof normalizeMessageContent === 'function'
+      ? (normalizeMessageContent(rawWaMsg) || rawWaMsg)
+      : rawWaMsg) || {};
 
     if (waMsg.conversation || waMsg.extendedTextMessage) {
       n.message_type = 'text';
