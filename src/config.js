@@ -16,17 +16,17 @@ module.exports = {
   // OpenRouter — остаётся для STT (голос) и Vision (картинки), которых нет у
   // DeepSeek, а также как fallback для текстового агента, если DeepSeek недоступен.
   OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY || '',
-  OPENROUTER_MODEL: process.env.OPENROUTER_MODEL || 'deepseek/deepseek-v4-flash',
+  OPENROUTER_MODEL: process.env.OPENROUTER_MODEL || 'deepseek/deepseek-v4-pro',
   // Backup model used only when the primary fails after all retries (provider
   // outage / no response). Set to '' or same as primary to disable.
   OPENROUTER_FALLBACK_MODEL: process.env.OPENROUTER_FALLBACK_MODEL || 'qwen/qwen3.6-plus',
   // DeepSeek (прямой API) — ОСНОВНОЙ текстовый агент + AI-резюме. OpenAI-совместим.
   // Если DEEPSEEK_API_KEY пуст — текстовый агент автоматически работает через
-  // OpenRouter (обратная совместимость). Для function calling нужен deepseek-chat
-  // (у deepseek-reasoner нет нормального tool calling). STT/Vision DeepSeek НЕ умеет.
+  // OpenRouter (обратная совместимость). DeepSeek V4 Pro поддерживает tool calling.
+  // STT/Vision DeepSeek НЕ умеет.
   DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY || '',
   DEEPSEEK_BASE_URL: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
-  DEEPSEEK_MODEL: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
+  DEEPSEEK_MODEL: process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro',
   // Потолок длины ответа LLM (output tokens). ВАЖНО: без явного лимита OpenRouter
   // резервирует полный лимит модели (напр. 65536) и требует баланс под него → 402
   // «requires more credits». Явный потолок снимает 402 и удешевляет ответы. 32768 —
