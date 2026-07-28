@@ -34,6 +34,10 @@ async function bufferAndCollect(chatId, msgData) {
 
   return {
     combined_message: combinedMessage,
+    messages: sorted.map((m) => m.envelope || {
+      content: m.content,
+      message_type: m.media && m.media.type ? m.media.type : 'text',
+    }),
     buffered_images: bufferedImages,
     buffered_image_count: bufferedImages.length,
     has_buffered_images: bufferedImages.length > 0,

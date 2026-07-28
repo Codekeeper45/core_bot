@@ -63,7 +63,14 @@ async function handler(args, context = {}) {
       let fileName = String(args.file_name || 'last').trim();
       let text = args.text ? String(args.text) : null;
       if (!text) {
-        const stashed = docStash.get(context.channel, context.chatId, fileName);
+        let stashed = docStash.get(context.channel, context.chatId, fileName);
+        if (!stashed && typeof docStash.getPersistent === 'function') {
+          try {
+            stashed = await docStash.getPersistent(context.channel, context.chatId, fileName);
+          } catch (err) {
+            console.error('[manage_files] persistent media lookup:', err.message);
+          }
+        }
         if (!stashed) {
           return {
             success: false,

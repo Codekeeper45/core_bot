@@ -15,14 +15,26 @@ async function saveChatHistory(channel, chatId, messages, summary = '', expected
 // Кладём как обычный assistant-ход под тем же ключом (channel, chatId), под которым
 // лежит входящая переписка этого получателя. Load-modify-save; гонка с активным ходом
 // самого получателя крайне маловероятна (исходящее обычно идёт, когда он не пишет).
-async function recordOutbound(channel, chatId, text) {
+async function recordOutbound(channel, chatId, text, metadata = {}) {
   if (!channel || !chatId || !text) return;
   try {
     const { summary, messages, version } = await loadHistory(channel, chatId);
     messages.push({ role: 'assistant', content: String(text) });
     await saveHistory(channel, chatId, messages, summary, version);
     // Долгая память: исходящее (диспатч/оповещение/пересылка) — тоже в полный архив.
-    require('../services/mysql').archiveMessage(channel, chatId, 'assistant', text, 'Бот');
+    await require('../services/mysql').archiveMessage({
+      channel,
+      chatId,
+      role: 'assistant',
+      actorName: 'Бот',
+      sourceMessageId: metadata.sourceMessageId || `out:${require('crypto').randomUUID()}`,
+      messageType: metadata.messageType || 'text',
+      origin: metadata.origin || 'tool',
+      content: text,
+      rawContent: metadata.rawContent || null,
+      deliveryStatus: 'delivered',
+      metadata,
+    });
   } catch (err) {
     console.error('[Memory] recordOutbound:', err.message);
   }

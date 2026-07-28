@@ -57,19 +57,17 @@ describe('память-факты', () => {
     assert.equal((await byName(facts, 'list_facts').handler({}, ctx)).count, 0);
   });
 
-  test('глобальное правило: scope=global, помечено как общее, видно в list', async () => {
+  test('глобальное правило отклоняется и направляется в manage_policy', async () => {
     db.facts = []; db.nextId = 1;
     const remember = byName(facts, 'remember_fact');
     const g = await remember.handler({ fact: 'Со всеми сотрудниками общаться коротко и по делу', scope: 'global' }, ctx);
-    assert.equal(g.success, true);
-    assert.equal(g.scope, 'global');
-    assert.match(g.note, /общее правило|для всех/i);
+    assert.equal(g.success, false);
+    assert.equal(g.reason, 'use_manage_policy');
     const p = await remember.handler({ fact: 'Любит кофе' }, ctx); // personal по умолчанию
     assert.equal(p.scope, 'personal');
     const list = await byName(facts, 'list_facts').handler({}, ctx);
-    assert.equal(list.count, 2);
-    const glob = list.facts.find((f) => f.scope === 'global');
-    assert.ok(glob && /коротко/.test(glob.fact));
+    assert.equal(list.count, 1);
+    assert.equal(list.facts[0].fact, 'Любит кофе');
   });
 });
 

@@ -453,12 +453,26 @@ async function processDocument(normalized) {
   console.log(`[Doc] Входящий документ: "${document_file_name}" | MIME: ${normalized.document_mime_type || '?'} | family: ${document_family} | канал: ${channel}`);
 
   if (document_family === 'unsupported') {
-    return { error: FALLBACK_MESSAGES.doc_unsupported };
+    return {
+      error: FALLBACK_MESSAGES.doc_unsupported,
+      processingStatus: 'unsupported',
+      processingError: 'unsupported_format',
+      buffer: null,
+      mimeType: normalized.document_mime_type || null,
+      fileName: document_file_name,
+    };
   }
 
   const limitExceeded = await checkDailyDocLimit(channel, chat_id);
   if (limitExceeded) {
-    return { error: FALLBACK_MESSAGES.doc_daily_limit };
+    return {
+      error: FALLBACK_MESSAGES.doc_daily_limit,
+      processingStatus: 'rejected',
+      processingError: 'daily_limit',
+      buffer: null,
+      mimeType: normalized.document_mime_type || null,
+      fileName: document_file_name,
+    };
   }
 
   let buffer;
@@ -466,7 +480,14 @@ async function processDocument(normalized) {
     buffer = await downloadDocumentBuffer(normalized);
   } catch (err) {
     console.error('[Doc] Download error:', err.message);
-    return { error: FALLBACK_MESSAGES.doc_parse_failed(document_file_name) };
+    return {
+      error: FALLBACK_MESSAGES.doc_parse_failed(document_file_name),
+      processingStatus: 'failed',
+      processingError: err.message,
+      buffer: null,
+      mimeType: normalized.document_mime_type || null,
+      fileName: document_file_name,
+    };
   }
 
   await incrementDailyDocCount(channel, chat_id);
@@ -476,11 +497,25 @@ async function processDocument(normalized) {
     parsedText = await parseDocumentBuffer(buffer, document_family, document_file_name);
   } catch (err) {
     console.error('[Doc] Parse error:', err.message);
-    return { error: FALLBACK_MESSAGES.doc_parse_failed(document_file_name) };
+    return {
+      error: FALLBACK_MESSAGES.doc_parse_failed(document_file_name),
+      processingStatus: 'failed',
+      processingError: err.message,
+      buffer,
+      mimeType: normalized.document_mime_type || null,
+      fileName: document_file_name,
+    };
   }
 
   if (!parsedText) {
-    return { error: FALLBACK_MESSAGES.doc_parse_failed(document_file_name) };
+    return {
+      error: FALLBACK_MESSAGES.doc_parse_failed(document_file_name),
+      processingStatus: 'failed',
+      processingError: 'empty_parse_result',
+      buffer,
+      mimeType: normalized.document_mime_type || null,
+      fileName: document_file_name,
+    };
   }
 
   // Полный текст держим в буфере (в пределах DOC_KB_CHAR_LIMIT) — чтобы в базу
@@ -522,7 +557,14 @@ async function processDocument(normalized) {
     + `полный текст в буфере — чтобы сохранить в базу знаний, вызови manage_files save)`;
   const footer = shortened ? '\n\n…(показан фрагмент; полный текст доступен для сохранения в базу знаний)' : '';
   const result = `${header}\n\ncaption: ${caption || 'нет'}\n\n${preview}${footer}`;
-  return { text: result };
+  return {
+    text: result,
+    derivedText: fullText,
+    processingStatus: 'ready',
+    buffer,
+    mimeType: normalized.document_mime_type || null,
+    fileName: document_file_name,
+  };
 }
 
-module.exports = { processDocument };
+module.exports = { processDocument, parseDocumentBuffer, downloadDocumentBuffer };

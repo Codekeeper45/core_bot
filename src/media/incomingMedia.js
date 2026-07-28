@@ -15,6 +15,9 @@ async function downloadIncoming(desc) {
   if (!desc || !desc.type) throw new Error('downloadIncoming: пустой дескриптор медиа');
   const channel = String(desc.channel || '').toLowerCase();
   const fileName = desc.file_name || defaultName(desc.type);
+  if (Buffer.isBuffer(desc.buffer) && desc.buffer.length) {
+    return { buffer: desc.buffer, mime: desc.mime || null, fileName };
+  }
 
   if (channel === 'telegram') {
     const fileId = desc.file_id

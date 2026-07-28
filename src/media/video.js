@@ -98,14 +98,27 @@ async function processVideo(normalized) {
   }
 
   if (!description && !transcript) {
-    return { error: 'Не удалось разобрать видео. Попробуйте отправить ещё раз или опишите словами.' };
+    return {
+      error: 'Не удалось разобрать видео. Попробуйте отправить ещё раз или опишите словами.',
+      buffer,
+      mimeType: mime,
+      processingStatus: 'failed',
+      processingError: 'vision_and_stt_empty',
+    };
   }
 
   const lines = [`[${kind}]`];
   if (normalized.message) lines.push(`подпись: ${normalized.message}`);
   if (description) lines.push(`описание: ${description}`);
   if (transcript) lines.push(`транскрипция речи: ${transcript}`);
-  return { text: `СИСТЕМНЫЙ КОНТЕКСТ: клиент прислал ${kind.toLowerCase()}.\n\n${lines.join('\n')}` };
+  return {
+    text: `СИСТЕМНЫЙ КОНТЕКСТ: клиент прислал ${kind.toLowerCase()}.\n\n${lines.join('\n')}`,
+    derivedText: [description, transcript].filter(Boolean).join('\n'),
+    processingStatus: 'ready',
+    processingError: null,
+    buffer,
+    mimeType: mime,
+  };
 }
 
 // Стикер → короткое описание. Статичный/анимированный webp и видео-стикер webm
@@ -116,7 +129,14 @@ async function processSticker(normalized) {
   const emojiNote = sticker_emoji ? ` (эмодзи: ${sticker_emoji})` : '';
 
   if (sticker_format === 'tgs') {
-    return { text: `[СТИКЕР${emojiNote}] Анимированный стикер — содержимое разобрать нельзя, ориентируйся на эмодзи.` };
+    return {
+      text: `[СТИКЕР${emojiNote}] Анимированный стикер — содержимое разобрать нельзя, ориентируйся на эмодзи.`,
+      derivedText: sticker_emoji || null,
+      processingStatus: 'unsupported',
+      processingError: 'tgs_not_supported',
+      buffer: null,
+      mimeType: 'application/x-tgsticker',
+    };
   }
 
   let buffer;
@@ -124,7 +144,14 @@ async function processSticker(normalized) {
     buffer = await downloadVideoBuffer(normalized);
   } catch (err) {
     console.error('[Sticker] Download error:', err.message);
-    return { text: `[СТИКЕР${emojiNote}] Скачать стикер не удалось — ориентируйся на эмодзи.` };
+    return {
+      text: `[СТИКЕР${emojiNote}] Скачать стикер не удалось — ориентируйся на эмодзи.`,
+      derivedText: sticker_emoji || null,
+      processingStatus: 'failed',
+      processingError: err.message,
+      buffer: null,
+      mimeType: sticker_format === 'webm' ? 'video/webm' : 'image/webp',
+    };
   }
 
   const base64 = buffer.toString('base64');
@@ -135,10 +162,24 @@ async function processSticker(normalized) {
     } else {
       description = await analyzeImageBase64(base64, 'image/webp', STICKER_PROMPT);
     }
-    return { text: `[СТИКЕР${emojiNote}] ${description}` };
+    return {
+      text: `[СТИКЕР${emojiNote}] ${description}`,
+      derivedText: description,
+      processingStatus: 'ready',
+      processingError: null,
+      buffer,
+      mimeType: sticker_format === 'webm' ? 'video/webm' : 'image/webp',
+    };
   } catch (err) {
     console.error('[Sticker] Analyze error:', err.message);
-    return { text: `[СТИКЕР${emojiNote}] Разобрать изображение стикера не удалось — ориентируйся на эмодзи.` };
+    return {
+      text: `[СТИКЕР${emojiNote}] Разобрать изображение стикера не удалось — ориентируйся на эмодзи.`,
+      derivedText: sticker_emoji || null,
+      processingStatus: 'failed',
+      processingError: err.message,
+      buffer,
+      mimeType: sticker_format === 'webm' ? 'video/webm' : 'image/webp',
+    };
   }
 }
 

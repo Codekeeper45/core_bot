@@ -56,6 +56,10 @@ module.exports = {
   // Контакты, которые ВСЕГДА считаются боссом (chat_id / телефон), даже если есть
   // в реестре сотрудников. Список через запятую. Босс может писать и в TG, и в WA.
   BOSS_CONTACTS: (process.env.BOSS_CONTACTS || '').split(',').map((s) => s.trim().replace(/\D/g, '')).filter(Boolean),
+  // Кто, кроме босса, может утверждать общие правила поведения. По умолчанию
+  // используем технический контакт разработчика, если он задан.
+  POLICY_ADMIN_CONTACTS: (process.env.POLICY_ADMIN_CONTACTS || process.env.DEVELOPER_WA || '')
+    .split(',').map((s) => s.trim().replace(/\D/g, '')).filter(Boolean),
 
   // MySQL
   MYSQL_HOST: process.env.MYSQL_HOST || '',
@@ -161,6 +165,11 @@ module.exports = {
   // тяжёлые — держим меньше файлов, чем текстовый стэш.
   DOC_BINARY_STASH_MAX: parseInt(process.env.DOC_BINARY_STASH_MAX || '3', 10),
   DOC_BINARY_STASH_TTL_MS: parseInt(process.env.DOC_BINARY_STASH_TTL_MS || String(6 * 3600 * 1000), 10),
+  // Оригиналы входящих медиа нужны для повторной транскрипции/анализа и правки
+  // документов после рестарта. Производные данные остаются в архиве навсегда.
+  MEDIA_RETENTION_DAYS: Math.max(1, parseInt(process.env.MEDIA_RETENTION_DAYS || '90', 10) || 90),
+  MEDIA_MAX_BYTES: Math.max(1024 * 1024,
+    parseInt(process.env.MEDIA_MAX_BYTES || String(32 * 1024 * 1024), 10) || 32 * 1024 * 1024),
   // Сколько последних сообщений держим в активной истории (bot_chat_history).
   // ВСЯ переписка дополнительно архивируется в bot_message_archive (не режется),
   // и бот ищет по ней инструментом recall — так «помнит всё», а не только окно.

@@ -1,4 +1,5 @@
 'use strict';
+const crypto = require('crypto');
 const mysql = require('mysql2/promise');
 const config = require('../config');
 const { loadEmployeesFromExcel } = require('./employeeImport');
@@ -34,6 +35,14 @@ function getPool() {
       // Все DATETIME трактуем как UTC независимо от TZ сервера БД — на этом
       // построены планировщики (scheduledRunner/reportScheduler) и daily-counts.
       timezone: 'Z',
+    });
+    // mysql2 `timezone` управляет сериализацией JS Date, но не меняет часовую
+    // зону серверной сессии. TIMESTAMP-сравнения корректны только когда обе
+    // стороны работают в UTC.
+    pool.on('connection', (connection) => {
+      connection.query("SET time_zone = '+00:00'", (err) => {
+        if (err) console.error('[MySQL] Failed to set session UTC:', err.message);
+      });
     });
     pool.on('error', (err) => console.error('[MySQL] Pool error:', err.message));
   }
@@ -533,13 +542,142 @@ async function initTables() {
       source_message_id VARCHAR(255) NOT NULL,
       actor_name        VARCHAR(120) NULL,
       mime_type         VARCHAR(120) NULL,
-      audio_data        LONGBLOB     NOT NULL,
+      audio_data        LONGBLOB     NULL,
       transcript        MEDIUMTEXT   NULL,
       transcribed_at    DATETIME     NULL,
+      expires_at        DATETIME     NULL,
       created_at        TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
       UNIQUE KEY uq_observed_audio_source (channel, chat_id, source_message_id),
       INDEX idx_observed_audio_chat (channel, chat_id, created_at),
       INDEX idx_observed_audio_actor (channel, chat_id, actor_name, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  // Старый групповой архив предшествует общей media-таблице. Приводим его к
+  // той же политике: производный текст бессрочно, оригинал ограниченное время.
+  const observedAudioColumns = await dbQuery(
+    `SELECT COLUMN_NAME, IS_NULLABLE
+       FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'bot_observed_group_audio'
+        AND COLUMN_NAME IN ('audio_data', 'expires_at')`
+  );
+  const observedColumnMap = new Map(
+    observedAudioColumns.map((row) => [String(row.COLUMN_NAME), String(row.IS_NULLABLE)])
+  );
+  if (observedColumnMap.get('audio_data') === 'NO') {
+    await dbQuery('ALTER TABLE bot_observed_group_audio MODIFY COLUMN audio_data LONGBLOB NULL');
+  }
+  if (!observedColumnMap.has('expires_at')) {
+    await dbQuery(
+      'ALTER TABLE bot_observed_group_audio ADD COLUMN expires_at DATETIME NULL AFTER transcribed_at'
+    );
+  }
+  await dbQuery(
+    `UPDATE bot_observed_group_audio
+        SET expires_at = DATE_ADD(created_at, INTERVAL ? DAY)
+      WHERE expires_at IS NULL`,
+    [config.MEDIA_RETENTION_DAYS]
+  );
+
+  // Оригиналы входящих медиа всех личных чатов и наблюдаемых групп. Бинарник
+  // удаляется по expires_at, а derived_text остаётся в архиве сообщения.
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS bot_media (
+      id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+      channel           VARCHAR(20)  NOT NULL,
+      chat_id           VARCHAR(255) NOT NULL,
+      source_message_id VARCHAR(255) NOT NULL,
+      actor_name        VARCHAR(120) NULL,
+      kind              VARCHAR(32)  NOT NULL,
+      mime_type         VARCHAR(120) NULL,
+      file_name         VARCHAR(255) NULL,
+      sha256            CHAR(64)     NOT NULL,
+      media_data        LONGBLOB     NULL,
+      derived_text      MEDIUMTEXT   NULL,
+      processing_status VARCHAR(24)  NOT NULL DEFAULT 'pending',
+      processing_error  VARCHAR(500) NULL,
+      expires_at        DATETIME     NULL,
+      created_at        TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+      updated_at        TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_media_source (channel, chat_id, source_message_id),
+      INDEX idx_media_expiry (expires_at),
+      INDEX idx_media_chat (channel, chat_id, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  // Полная трасса инструмента. bot_events остаётся компактным индексом для
+  // поиска, здесь лежат аргументы и фактический результат для расследований.
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS bot_tool_runs (
+      id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+      run_id            VARCHAR(64)  NOT NULL,
+      source_message_id VARCHAR(255) NULL,
+      channel           VARCHAR(20)  NULL,
+      chat_id           VARCHAR(255) NULL,
+      actor_name        VARCHAR(120) NULL,
+      actor_role        VARCHAR(20)  NULL,
+      tool              VARCHAR(64)  NOT NULL,
+      action            VARCHAR(64)  NULL,
+      args_json         LONGTEXT     NULL,
+      result_json       LONGTEXT     NULL,
+      success           TINYINT(1)   NOT NULL DEFAULT 1,
+      created_at        TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_tool_run_id (run_id),
+      INDEX idx_tool_run_chat (channel, chat_id, created_at),
+      INDEX idx_tool_run_tool (tool, success, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  // Утверждаемые общие политики отделены от личных фактов. В системный промпт
+  // попадают только active; предложения сотрудников остаются pending.
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS bot_policies (
+      id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+      policy_key        VARCHAR(100) NOT NULL,
+      policy_text       TEXT         NOT NULL,
+      status            VARCHAR(16)  NOT NULL DEFAULT 'pending',
+      version           INT          NOT NULL DEFAULT 1,
+      created_channel   VARCHAR(20)  NULL,
+      created_chat_id   VARCHAR(255) NULL,
+      created_by        VARCHAR(120) NULL,
+      source_message_id VARCHAR(255) NULL,
+      approved_by       VARCHAR(120) NULL,
+      approved_at       DATETIME     NULL,
+      supersedes_id     BIGINT       NULL,
+      created_at        TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+      updated_at        TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_policy_status (status, policy_key),
+      INDEX idx_policy_key_version (policy_key, version)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  // Денежные остатки хранятся как журнал операций, а не как редактируемая
+  // строка памяти. Баланс всегда считается суммой подтверждённых проводок.
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS bot_ledger_accounts (
+      id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+      account_key VARCHAR(100) NOT NULL UNIQUE,
+      title       VARCHAR(255) NOT NULL,
+      currency    VARCHAR(8)   NOT NULL DEFAULT 'KZT',
+      status      VARCHAR(16)  NOT NULL DEFAULT 'active',
+      created_by  VARCHAR(120) NULL,
+      created_at  TIMESTAMP    DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS bot_ledger_entries (
+      id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+      account_id        BIGINT         NOT NULL,
+      amount            DECIMAL(16,2)  NOT NULL,
+      note              VARCHAR(500)   NULL,
+      effective_at      DATETIME       NOT NULL,
+      actor_name        VARCHAR(120)   NULL,
+      source_message_id VARCHAR(255)   NULL,
+      created_at        TIMESTAMP      DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_ledger_account (account_id, effective_at, id),
+      CONSTRAINT fk_ledger_account FOREIGN KEY (account_id)
+        REFERENCES bot_ledger_accounts(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
@@ -650,6 +788,31 @@ async function initTables() {
     console.log('[MySQL] Migrated: bot_memory_facts.scope added');
   } catch (err) {
     if (err && err.errno !== 1060) console.error('[MySQL] facts scope migration:', err.message);
+  }
+
+  // Канонический архив сообщений. Старые строки остаются legacy; новые несут
+  // провайдерский ID, тип, происхождение, цитату, медиа и доставленный текст.
+  for (const col of [
+    "ADD COLUMN source_message_id VARCHAR(255) NULL AFTER actor_name",
+    "ADD COLUMN message_type VARCHAR(32) NOT NULL DEFAULT 'legacy' AFTER source_message_id",
+    "ADD COLUMN original_message_type VARCHAR(32) NULL AFTER message_type",
+    "ADD COLUMN origin VARCHAR(32) NOT NULL DEFAULT 'legacy' AFTER original_message_type",
+    "ADD COLUMN reply_to_message_id VARCHAR(255) NULL AFTER origin",
+    "ADD COLUMN media_id BIGINT NULL AFTER reply_to_message_id",
+    "ADD COLUMN raw_content MEDIUMTEXT NULL AFTER content",
+    "ADD COLUMN delivery_status VARCHAR(16) NULL AFTER raw_content",
+    "ADD COLUMN metadata_json LONGTEXT NULL AFTER delivery_status",
+  ]) {
+    try {
+      await dbQuery(`ALTER TABLE bot_message_archive ${col}`);
+    } catch (err) {
+      if (err && err.errno !== 1060) console.error('[MySQL] archive metadata migration:', err.message);
+    }
+  }
+  try {
+    await dbQuery('CREATE UNIQUE INDEX uq_archive_source ON bot_message_archive (channel, chat_id, source_message_id)');
+  } catch (err) {
+    if (err && err.errno !== 1061) console.error('[MySQL] archive source index migration:', err.message);
   }
 
   // Миграция: тайминги задач для метрик (completion time / overdue).
@@ -770,6 +933,21 @@ async function initTables() {
   // позже как невнятные сбои запросов).
   await verifyCriticalSchema();
 
+  // Старое расписание изменяло долг через перезапись memory-факта. Такой mutable
+  // баланс непроверяем и уже приводил к неверным суммам. Отключаем только эту
+  // конкретную legacy-схему; возобновить её можно после переноса в manage_ledger.
+  const unsafeDebtSchedules = await dbQuery(
+    `UPDATE orch_schedules
+        SET enabled = 0, last_status = 'migration_requires_ledger_confirmation'
+      WHERE enabled = 1
+        AND instruction LIKE '%list_facts%'
+        AND instruction LIKE '%долг%'
+        AND instruction LIKE '%Руслан%'`
+  );
+  if (Number(unsafeDebtSchedules.affectedRows) > 0) {
+    console.warn(`[MySQL] Отключено непроверяемых долговых расписаний: ${unsafeDebtSchedules.affectedRows}`);
+  }
+
   await seedEmployees();
 
   console.log('[MySQL] Tables ready');
@@ -784,8 +962,13 @@ async function verifyCriticalSchema() {
     'SELECT supplier, source_hash FROM orch_price_imports LIMIT 0',
     'SELECT supplier, source_sku, sku_norm, pallet_qty, discount_price, dealer_price, dealer_price_2 FROM orch_price_items LIMIT 0',
     'SELECT supplier, change_type, old_discount_price, new_discount_price FROM orch_price_changes LIMIT 0',
-    'SELECT role, content FROM bot_message_archive LIMIT 0',
+    'SELECT role, content, source_message_id, message_type, origin, media_id, raw_content, delivery_status FROM bot_message_archive LIMIT 0',
     'SELECT tool, summary FROM bot_events LIMIT 0',
+    'SELECT run_id, args_json, result_json FROM bot_tool_runs LIMIT 0',
+    'SELECT kind, sha256, expires_at FROM bot_media LIMIT 0',
+    'SELECT audio_data, transcript, expires_at FROM bot_observed_group_audio LIMIT 0',
+    'SELECT policy_key, status, version FROM bot_policies LIMIT 0',
+    'SELECT account_key, currency FROM bot_ledger_accounts LIMIT 0',
     'SELECT embedding, dims FROM bot_archive_chunks LIMIT 0',
     'SELECT event_type, payload_json FROM orch_task_events LIMIT 0',
     'SELECT delivery_status FROM bot_ops_events LIMIT 0',
@@ -1419,13 +1602,14 @@ async function addFact(channel, chatId, fact, category, scope = 'personal') {
   }
 }
 
-// Личные факты ЭТОГО чата + ВСЕ глобальные правила (применяются в любом диалоге).
+// Только личные факты этого чата. Старые scope=global намеренно не подмешиваются:
+// общие правила теперь проходят утверждение в bot_policies.
 async function listFacts(channel, chatId, limit = 50) {
   try {
     return await dbQuery(
       `SELECT id, fact, category, scope, created_at FROM bot_memory_facts
-       WHERE scope = 'global' OR (channel = ? AND chat_id = ?)
-       ORDER BY (scope = 'global') DESC, id DESC LIMIT ?`,
+       WHERE scope = 'personal' AND channel = ? AND chat_id = ?
+       ORDER BY id DESC LIMIT ?`,
       [String(channel), String(chatId), Number(limit) || 50]
     );
   } catch (err) {
@@ -1434,19 +1618,18 @@ async function listFacts(channel, chatId, limit = 50) {
   }
 }
 
-// Удалить по id или совпадению текста. Можно удалять СВОИ личные ИЛИ любые глобальные
-// (равные права); чужие личные факты не трогаем. Возвращает число удалённых.
+// Удалить свой личный факт. Общими политиками управляет manage_policy.
 async function deleteFact(channel, chatId, { id, match } = {}) {
   try {
     if (id) {
       const res = await dbQuery(
-        "DELETE FROM bot_memory_facts WHERE id = ? AND (scope = 'global' OR (channel = ? AND chat_id = ?))",
+        "DELETE FROM bot_memory_facts WHERE id = ? AND scope = 'personal' AND channel = ? AND chat_id = ?",
         [id, String(channel), String(chatId)]);
       return res.affectedRows || 0;
     }
     if (match) {
       const rows = await dbQuery(
-        "SELECT id, fact FROM bot_memory_facts WHERE scope = 'global' OR (channel = ? AND chat_id = ?)",
+        "SELECT id, fact FROM bot_memory_facts WHERE scope = 'personal' AND channel = ? AND chat_id = ?",
         [String(channel), String(chatId)]);
       const norm = normFact(match);
       const hit = rows.find((r) => normFact(r.fact).includes(norm) || norm.includes(normFact(r.fact)));
@@ -1949,19 +2132,169 @@ async function clearHistory(channel, chatId) {
 }
 
 // ── Долгая память: архив переписки + журнал действий + recall ────────────────
-// Запись в архив — append-only, never throws (память не должна ломать ответ).
-async function archiveMessage(channel, chatId, role, content, actorName = null) {
-  const text = (content == null ? '' : String(content)).trim();
-  if (!channel || !chatId || !text) return;
+// Запись в архив — never throws (память не должна ломать ответ).
+// Новый контракт принимает объект; позиционные аргументы оставлены для старых
+// вызывающих и помечаются как legacy.
+async function archiveMessage(channelOrRecord, chatId, role, content, actorName = null) {
+  const record = channelOrRecord && typeof channelOrRecord === 'object'
+    ? channelOrRecord
+    : { channel: channelOrRecord, chatId, role, content, actorName };
+  const text = (record.content == null ? '' : String(record.content)).trim();
+  if (!record.channel || !record.chatId || !text) return null;
+  const sourceMessageId = record.sourceMessageId ? String(record.sourceMessageId).slice(0, 255) : null;
+  const metadata = record.metadata && typeof record.metadata === 'object'
+    ? JSON.stringify(record.metadata).slice(0, 60000)
+    : null;
   try {
-    await dbQuery(
-      'INSERT INTO bot_message_archive (channel, chat_id, role, actor_name, content) VALUES (?, ?, ?, ?, ?)',
-      [String(channel), String(chatId), String(role || 'user').slice(0, 16),
-        actorName ? String(actorName).slice(0, 120) : null, text.slice(0, 60000)]
+    const result = await dbQuery(
+      `INSERT INTO bot_message_archive
+       (channel, chat_id, role, actor_name, source_message_id, message_type,
+        original_message_type, origin, reply_to_message_id, media_id, content,
+        raw_content, delivery_status, metadata_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         actor_name = VALUES(actor_name),
+         message_type = VALUES(message_type),
+         original_message_type = VALUES(original_message_type),
+         origin = VALUES(origin),
+         reply_to_message_id = VALUES(reply_to_message_id),
+         media_id = COALESCE(VALUES(media_id), media_id),
+         content = VALUES(content),
+         raw_content = COALESCE(VALUES(raw_content), raw_content),
+         delivery_status = COALESCE(VALUES(delivery_status), delivery_status),
+         metadata_json = COALESCE(VALUES(metadata_json), metadata_json),
+         id = LAST_INSERT_ID(id)`,
+      [
+        String(record.channel), String(record.chatId),
+        String(record.role || 'user').slice(0, 16),
+        record.actorName ? String(record.actorName).slice(0, 120) : null,
+        sourceMessageId,
+        String(record.messageType || 'legacy').slice(0, 32),
+        record.originalMessageType ? String(record.originalMessageType).slice(0, 32) : null,
+        String(record.origin || 'legacy').slice(0, 32),
+        record.replyToMessageId ? String(record.replyToMessageId).slice(0, 255) : null,
+        record.mediaId ? Number(record.mediaId) : null,
+        text.slice(0, 60000),
+        record.rawContent ? String(record.rawContent).slice(0, 60000) : null,
+        record.deliveryStatus ? String(record.deliveryStatus).slice(0, 16) : null,
+        metadata,
+      ]
     );
+    return Number(result.insertId) || null;
   } catch (err) {
     console.error('[MySQL] archiveMessage:', err.message);
+    return null;
   }
+}
+
+async function storeMedia({
+  channel, chatId, sourceMessageId, actorName = null, kind, mimeType = null,
+  fileName = null, buffer, derivedText = null, status = 'pending', error = null,
+} = {}) {
+  if (!channel || !chatId || !sourceMessageId || !kind || !Buffer.isBuffer(buffer) || buffer.length === 0) {
+    throw new Error('invalid_media');
+  }
+  const expires = new Date(Date.now() + config.MEDIA_RETENTION_DAYS * 86400000)
+    .toISOString().slice(0, 19).replace('T', ' ');
+  const hash = crypto.createHash('sha256').update(buffer).digest('hex');
+  try {
+    const result = await dbQuery(
+      `INSERT INTO bot_media
+       (channel, chat_id, source_message_id, actor_name, kind, mime_type, file_name,
+        sha256, media_data, derived_text, processing_status, processing_error, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         id = LAST_INSERT_ID(id), actor_name = VALUES(actor_name), kind = VALUES(kind),
+         mime_type = VALUES(mime_type), file_name = VALUES(file_name), sha256 = VALUES(sha256),
+         media_data = VALUES(media_data), derived_text = COALESCE(VALUES(derived_text), derived_text),
+         processing_status = VALUES(processing_status), processing_error = VALUES(processing_error),
+         expires_at = VALUES(expires_at)`,
+      [
+        String(channel), String(chatId), String(sourceMessageId),
+        actorName ? String(actorName).slice(0, 120) : null,
+        String(kind).slice(0, 32), mimeType ? String(mimeType).slice(0, 120) : null,
+        fileName ? String(fileName).slice(0, 255) : null,
+        hash, buffer, derivedText ? String(derivedText).slice(0, 60000) : null,
+        String(status || 'pending').slice(0, 24),
+        error ? String(error).slice(0, 500) : null, expires,
+      ]
+    );
+    return Number(result.insertId) || null;
+  } catch (err) {
+    throw dbError(err, 'storeMedia');
+  }
+}
+
+async function getMedia({
+  id = null, channel = null, chatId = null, sourceMessageId = null, kind = null, fileName = null,
+} = {}) {
+  const where = [];
+  const params = [];
+  if (id != null) { where.push('id = ?'); params.push(Number(id)); }
+  if (channel) { where.push('channel = ?'); params.push(String(channel)); }
+  if (chatId) { where.push('chat_id = ?'); params.push(String(chatId)); }
+  if (sourceMessageId) { where.push('source_message_id = ?'); params.push(String(sourceMessageId)); }
+  if (kind) { where.push('kind = ?'); params.push(String(kind)); }
+  if (fileName && String(fileName).toLowerCase() !== 'last') {
+    where.push('LOWER(file_name) = LOWER(?)');
+    params.push(String(fileName));
+  }
+  if (!where.length) return null;
+  try {
+    const rows = await dbQuery(
+      `SELECT id, channel, chat_id, source_message_id, actor_name, kind, mime_type,
+              file_name, sha256, media_data, derived_text, processing_status,
+              processing_error, expires_at, created_at
+         FROM bot_media WHERE ${where.join(' AND ')}
+        ORDER BY id DESC LIMIT 1`,
+      params
+    );
+    return rows[0] || null;
+  } catch (err) { throw dbError(err, 'getMedia'); }
+}
+
+async function updateMediaDerived(id, derivedText, status = 'ready', error = null) {
+  try {
+    await dbQuery(
+      `UPDATE bot_media
+          SET derived_text = ?, processing_status = ?, processing_error = ?
+        WHERE id = ?`,
+      [derivedText ? String(derivedText).slice(0, 60000) : null,
+        String(status).slice(0, 24), error ? String(error).slice(0, 500) : null, Number(id)]
+    );
+    return true;
+  } catch (err) { throw dbError(err, 'updateMediaDerived'); }
+}
+
+async function cleanupExpiredMedia(limit = 100) {
+  try {
+    const mediaResult = await dbQuery(
+      `UPDATE bot_media SET media_data = NULL
+        WHERE media_data IS NOT NULL AND expires_at IS NOT NULL AND expires_at <= UTC_TIMESTAMP()
+        ORDER BY id ASC LIMIT ?`,
+      [Math.max(1, Math.min(Number(limit) || 100, 1000))]
+    );
+    const groupResult = await dbQuery(
+      `UPDATE bot_observed_group_audio SET audio_data = NULL
+        WHERE audio_data IS NOT NULL AND expires_at IS NOT NULL AND expires_at <= UTC_TIMESTAMP()
+        ORDER BY id ASC LIMIT ?`,
+      [Math.max(1, Math.min(Number(limit) || 100, 1000))]
+    );
+    return (Number(mediaResult.affectedRows) || 0) + (Number(groupResult.affectedRows) || 0);
+  } catch (err) { throw dbError(err, 'cleanupExpiredMedia'); }
+}
+
+async function verifyDatabaseUtc() {
+  const rows = await dbQuery(
+    `SELECT @@session.time_zone AS session_tz,
+            TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), NOW()) AS offset_seconds`
+  );
+  const row = rows[0] || {};
+  return {
+    ok: Math.abs(Number(row.offset_seconds) || 0) <= 1,
+    sessionTimeZone: row.session_tz || null,
+    offsetSeconds: Number(row.offset_seconds) || 0,
+  };
 }
 
 async function storeObservedGroupAudio({ channel, chatId, sourceMessageId, actorName = null, mimeType = null, buffer }) {
@@ -1969,14 +2302,18 @@ async function storeObservedGroupAudio({ channel, chatId, sourceMessageId, actor
     throw new Error('invalid_observed_audio');
   }
   try {
+    const expires = new Date(Date.now() + config.MEDIA_RETENTION_DAYS * 86400000)
+      .toISOString().slice(0, 19).replace('T', ' ');
     const result = await dbQuery(
       `INSERT INTO bot_observed_group_audio
-       (channel, chat_id, source_message_id, actor_name, mime_type, audio_data)
-       VALUES (?, ?, ?, ?, ?, ?)
+       (channel, chat_id, source_message_id, actor_name, mime_type, audio_data, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE
-         id = LAST_INSERT_ID(id), actor_name = VALUES(actor_name), mime_type = VALUES(mime_type), audio_data = VALUES(audio_data)`,
+         id = LAST_INSERT_ID(id), actor_name = VALUES(actor_name), mime_type = VALUES(mime_type),
+         audio_data = VALUES(audio_data), expires_at = VALUES(expires_at)`,
       [String(channel), String(chatId), String(sourceMessageId),
-        actorName ? String(actorName).slice(0, 120) : null, mimeType ? String(mimeType).slice(0, 120) : null, buffer]
+        actorName ? String(actorName).slice(0, 120) : null,
+        mimeType ? String(mimeType).slice(0, 120) : null, buffer, expires]
     );
     return Number(result.insertId) || null;
   } catch (err) { throw dbError(err, 'storeObservedGroupAudio'); }
@@ -1992,7 +2329,7 @@ async function getObservedGroupAudio({ channel, chatId, audioId = null, fromUtc 
   if (speaker) { where.push('actor_name LIKE ?'); params.push(`%${String(speaker).trim()}%`); }
   try {
     const rows = await dbQuery(
-      `SELECT id, actor_name, mime_type, audio_data, transcript, transcribed_at, created_at
+      `SELECT id, actor_name, mime_type, audio_data, transcript, transcribed_at, expires_at, created_at
          FROM bot_observed_group_audio
         WHERE ${where.join(' AND ')}
         ORDER BY created_at DESC, id DESC LIMIT 1`,
@@ -2027,6 +2364,167 @@ async function logBotEvent(data = {}) {
   } catch (err) {
     console.error('[MySQL] logBotEvent:', err.message);
   }
+}
+
+function safeJson(value, max = 60000) {
+  try {
+    return JSON.stringify(value, (key, val) => {
+      if (Buffer.isBuffer(val)) return `[Buffer ${val.length} bytes]`;
+      if (/password|token|api.?key|secret/i.test(key)) return '[REDACTED]';
+      return val;
+    }).slice(0, max);
+  } catch (_) {
+    return JSON.stringify({ serialization_error: true });
+  }
+}
+
+async function logToolRun(data = {}) {
+  if (!data.tool || !data.runId) return null;
+  try {
+    const result = await dbQuery(
+      `INSERT INTO bot_tool_runs
+       (run_id, source_message_id, channel, chat_id, actor_name, actor_role,
+        tool, action, args_json, result_json, success)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        String(data.runId).slice(0, 64),
+        data.sourceMessageId ? String(data.sourceMessageId).slice(0, 255) : null,
+        data.channel || null, data.chatId ? String(data.chatId) : null,
+        data.actorName ? String(data.actorName).slice(0, 120) : null,
+        data.actorRole ? String(data.actorRole).slice(0, 20) : null,
+        String(data.tool).slice(0, 64),
+        data.action ? String(data.action).slice(0, 64) : null,
+        safeJson(data.args || {}), safeJson(data.result || {}),
+        data.success === false ? 0 : 1,
+      ]
+    );
+    return Number(result.insertId) || null;
+  } catch (err) {
+    console.error('[MySQL] logToolRun:', err.message);
+    return null;
+  }
+}
+
+async function createPolicy({
+  policyKey, policyText, status = 'pending', channel = null, chatId = null,
+  createdBy = null, sourceMessageId = null, approvedBy = null, supersedesId = null,
+} = {}) {
+  const key = String(policyKey || '').trim().toLowerCase().replace(/[^a-z0-9_.-]+/g, '_').slice(0, 100);
+  const text = String(policyText || '').trim();
+  if (!key || !text) throw new Error('invalid_policy');
+  return withTransaction(async (q) => {
+    const versions = await q('SELECT COALESCE(MAX(version), 0) AS v FROM bot_policies WHERE policy_key = ?', [key]);
+    const version = Number(versions[0] && versions[0].v) + 1;
+    if (status === 'active') {
+      await q("UPDATE bot_policies SET status = 'superseded' WHERE policy_key = ? AND status = 'active'", [key]);
+    }
+    const result = await q(
+      `INSERT INTO bot_policies
+       (policy_key, policy_text, status, version, created_channel, created_chat_id,
+        created_by, source_message_id, approved_by, approved_at, supersedes_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [key, text.slice(0, 60000), status, version, channel, chatId ? String(chatId) : null,
+        createdBy ? String(createdBy).slice(0, 120) : null,
+        sourceMessageId ? String(sourceMessageId).slice(0, 255) : null,
+        approvedBy ? String(approvedBy).slice(0, 120) : null,
+        status === 'active' ? new Date().toISOString().slice(0, 19).replace('T', ' ') : null,
+        supersedesId ? Number(supersedesId) : null]
+    );
+    return { id: Number(result.insertId), policyKey: key, version, status };
+  });
+}
+
+async function listPolicies(status = null, limit = 100) {
+  const params = [];
+  let where = '';
+  if (status) { where = 'WHERE status = ?'; params.push(String(status)); }
+  params.push(Math.max(1, Math.min(Number(limit) || 100, 500)));
+  return dbQuery(
+    `SELECT id, policy_key, policy_text, status, version, created_by, approved_by,
+            source_message_id, created_at, approved_at, supersedes_id
+       FROM bot_policies ${where}
+      ORDER BY policy_key ASC, version DESC LIMIT ?`,
+    params
+  );
+}
+
+async function listActivePolicies() {
+  return listPolicies('active', 200);
+}
+
+async function setPolicyStatus(id, status, approvedBy = null) {
+  const value = ['active', 'rejected', 'superseded'].includes(status) ? status : 'pending';
+  return withTransaction(async (q) => {
+    const rows = await q('SELECT * FROM bot_policies WHERE id = ? LIMIT 1', [Number(id)]);
+    const policy = rows[0];
+    if (!policy) return null;
+    if (value === 'active') {
+      await q("UPDATE bot_policies SET status = 'superseded' WHERE policy_key = ? AND status = 'active' AND id <> ?",
+        [policy.policy_key, Number(id)]);
+    }
+    await q(
+      'UPDATE bot_policies SET status = ?, approved_by = ?, approved_at = ? WHERE id = ?',
+      [value, approvedBy ? String(approvedBy).slice(0, 120) : null,
+        value === 'active' ? new Date().toISOString().slice(0, 19).replace('T', ' ') : null,
+        Number(id)]
+    );
+    return { id: Number(id), policyKey: policy.policy_key, status: value };
+  });
+}
+
+function normalizeLedgerKey(accountKey) {
+  return String(accountKey || '').trim().toLowerCase()
+    .replace(/[^a-z0-9а-яё_.-]+/gi, '_').slice(0, 100);
+}
+
+async function ledgerOpenAccount({ accountKey, title, currency = 'KZT', actorName = null } = {}) {
+  const key = normalizeLedgerKey(accountKey);
+  if (!key || !String(title || '').trim()) return null;
+  await dbQuery(
+    `INSERT INTO bot_ledger_accounts (account_key, title, currency, created_by)
+     VALUES (?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE title = VALUES(title), currency = VALUES(currency), status = 'active'`,
+    [key, String(title).trim().slice(0, 255), String(currency || 'KZT').toUpperCase().slice(0, 8),
+      actorName ? String(actorName).slice(0, 120) : null]
+  );
+  const rows = await dbQuery('SELECT * FROM bot_ledger_accounts WHERE account_key = ? LIMIT 1', [key]);
+  return rows[0] || null;
+}
+
+async function ledgerAddEntry({
+  accountKey, amount, note = null, effectiveAt = null, actorName = null, sourceMessageId = null,
+} = {}) {
+  const rows = await dbQuery('SELECT * FROM bot_ledger_accounts WHERE account_key = ? AND status = ? LIMIT 1',
+    [normalizeLedgerKey(accountKey), 'active']);
+  if (!rows.length) return null;
+  const when = effectiveAt || new Date().toISOString().slice(0, 19).replace('T', ' ');
+  const result = await dbQuery(
+    `INSERT INTO bot_ledger_entries
+     (account_id, amount, note, effective_at, actor_name, source_message_id)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [rows[0].id, Number(amount), note ? String(note).slice(0, 500) : null, when,
+      actorName ? String(actorName).slice(0, 120) : null,
+      sourceMessageId ? String(sourceMessageId).slice(0, 255) : null]
+  );
+  return { id: Number(result.insertId), account: rows[0] };
+}
+
+async function ledgerGet(accountKey, limit = 50) {
+  const accounts = await dbQuery('SELECT * FROM bot_ledger_accounts WHERE account_key = ? LIMIT 1',
+    [normalizeLedgerKey(accountKey)]);
+  if (!accounts.length) return null;
+  const account = accounts[0];
+  const balanceRows = await dbQuery(
+    'SELECT COALESCE(SUM(amount), 0) AS balance FROM bot_ledger_entries WHERE account_id = ?',
+    [account.id]
+  );
+  const entries = await dbQuery(
+    `SELECT id, amount, note, effective_at, actor_name, source_message_id, created_at
+       FROM bot_ledger_entries WHERE account_id = ?
+      ORDER BY effective_at DESC, id DESC LIMIT ?`,
+    [account.id, Math.max(1, Math.min(Number(limit) || 50, 500))]
+  );
+  return { account, balance: Number(balanceRows[0] && balanceRows[0].balance) || 0, entries };
 }
 
 // Фильтр приватности для scope='all': не-босс не видит ЧУЖИЕ private-чаты
@@ -2081,7 +2579,10 @@ async function recallSearch({ channel, chatId, query, scope = 'chat', kind = 'me
       const where = ['1=1'];
       const params = [];
       for (const t of tokens) { where.push('a.content LIKE ?'); params.push(`%${t}%`); }
-      const sql = `SELECT a.id, a.channel, a.chat_id, a.role, a.actor_name, a.content, a.created_at
+      const sql = `SELECT a.id, a.channel, a.chat_id, a.role, a.actor_name,
+                          a.source_message_id, a.message_type, a.original_message_type,
+                          a.origin, a.reply_to_message_id, a.media_id, a.delivery_status,
+                          a.content, a.created_at
                      FROM bot_message_archive a
                     WHERE ${where.join(' AND ')}${chatFilter}${privacy.sql}
                     ORDER BY a.id DESC LIMIT ?`;
@@ -2106,18 +2607,24 @@ async function recallSearch({ channel, chatId, query, scope = 'chat', kind = 'me
 // Точная выборка архива по диапазону дат (UTC-границы). tokens — опц. сужение по
 // ключевым словам внутри периода. Хронологический порядок (ASC) — для отчёта.
 // viewer — см. recallSearch: при scope=all не-боссу скрываются чужие private-чаты.
-async function archiveByDateRange({ channel, chatId, scope = 'chat', fromUtc, toUtc, tokens = [], limit = 100, viewer = null } = {}) {
+async function archiveByDateRange({
+  channel, chatId, scope = 'chat', fromUtc, toUtc, tokens = [], limit = 100,
+  afterId = 0, viewer = null,
+} = {}) {
   const fmt = (d) => (d instanceof Date ? d.toISOString().slice(0, 19).replace('T', ' ') : d);
   const where = ['a.created_at >= ?', 'a.created_at <= ?'];
   const params = [fmt(fromUtc), fmt(toUtc)];
   if (scope !== 'all') { where.push('a.channel = ?', 'a.chat_id = ?'); params.push(channel, chatId); }
+  if (Number(afterId) > 0) { where.push('a.id > ?'); params.push(Number(afterId)); }
   for (const t of (tokens || [])) { where.push('a.content LIKE ?'); params.push(`%${t}%`); }
   const privacy = scope === 'all' ? privacyExclusion('a', viewer) : { sql: '', params: [] };
   params.push(...privacy.params);
-  params.push(Math.max(1, Math.min(Number(limit) || 100, 500)));
+  params.push(Math.max(1, Math.min(Number(limit) || 100, 501)));
   try {
     return await dbQuery(
-      `SELECT a.id, a.channel, a.chat_id, a.role, a.actor_name, a.content, a.created_at
+      `SELECT a.id, a.channel, a.chat_id, a.role, a.actor_name, a.source_message_id,
+              a.message_type, a.original_message_type, a.origin, a.reply_to_message_id,
+              a.media_id, a.delivery_status, a.content, a.created_at
          FROM bot_message_archive a
         WHERE ${where.join(' AND ')}${privacy.sql}
         ORDER BY a.created_at ASC, a.id ASC LIMIT ?`,
@@ -2141,7 +2648,9 @@ async function archiveChatPage({ channel, chatId, afterId = 0, fromUtc = null, t
   params.push(Math.max(1, Math.min(Number(limit) || 200, 501)));
   try {
     return await dbQuery(
-      `SELECT a.id, a.channel, a.chat_id, a.role, a.actor_name, a.content, a.created_at
+      `SELECT a.id, a.channel, a.chat_id, a.role, a.actor_name, a.source_message_id,
+              a.message_type, a.original_message_type, a.origin, a.reply_to_message_id,
+              a.media_id, a.delivery_status, a.content, a.created_at
          FROM bot_message_archive a
         WHERE ${where.join(' AND ')}
         ORDER BY a.id ASC LIMIT ?`,
@@ -2156,7 +2665,9 @@ async function archiveChatPage({ channel, chatId, afterId = 0, fromUtc = null, t
 // Возвращаем весь диалог чата (реплики человека + ответы бота) хронологически.
 // viewer — та же граница приватности, что и в recall: не-босс не увидит человека,
 // если тот пометил свой чат приватным (privacyExclusion). fromUtc/toUtc/tokens — опц.
-async function archiveByPerson({ person, fromUtc = null, toUtc = null, tokens = [], limit = 100, viewer = null } = {}) {
+async function archiveByPerson({
+  person, fromUtc = null, toUtc = null, tokens = [], limit = 100, afterId = 0, viewer = null,
+} = {}) {
   if (!person || !person.channel) return [];
   const fmt = (d) => (d instanceof Date ? d.toISOString().slice(0, 19).replace('T', ' ') : d);
   const contact = String(person.contact || '');
@@ -2173,13 +2684,16 @@ async function archiveByPerson({ person, fromUtc = null, toUtc = null, tokens = 
   where.push(`(${ors.join(' OR ')})`);
   if (fromUtc) { where.push('a.created_at >= ?'); params.push(fmt(fromUtc)); }
   if (toUtc) { where.push('a.created_at <= ?'); params.push(fmt(toUtc)); }
+  if (Number(afterId) > 0) { where.push('a.id > ?'); params.push(Number(afterId)); }
   for (const t of (tokens || [])) { where.push('a.content LIKE ?'); params.push(`%${t}%`); }
   const privacy = privacyExclusion('a', viewer); // всегда: читаем чужой чат
   params.push(...privacy.params);
-  params.push(Math.max(1, Math.min(Number(limit) || 100, 500)));
+  params.push(Math.max(1, Math.min(Number(limit) || 100, 501)));
   try {
     return await dbQuery(
-      `SELECT a.id, a.channel, a.chat_id, a.role, a.actor_name, a.content, a.created_at
+      `SELECT a.id, a.channel, a.chat_id, a.role, a.actor_name, a.source_message_id,
+              a.message_type, a.original_message_type, a.origin, a.reply_to_message_id,
+              a.media_id, a.delivery_status, a.content, a.created_at
          FROM bot_message_archive a
         WHERE ${where.join(' AND ')}${privacy.sql}
         ORDER BY a.created_at ASC, a.id ASC LIMIT ?`,
@@ -3199,7 +3713,8 @@ module.exports = {
   getPool, dbQuery, withTransaction, initTables, _mergeHistory,
   loadHistory, saveHistory, clearHistory,
   // Долгая память: архив переписки + журнал действий + recall
-  archiveMessage, logBotEvent, recallSearch, archiveByDateRange, archiveChatPage, archiveByPerson,
+  archiveMessage, logBotEvent, logToolRun, recallSearch, archiveByDateRange, archiveChatPage, archiveByPerson,
+  storeMedia, getMedia, updateMediaDerived, cleanupExpiredMedia, verifyDatabaseUtc,
   storeObservedGroupAudio, getObservedGroupAudio, saveObservedGroupAudioTranscript,
   // Семантический индекс архива (RAG)
   listChatsWithBacklog, archiveMessagesAfter, insertArchiveChunk, loadChunkVectors,
@@ -3218,6 +3733,8 @@ module.exports = {
   logScheduleRun, listScheduleRuns, cleanupScheduleRuns,
   getEmployeePeriodStats,
   addFact, listFacts, deleteFact,
+  createPolicy, listPolicies, listActivePolicies, setPolicyStatus,
+  ledgerOpenAccount, ledgerAddEntry, ledgerGet,
   addPersonalItem, listPersonalItems, setPersonalItemDone, deletePersonalItem,
   setQuiet, clearQuiet, getQuiet, listActiveQuiet,
   setChatPrivacy, getChatPrivacy,

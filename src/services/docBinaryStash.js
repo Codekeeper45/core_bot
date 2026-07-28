@@ -50,6 +50,22 @@ function list(channel, chatId) {
   return entries.map((e) => ({ fileName: e.fileName, ts: e.ts, bytes: e.buffer.length, mimetype: e.mimetype }));
 }
 
+async function getPersistent(channel, chatId, fileNameOrLast) {
+  const media = await require('./mysql').getMedia({
+    channel,
+    chatId,
+    kind: 'document',
+    fileName: fileNameOrLast,
+  });
+  if (!media || !Buffer.isBuffer(media.media_data)) return null;
+  return {
+    fileName: media.file_name || 'document.docx',
+    buffer: media.media_data,
+    mimetype: media.mime_type || null,
+    ts: media.created_at ? new Date(media.created_at).getTime() : Date.now(),
+  };
+}
+
 function _clear() { stash.clear(); }
 
-module.exports = { put, get, list, _clear };
+module.exports = { put, get, getPersistent, list, _clear };

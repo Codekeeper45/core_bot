@@ -5,8 +5,10 @@ const { getSystemPrompt } = require('./systemPrompt');
 const { loadChatHistory, saveChatHistory } = require('./memory');
 const { executeToolCall, toolsForRole } = require('../tools');
 const notifier = require('../services/notifier');
+const { logToolRun } = require('../services/mysql');
 const { withRetry } = require('../utils/retry');
 const { formatToolEcho } = require('../utils/toolEcho');
+const { sanitizeReply } = require('../security/sanitizer');
 
 // Честные сообщения об ошибках: бот обслуживает только своих (босс/сотрудники),
 // поэтому говорим прямо, что и где сломалось и что делать, а не «системы загружены».
@@ -204,10 +206,16 @@ function capToolCall(name, counts, limits = {}) {
   return { capped: false };
 }
 
-async function runAgent({ combinedMessage, channel, chatId, phone, clientName, role, emit, media, maxIterations, messageOrigin }) {
+async function runAgent({
+  combinedMessage, channel, chatId, phone, clientName, role, emit, media,
+  maxIterations, messageOrigin, sourceMessageId,
+}) {
+  const runId = require('crypto').randomUUID();
   const context = {
     channel, chatId, phone, clientName, role: role || 'employee',
     messageOrigin: messageOrigin === 'scheduled' ? 'scheduled' : 'interactive',
+    sourceMessageId: sourceMessageId || null,
+    runId,
     incomingMedia: Array.isArray(media) ? media : [], // вложения текущего сообщения — для forward_message
   };
   // Тулы по роли: сотруднику не отдаём схемы boss-only (экономия токенов + меньше путаницы).
@@ -228,8 +236,6 @@ async function runAgent({ combinedMessage, channel, chatId, phone, clientName, r
   } catch { messages = []; convoSummary = ''; }
 
   messages.push({ role: 'user', content: combinedMessage });
-  // Долгая память: входящее сообщение пишем в полный архив (не режется, ищется recall).
-  try { require('../services/mysql').archiveMessage(channel, chatId, 'user', combinedMessage, clientName); } catch (_) {}
 
   const systemPrompt = await getSystemPrompt(clientName, phone, channel, chatId);
   let replyText = '';
@@ -313,6 +319,26 @@ async function runAgent({ combinedMessage, channel, chatId, phone, clientName, r
           for (const hook of _toolCallHooks) {
             try { hook(toolName, toolArgs || {}, toolResult); } catch (_) {}
           }
+          try {
+            if (typeof logToolRun === 'function') {
+              await logToolRun({
+                runId,
+                toolCallId: toolCall.id,
+                sourceMessageId: context.sourceMessageId,
+                channel: context.channel,
+                chatId: context.chatId,
+                actorName: context.clientName,
+                actorRole: context.role,
+                tool: toolName,
+                action: toolArgs && toolArgs.action,
+                args: toolArgs,
+                result: toolResult,
+                success: !(toolResult && toolResult.success === false),
+              });
+            }
+          } catch (err) {
+            console.error('[Agent] Tool run audit:', err.message);
+          }
           // Журнал действий бота (долгая память): что сделал, кто инициатор, итог.
           try {
             require('../services/mysql').logBotEvent({
@@ -377,6 +403,19 @@ async function runAgent({ combinedMessage, channel, chatId, phone, clientName, r
     messages.push({ role: 'assistant', content: replyText });
   }
 
+  // История должна содержать тот же текст, который увидит человек, а не сырой
+  // ответ модели до удаления служебной разметки и чувствительных номеров.
+  const deliveredReply = sanitizeReply(replyText);
+  if (deliveredReply !== replyText) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'assistant' && messages[i].content === replyText) {
+        messages[i] = { ...messages[i], content: deliveredReply };
+        break;
+      }
+    }
+    replyText = deliveredReply;
+  }
+
   agentMetrics.success++;
 
   // Roll old context into the running summary once history grows past the
@@ -402,9 +441,6 @@ async function runAgent({ combinedMessage, channel, chatId, phone, clientName, r
   } catch (err) {
     console.error('[Agent] Save history error:', err.message);
   }
-
-  // Долгая память: ответ бота тоже в полный архив (чтобы recall видел обе стороны).
-  try { require('../services/mysql').archiveMessage(channel, chatId, 'assistant', replyText, 'Бот'); } catch (_) {}
 
   return replyText;
 }

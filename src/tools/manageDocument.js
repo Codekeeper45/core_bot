@@ -113,9 +113,16 @@ async function handleEdit(args, context) {
   const edits = Array.isArray(args.edits) ? args.edits.slice(0, MAX_EDITS) : [];
   if (!edits.length) return { success: false, reason: 'no_edits', message: 'Нужен список правок edits=[{find,replace}].' };
 
-  const entry = docBinaryStash.get(context.channel, context.chatId, wanted);
+  let entry = docBinaryStash.get(context.channel, context.chatId, wanted);
+  if (!entry && typeof docBinaryStash.getPersistent === 'function') {
+    try {
+      entry = await docBinaryStash.getPersistent(context.channel, context.chatId, wanted);
+    } catch (err) {
+      console.error('[manage_document] persistent media lookup:', err.message);
+    }
+  }
   if (!entry) {
-    return { success: false, reason: 'not_in_stash', message: 'Не вижу этот .docx (истёк срок хранения или бот перезапускался). Пришли документ ещё раз и повтори правку.' };
+    return { success: false, reason: 'not_in_stash', message: 'Не вижу сохранённый оригинал .docx или срок его хранения истёк. Пришли документ ещё раз и повтори правку.' };
   }
 
   const result = await editDocx(entry.buffer, edits);

@@ -37,7 +37,18 @@ const definition = {
 
 function fmtMsg(m) {
   const who = m.role === 'user' ? (m.actor_name || 'Пользователь') : 'Бот';
-  return { when: m.created_at, who, chat: m.chat_id, text: String(m.content || '').slice(0, 1000) };
+  return {
+    id: m.id,
+    when: m.created_at,
+    who,
+    chat: m.chat_id,
+    message_type: m.message_type || 'legacy',
+    origin: m.origin || 'legacy',
+    source_message_id: m.source_message_id || null,
+    media_id: m.media_id || null,
+    reply_to_message_id: m.reply_to_message_id || null,
+    text: String(m.content || '').slice(0, 1000),
+  };
 }
 function fmtEvent(e) {
   return {
@@ -88,6 +99,8 @@ async function handler(args, context = {}) {
     }
 
     const found = fragments.length + messages.length + events.length;
+    const cap = Math.max(1, Math.min(Number(args.limit) || 8, 25));
+    const potentiallyTruncated = messages.length >= cap || events.length >= cap || fragments.length >= cap;
     return {
       success: true,
       query,
@@ -97,6 +110,13 @@ async function handler(args, context = {}) {
       fragments,            // семантические фрагменты с датами (основное)
       messages,             // дословные совпадения (fallback)
       events,
+      completeness: {
+        complete: !potentiallyTruncated,
+        returned: found,
+        warning: potentiallyTruncated
+          ? 'Достигнут лимит поиска. Не называй результат полным списком; сузь запрос или период.'
+          : null,
+      },
       note: found ? undefined : 'В архиве по этому запросу ничего не найдено. Уточни формулировку или период.',
     };
   } catch (err) {

@@ -30,6 +30,7 @@ const definition = {
         query: { type: 'string', description: 'Необязательно: ключевые слова для сужения внутри периода.' },
         scope: { type: 'string', enum: ['chat', 'all'], description: 'chat — этот чат (умолч.); all — по всем чатам (чужие private-чаты не ищутся).' },
         limit: { type: 'integer', description: 'Сколько сообщений вернуть (1–500, по умолч. 100).' },
+        after_id: { type: 'integer', description: 'Курсор из next_after_id для следующей страницы.' },
       },
       required: ['from'],
     },
@@ -49,11 +50,29 @@ async function handler(args, context = {}) {
   const tokens = String(args.query || '').trim() ? normKey(args.query).split(' ').filter(Boolean).slice(0, 8) : [];
   const limit = Math.max(1, Math.min(Number(args.limit) || 100, 500));
   try {
-    const rows = await archiveByDateRange({ channel: context.channel, chatId: context.chatId, scope, fromUtc, toUtc, tokens, limit, viewer });
-    const messages = rows.map((m) => ({
+    const rows = await archiveByDateRange({
+      channel: context.channel,
+      chatId: context.chatId,
+      scope,
+      fromUtc,
+      toUtc,
+      tokens,
+      limit: limit + 1,
+      afterId: args.after_id,
+      viewer,
+    });
+    const page = rows.slice(0, limit);
+    const hasMore = rows.length > limit;
+    const messages = page.map((m) => ({
+      id: m.id,
       when: localStamp(m.created_at),
       who: m.role === 'user' ? (m.actor_name || 'Пользователь') : 'Бот',
       chat: m.chat_id,
+      message_type: m.message_type || 'legacy',
+      origin: m.origin || 'legacy',
+      source_message_id: m.source_message_id || null,
+      media_id: m.media_id || null,
+      reply_to_message_id: m.reply_to_message_id || null,
       text: String(m.content || '').slice(0, 1500),
     }));
     return {
@@ -61,7 +80,13 @@ async function handler(args, context = {}) {
       scope,
       range: { from: localStamp(fromUtc), to: localStamp(toUtc) },
       count: messages.length,
-      truncated: messages.length >= limit,
+      truncated: hasMore,
+      next_after_id: hasMore && page.length ? page[page.length - 1].id : null,
+      completeness: {
+        complete: !hasMore,
+        returned: messages.length,
+        next_after_id: hasMore && page.length ? page[page.length - 1].id : null,
+      },
       messages,
       note: messages.length ? undefined : 'За этот период в архиве сообщений не найдено.',
     };

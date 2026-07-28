@@ -98,7 +98,11 @@ async function deliver(channel, contact, text, media = null, opts = {}) {
       const body = (text && String(text).trim()) ? String(text) : describeMedia(media);
       if (body) {
         try {
-          await require('../agent/memory').recordOutbound(ch, recordKey, body);
+          await require('../agent/memory').recordOutbound(ch, recordKey, body, {
+            origin: opts.origin || 'tool',
+            sourceMessageId: opts.sourceMessageId || null,
+            tool: opts.tool || null,
+          });
         } catch (recErr) { console.error('[Notifier] record outbound:', recErr.message); }
       }
     }

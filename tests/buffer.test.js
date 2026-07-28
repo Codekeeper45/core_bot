@@ -28,4 +28,23 @@ describe('bufferAndCollect: buffered_media', () => {
     assert.ok(r);
     assert.equal(r.buffered_media.length, 0);
   });
+
+  test('сохраняет отдельные канонические конверты сообщений', async () => {
+    const key = `envelope-${Date.now()}`;
+    const first = bufferAndCollect(key, {
+      timestamp: 1,
+      content: 'транскрипция',
+      envelope: { message_type: 'voice', message_id: 'v1', processed_text: 'транскрипция' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    const second = bufferAndCollect(key, {
+      timestamp: 2,
+      content: 'ответ',
+      envelope: { message_type: 'text', message_id: 't2', processed_text: 'ответ' },
+    });
+    assert.equal(await first, null);
+    const result = await second;
+    assert.deepEqual(result.messages.map((m) => m.message_id), ['v1', 't2']);
+    assert.deepEqual(result.messages.map((m) => m.message_type), ['voice', 'text']);
+  });
 });

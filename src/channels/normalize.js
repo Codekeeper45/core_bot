@@ -66,6 +66,49 @@ function getDocumentFamily(mimeType = '', fileName = '') {
   return 'unsupported';
 }
 
+function telegramQuotedView(msg) {
+  const quoted = msg && msg.reply_to_message;
+  if (!quoted) return null;
+  if (quoted.voice || quoted.audio) return { id: quoted.message_id, type: quoted.voice ? 'voice' : 'audio', text: '[голосовое сообщение]' };
+  if (quoted.photo) return { id: quoted.message_id, type: 'image', text: quoted.caption || '[изображение]' };
+  if (quoted.document) return { id: quoted.message_id, type: 'document', text: quoted.caption || `[документ: ${quoted.document.file_name || 'file'}]` };
+  if (quoted.video || quoted.video_note || quoted.animation) {
+    const type = quoted.video_note ? 'video_note' : (quoted.animation ? 'animation' : 'video');
+    return { id: quoted.message_id, type, text: quoted.caption || `[${type}]` };
+  }
+  return { id: quoted.message_id, type: 'text', text: quoted.text || quoted.caption || '' };
+}
+
+function whatsappQuotedView(waMsg) {
+  const carriers = [
+    waMsg.extendedTextMessage, waMsg.audioMessage, waMsg.imageMessage,
+    waMsg.videoMessage, waMsg.ptvMessage, waMsg.documentMessage, waMsg.stickerMessage,
+  ].filter(Boolean);
+  const contextInfo = carriers.find((item) => item.contextInfo)?.contextInfo;
+  if (!contextInfo || !contextInfo.quotedMessage) return null;
+  const quoted = normalizeMessageContent(contextInfo.quotedMessage) || contextInfo.quotedMessage;
+  if (quoted.audioMessage) return {
+    id: contextInfo.stanzaId || null,
+    type: quoted.audioMessage.ptt ? 'voice' : 'audio',
+    text: '[голосовое сообщение]',
+  };
+  if (quoted.imageMessage) return { id: contextInfo.stanzaId || null, type: 'image', text: quoted.imageMessage.caption || '[изображение]' };
+  if (quoted.documentMessage) return {
+    id: contextInfo.stanzaId || null,
+    type: 'document',
+    text: quoted.documentMessage.caption || `[документ: ${quoted.documentMessage.fileName || 'file'}]`,
+  };
+  if (quoted.videoMessage || quoted.ptvMessage) {
+    const video = quoted.videoMessage || quoted.ptvMessage;
+    return { id: contextInfo.stanzaId || null, type: quoted.ptvMessage ? 'video_note' : 'video', text: video.caption || '[видео]' };
+  }
+  return {
+    id: contextInfo.stanzaId || null,
+    type: 'text',
+    text: quoted.conversation || quoted.extendedTextMessage?.text || '',
+  };
+}
+
 
 function normalizeInbound(raw) {
   const isBlocked = (phone) => BLOCKED_PHONES.has(normalizePhone(phone));
@@ -73,6 +116,7 @@ function normalizeInbound(raw) {
     channel: null, chat_id: null, phone: null, client_name: null,
     message: null, message_text_for_buffer: null, message_id: null,
     message_type: 'text', original_message_type: null,
+    reply_to_message_id: null, reply_to_message_type: null, reply_to_text: null,
     is_private: false, has_voice: false, has_image: false, has_document: false,
     is_observed_group: false, group_subject: null,
     voice_source_url: null, voice_file_id: null, voice_mime_type: null, voice_duration: null,
@@ -112,6 +156,12 @@ function normalizeInbound(raw) {
     n.phone = from.username ? `@${from.username}` : String(from.id || '');
     n.is_outgoing = from.is_bot === true;
     n.is_self_message = false;
+    const quoted = telegramQuotedView(msg);
+    if (quoted) {
+      n.reply_to_message_id = quoted.id ? String(quoted.id) : null;
+      n.reply_to_message_type = quoted.type;
+      n.reply_to_text = quoted.text || '';
+    }
 
     if (msg.text) {
       n.message_type = 'text';
@@ -316,6 +366,13 @@ function normalizeInbound(raw) {
       }
     } else {
       n.unsupported_reason = `unsupported_baileys_type`;
+    }
+
+    const quoted = whatsappQuotedView(waMsg);
+    if (quoted) {
+      n.reply_to_message_id = quoted.id ? String(quoted.id) : null;
+      n.reply_to_message_type = quoted.type;
+      n.reply_to_text = quoted.text || '';
     }
 
     const blocked = BLOCKED_PHONES.has(normalizePhone(n.phone));

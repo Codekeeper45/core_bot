@@ -14,7 +14,7 @@ const {
   listEnabledSchedules, markScheduleRun, touchScheduleStatus, bumpScheduleFail,
   claimSchedule, setScheduleNextRun, setScheduleEnabled, updateSchedule,
   logScheduleRun, cleanupScheduleRuns, listActiveQuiet,
-  getTask, getEmployeeById,
+  getTask, getEmployeeById, findEmployeeByContact,
 } = require('./mysql');
 const { computeNextRunAt, computeNextFire, toUtc, fmtUtc } = require('../utils/scheduleTime');
 const config = require('../config');
@@ -111,14 +111,23 @@ let timer = null;
 let running = false;     // гард: одно исполнение tick за раз (агентный цикл долгий)
 let lastCleanupDay = ''; // журнал чистим раз в сутки (старше 90 дней)
 
-function deliverRow(row, instruction, extra = {}) {
+async function deliverRow(row, instruction, extra = {}) {
+  let ownerName = '';
+  try {
+    const employee = await findEmployeeByContact(row.owner_channel, row.owner_chat_id)
+      || (row.owner_phone
+        ? await findEmployeeByContact(row.owner_channel, row.owner_phone)
+        : null);
+    ownerName = employee ? employee.name : '';
+  } catch (_) {}
   return deliverFn({
     channel: row.owner_channel,
     chatId: row.owner_chat_id,
     phone: row.owner_phone,
-    clientName: 'boss',
+    clientName: ownerName,
     messageOrigin: 'scheduled',
     instruction,
+    scheduleId: row.id,
     title: row.title,
     ...extra,
   });

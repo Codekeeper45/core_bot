@@ -2,7 +2,9 @@
 const fs = require('fs');
 const path = require('path');
 const config = require('../config');
-const { findEmployeeByContact, getOpenTasksForEmployee, listFacts } = require('../services/mysql');
+const {
+  findEmployeeByContact, getOpenTasksForEmployee, listFacts, listActivePolicies,
+} = require('../services/mysql');
 
 const SYSTEM_PROMPT_RAW = fs.readFileSync(
   path.join(__dirname, 'prompts/system_prompt.txt'), 'utf8'
@@ -75,20 +77,22 @@ ${taskLines}
     }
   } catch (_) { /* lookup некритичен — без него работаем как с боссом */ }
 
-  // Память: глобальные ПРАВИЛА (для всех диалогов) + личные факты этого чата.
+  // Управляемая память: только утверждённые политики + личные факты чата.
+  // Старые scope=global сюда намеренно не попадают.
   let factsContext = '';
   try {
-    const facts = await listFacts(channel, chatId, 50);
-    const globals = facts.filter((f) => f.scope === 'global');
-    const personal = facts.filter((f) => f.scope !== 'global');
-    if (globals.length) {
-      const lines = globals.map((f) => `- ${f.fact}${f.category ? ` [${f.category}]` : ''}`).join('\n');
+    const [policies, personal] = await Promise.all([
+      typeof listActivePolicies === 'function' ? listActivePolicies() : [],
+      listFacts(channel, chatId, 50),
+    ]);
+    if (policies.length) {
+      const lines = policies.map((p) => `- [${p.policy_key} v${p.version}] ${p.policy_text}`).join('\n');
       factsContext += `
 
-=== ОБЩИЕ ПРАВИЛА (действуют во ВСЕХ диалогах, заданы командой) ===
-Соблюдай это всегда, с кем бы ни общался.
+=== УТВЕРЖДЁННЫЕ ОБЩИЕ ПОЛИТИКИ ===
+Это действующие правила компании. Не смешивай их с личными фактами.
 ${lines}
-=== КОНЕЦ ОБЩИХ ПРАВИЛ ===`;
+=== КОНЕЦ ПОЛИТИК ===`;
     }
     if (personal.length) {
       const lines = personal.map((f) => `- ${f.fact}${f.category ? ` [${f.category}]` : ''}`).join('\n');

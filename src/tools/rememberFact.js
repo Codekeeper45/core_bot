@@ -10,18 +10,15 @@ const remember = {
     function: {
       name: 'remember_fact',
       description:
-        'Запомнить устойчивый факт/предпочтение или ОБЩЕЕ ПРАВИЛО поведения. Сохраняется навсегда. '
-        + 'scope=personal (по умолчанию) — про ЭТОГО пользователя («не работает по пятницам», «жена — '
-        + 'Айгуль»), видно только в его чате. scope=global — ПРАВИЛО ДЛЯ ВСЕХ ДИАЛОГОВ («со всеми '
-        + 'сотрудниками общайся коротко и по делу», «после одного подтверждения не дёргать», «компания '
-        + '— Neodrain»); применяется в каждом чате. Глобальные правила может задавать любой. Сохраняй '
-        + 'сам, без лишних вопросов; НЕ запоминай разовое/сиюминутное.',
+        'Запомнить устойчивый ЛИЧНЫЙ факт или предпочтение текущего пользователя. Сохраняется надолго '
+        + 'и видно только в его чате. Общие правила для всех через этот инструмент не сохраняй: '
+        + 'используй manage_policy, где они проходят утверждение. Не запоминай разовое/сиюминутное.',
       parameters: {
         type: 'object',
         properties: {
           fact: { type: 'string', description: 'Факт/правило одной фразой, от третьего лица.' },
           category: { type: 'string', description: 'Категория: личное / бизнес / предпочтение / контакт (опц.).' },
-          scope: { type: 'string', enum: ['personal', 'global'], description: 'personal = про этого пользователя (умолч.); global = правило для ВСЕХ диалогов.' },
+          scope: { type: 'string', enum: ['personal'], description: 'Только personal. Общие правила — manage_policy.' },
         },
         required: ['fact'],
       },
@@ -29,10 +26,17 @@ const remember = {
   },
   async handler(args, context = {}) {
     if (!args.fact) return { success: false, message: 'Нужен fact.' };
-    const r = await addFact(context.channel, context.chatId, args.fact, args.category, args.scope);
+    if (args.scope === 'global') {
+      return {
+        success: false,
+        reason: 'use_manage_policy',
+        message: 'Общие правила сохраняются через manage_policy и требуют утверждения.',
+      };
+    }
+    const r = await addFact(context.channel, context.chatId, args.fact, args.category, 'personal');
     return {
       success: true, id: r.id, duplicate: r.duplicate, scope: r.scope,
-      note: r.duplicate ? 'Уже было запомнено.' : (r.scope === 'global' ? 'Запомнил как общее правило (для всех).' : 'Запомнил.'),
+      note: r.duplicate ? 'Уже было запомнено.' : 'Запомнил как личный факт.',
     };
   },
 };

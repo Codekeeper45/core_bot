@@ -1,5 +1,6 @@
 'use strict';
 require('dotenv').config();
+const crypto = require('crypto');
 
 // ─── Глушим утечку ключей в логи ─────────────────────────────────────────────
 // libsignal (Signal-шифрование WhatsApp) при штатной ротации сессий печатает в
@@ -37,12 +38,15 @@ const { acquireLock, enqueue, releaseLockAndProcessQueue } = require('./middlewa
 const { checkRateLimit } = require('./middleware/rateLimit');
 const { isDuplicate } = require('./middleware/deduplication');
 const { isAllowedSender } = require('./middleware/access');
-const { clearHistory, initTables, setQuiet, clearQuiet, getQuiet, archiveMessage } = require('./services/mysql');
+const {
+  clearHistory, initTables, setQuiet, clearQuiet, getQuiet, archiveMessage,
+  storeMedia, cleanupExpiredMedia, verifyDatabaseUtc,
+} = require('./services/mysql');
 const { isObservedGroupId, observedMessageContent } = require('./services/groupObserver');
 const { startTypingLoop, stopTypingLoop } = require('./middleware/typing');
 
-const { transcribeVoice } = require('./media/voice');
-const { analyzeImages, checkDailyImageLimit, incrementDailyImageCount } = require('./media/image');
+const { processVoice } = require('./media/voice');
+const { processImage, checkDailyImageLimit, incrementDailyImageCount } = require('./media/image');
 const { processDocument } = require('./media/document');
 const { processVideo, processSticker } = require('./media/video');
 
@@ -58,6 +62,7 @@ function isFallbackReply(text) {
 
 const { sanitizeReply } = require('./security/sanitizer');
 const { isSilentStub } = require('./utils/silentStub');
+const { archiveContent, renderBatch } = require('./utils/messageEnvelope');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -155,13 +160,19 @@ async function processMessage(rawPayload) {
       console.error('[Group observer] Media archive error:', err.message);
       content = n.message_text_for_buffer || n.message || `[${n.message_type || 'сообщение'}]`;
     }
-    await archiveMessage(
-      n.channel,
-      n.chat_id,
-      'user',
+    await archiveMessage({
+      channel: n.channel,
+      chatId: n.chat_id,
+      role: 'user',
+      actorName: n.client_name,
+      sourceMessageId: n.message_id || null,
+      messageType: n.message_type || 'text',
+      originalMessageType: n.message_type || null,
+      origin: 'observed_group',
+      replyToMessageId: n.reply_to_message_id || null,
       content,
-      n.client_name
-    );
+      metadata: { group: true, observed: true },
+    });
     return;
   }
 
@@ -192,6 +203,29 @@ async function processMessage(rawPayload) {
   // остаётся короткий content-fallback.
   if (isDuplicate(channel, chat_id, n.message_text_for_buffer || n.message || '', n.message_id)) {
     return;
+  }
+  const sourceMessageId = n.message_id || `in:${crypto.randomUUID()}`;
+
+  // Команды выполняются до медиапайплайна, поэтому обычный текст архивируем
+  // сразу. Медиа фиксируется ниже вместе с результатом распознавания.
+  if (message_type === 'text') {
+    await archiveMessage({
+      channel,
+      chatId: chat_id,
+      role: 'user',
+      actorName: client_name,
+      sourceMessageId,
+      messageType: 'text',
+      originalMessageType: n.original_message_type || 'text',
+      origin: 'interactive',
+      replyToMessageId: n.reply_to_message_id || null,
+      content: n.message || '',
+      metadata: {
+        phone: phone || null,
+        reply_to_message_type: n.reply_to_message_type || null,
+        reply_to_text: n.reply_to_text || null,
+      },
+    });
   }
 
   // Шаг 1.5: Команды управления
@@ -267,53 +301,55 @@ async function processMessage(rawPayload) {
     await incrementDailyImageCount(channel, chat_id);
   }
 
-  // Шаг 3: Обработка голоса и документов (до буфера)
+  // Шаг 3: Медиа скачивается и обрабатывается один раз. Оригинал живёт в БД
+  // ограниченный срок, производный текст остаётся в архиве.
   let messageContent = n.message || '';
-  let imgRef = null;
-  let baileysMediaObj = null;
-  // Дескриптор входящего медиа для пересылки (forward_message): ссылки/идентификаторы,
-  // по которым медиа можно ПОВТОРНО скачать в момент пересылки (см. media/incomingMedia.js).
   let mediaDescriptor = null;
+  let mediaResult = null;
+  let mediaId = null;
+  let mediaErrorReply = null;
 
   if (message_type === 'voice') {
-    messageContent = await transcribeVoice(n);
+    mediaResult = await processVoice(n);
+    messageContent = mediaResult.text;
     mediaDescriptor = {
       type: 'voice', channel,
       file_id: n.voice_file_id || null,
       source_url: n.voice_source_url || null,
       baileys_media_obj: n.baileys_media_obj || null,
-      file_name: 'voice.ogg', mime: n.voice_mime_type || null,
+      file_name: 'voice.ogg', mime: mediaResult.mimeType || n.voice_mime_type || null,
+      buffer: mediaResult.buffer || null,
     };
   } else if (message_type === 'image') {
-    imgRef = n.image_source || n.image_url || '';
-    baileysMediaObj = n.baileys_media_obj || null;
-    messageContent = n.image_caption || '';
+    mediaResult = await processImage(n);
+    messageContent = mediaResult.text;
     mediaDescriptor = {
-      type: 'image', channel, ref: imgRef,
-      baileys_media_obj: baileysMediaObj,
-      file_name: 'photo.jpg', mime: 'image/jpeg',
+      type: 'image', channel, ref: n.image_source || n.image_url || '',
+      baileys_media_obj: n.baileys_media_obj || null,
+      file_name: 'photo.jpg', mime: mediaResult.mimeType || 'image/jpeg',
+      buffer: mediaResult.buffer || null,
     };
   } else if (message_type === 'document') {
     const docResult = await processDocument(n);
-    if (docResult.error) {
-      await sendReply(channel, chat_id, docResult.error);
-      return;
-    }
-    messageContent = docResult.text;
+    mediaResult = docResult;
+    messageContent = docResult.text || docResult.error;
+    mediaErrorReply = docResult.error || null;
     mediaDescriptor = {
       type: 'document', channel,
       file_id: n.document_file_id || null,
       source_url: n.document_source_url || null,
       baileys_media_obj: n.baileys_media_obj || null,
-      file_name: n.document_file_name || 'файл', mime: n.document_mime_type || null,
+      file_name: n.document_file_name || 'файл', mime: docResult.mimeType || n.document_mime_type || null,
+      buffer: docResult.buffer || null,
     };
   } else if (message_type === 'video' || message_type === 'video_note' || message_type === 'animation') {
     const videoResult = await processVideo(n);
-    if (videoResult.error) {
-      await sendReply(channel, chat_id, videoResult.error);
-      return;
+    if (videoResult.error && !videoResult.buffer) {
+      mediaErrorReply = videoResult.error;
     }
-    messageContent = videoResult.text;
+    mediaResult = videoResult;
+    messageContent = videoResult.text || videoResult.error;
+    mediaErrorReply = videoResult.error || mediaErrorReply;
     mediaDescriptor = {
       type: message_type, channel,
       file_id: n.video_file_id || null,
@@ -321,10 +357,12 @@ async function processMessage(rawPayload) {
       baileys_media_obj: n.baileys_media_obj || null,
       baileys_media_type: n.baileys_media_type || null,
       file_name: message_type === 'animation' ? 'animation.mp4' : 'video.mp4',
-      mime: n.video_mime_type || 'video/mp4',
+      mime: videoResult.mimeType || n.video_mime_type || 'video/mp4',
+      buffer: videoResult.buffer || null,
     };
   } else if (message_type === 'sticker') {
     const stickerResult = await processSticker(n);
+    mediaResult = stickerResult;
     messageContent = stickerResult.text;
     mediaDescriptor = {
       type: 'sticker', channel,
@@ -332,18 +370,81 @@ async function processMessage(rawPayload) {
       baileys_media_obj: n.baileys_media_obj || null,
       baileys_media_type: n.baileys_media_type || null,
       file_name: `sticker.${n.sticker_format || 'webp'}`,
-      mime: n.sticker_format === 'webm' ? 'video/webm' : 'image/webp',
+      mime: stickerResult.mimeType || (n.sticker_format === 'webm' ? 'video/webm' : 'image/webp'),
       sticker_format: n.sticker_format || 'webp',
+      buffer: stickerResult.buffer || null,
     };
+  }
+
+  if (message_type !== 'text') {
+    const mediaBuffer = mediaResult && mediaResult.buffer;
+    if (Buffer.isBuffer(mediaBuffer) && mediaBuffer.length <= config.MEDIA_MAX_BYTES) {
+      try {
+        mediaId = await storeMedia({
+          channel,
+          chatId: chat_id,
+          sourceMessageId,
+          actorName: client_name,
+          kind: message_type,
+          mimeType: mediaResult.mimeType || (mediaDescriptor && mediaDescriptor.mime) || null,
+          fileName: mediaResult.fileName || (mediaDescriptor && mediaDescriptor.file_name) || null,
+          buffer: mediaBuffer,
+          derivedText: mediaResult.derivedText || mediaResult.transcript || messageContent,
+          status: mediaResult.processingStatus || 'ready',
+          error: mediaResult.processingError || null,
+        });
+      } catch (err) {
+        console.error('[Media] Persist error:', err.message);
+      }
+    }
+    if (mediaDescriptor) mediaDescriptor.media_id = mediaId;
+  }
+
+  const envelope = {
+    ...n,
+    message_id: sourceMessageId,
+    processed_text: messageContent,
+    media_id: mediaId,
+    processing_status: mediaResult && mediaResult.processingStatus,
+    processing_error: mediaResult && mediaResult.processingError,
+  };
+  if (message_type !== 'text') {
+    await archiveMessage({
+      channel,
+      chatId: chat_id,
+      role: 'user',
+      actorName: client_name,
+      sourceMessageId,
+      messageType: message_type,
+      originalMessageType: n.original_message_type || message_type,
+      origin: 'interactive',
+      replyToMessageId: n.reply_to_message_id || null,
+      mediaId,
+      content: archiveContent(envelope),
+      metadata: {
+        phone: phone || null,
+        file_name: mediaDescriptor && mediaDescriptor.file_name,
+        mime_type: mediaDescriptor && mediaDescriptor.mime,
+        processing_status: mediaResult && mediaResult.processingStatus,
+        processing_error: mediaResult && mediaResult.processingError,
+        reply_to_message_type: n.reply_to_message_type || null,
+        reply_to_text: n.reply_to_text || null,
+      },
+    });
+  }
+  if (mediaErrorReply) {
+    await sendReply(channel, chat_id, mediaErrorReply);
+    return;
   }
 
   // Шаг 4: Буферизация
   const bufferEntry = {
     timestamp: Date.now(),
     content: messageContent,
-    img_url: imgRef,
-    baileys_media_obj: baileysMediaObj,
+    img_url: null,
+    baileys_media_obj: null,
     media: mediaDescriptor,
+    envelope,
   };
 
   // Key the buffer by channel:chat_id (like every other middleware) so two
@@ -351,8 +452,11 @@ async function processMessage(rawPayload) {
   const buffered = await bufferAndCollect(`${channel}:${chat_id}`, bufferEntry);
   if (!buffered) return;
 
-  let { combined_message, buffered_images, has_buffered_images } = buffered;
+  let { combined_message } = buffered;
   const buffered_media = buffered.buffered_media || [];
+  if (Array.isArray(buffered.messages) && buffered.messages.length) {
+    combined_message = renderBatch(buffered.messages);
+  }
 
   // Шаг 5.5: Rate limit check (before concurrency lock to avoid holding locks for rate-limited messages)
   const rateLimitResult = checkRateLimit(channel, chat_id);
@@ -369,16 +473,6 @@ async function processMessage(rawPayload) {
   }
 
   try {
-    // Шаг 7: Анализ изображений
-    if (has_buffered_images && buffered_images.length > 0) {
-      try {
-        const imageContext = await analyzeImages(buffered_images, channel, chat_id);
-        combined_message = `${imageContext}\n\n${combined_message}`;
-      } catch (err) {
-        console.error('[Main] Image analysis error:', err.message);
-      }
-    }
-
     // Шаг 8: Typing indicator
     startTypingLoop(channel, chat_id);
 
@@ -396,10 +490,11 @@ async function processMessage(rawPayload) {
         phone,
         clientName: client_name,
         role: senderRole,
+        sourceMessageId,
         media: buffered_media, // входящие вложения текущего батча — для forward_message
 
         // Авто-эхо: бот шлёт в чат короткие строки о вызываемых тулах в реальном времени.
-        emit: (text) => sendReply(channel, chat_id, text),
+        emit: (text) => sendReply(channel, chat_id, text, { origin: 'tool_echo' }),
       });
     } catch (err) {
       console.error('[Main] Agent error:', err.message);
@@ -410,10 +505,16 @@ async function processMessage(rawPayload) {
     // Шаг 10: Остановить typing, отправить ответ
     await stopTypingLoop(chat_id);
     if (replyText) {
+      const rawReply = replyText;
       replyText = sanitizeReply(replyText);
+      if (replyText && replyText.trim()) {
+        await sendReply(channel, chat_id, replyText, {
+          rawContent: rawReply,
+          origin: 'interactive',
+        });
+      }
     }
     if (replyText && replyText.trim()) {
-      await sendReply(channel, chat_id, replyText);
       // Авто-голос (safety net): если босс написал ГОЛОСОМ, а агент НЕ озвучил сам через
       // say_voice — озвучиваем текст ответа (без тегов). Instagram голос не поддерживает.
       if (config.TTS_ENABLED && message_type === 'voice' && channel !== 'instagram'
@@ -439,7 +540,7 @@ const { systemTimestamp } = require('./utils/localTime');
 // =====================================================================
 // Отправка ответа по каналу
 // =====================================================================
-async function sendReply(channel, chatId, text) {
+async function sendReply(channel, chatId, text, opts = {}) {
   if (String(channel || '').toLowerCase() === 'whatsapp' && isObservedGroupId(chatId)) {
     console.warn(`[SendReply] Наблюдаемая группа read-only: исходящее сообщение заблокировано (${chatId})`);
     return false;
@@ -457,6 +558,21 @@ async function sendReply(channel, chatId, text) {
       require('./services/developerFeedback').reportDeveloperError('Исходящее сообщение не доставлено', { channel, chatId, includeHistory: true }).catch(() => {});
       return false;
     }
+    if (opts.record !== false && String(text || '').trim()) {
+      await archiveMessage({
+        channel,
+        chatId,
+        role: 'assistant',
+        actorName: 'Бот',
+        sourceMessageId: opts.sourceMessageId || `out:${crypto.randomUUID()}`,
+        messageType: opts.messageType || 'text',
+        origin: opts.origin || 'interactive',
+        content: String(text),
+        rawContent: opts.rawContent || null,
+        deliveryStatus: 'delivered',
+        metadata: opts.metadata || null,
+      });
+    }
     return true;
   } catch (err) {
     console.error('[SendReply] Error:', err.message);
@@ -468,7 +584,9 @@ async function sendReply(channel, chatId, text) {
 // Выполнить инструкцию ботом от имени владельца (для scheduledRunner): захватить лок чата,
 // прогнать обычный агентный цикл (role=boss), ответ отправить владельцу. Единый с processMessage
 // путь ответа в канал. Возвращает {ok, reason?, reply?}.
-async function deliverInstruction({ channel, chatId, phone, clientName, instruction, silentToOwner }) {
+async function deliverInstruction({
+  channel, chatId, phone, clientName, instruction, silentToOwner, scheduleId, title,
+}) {
   const locked = await acquireLock(channel, chatId);
   if (!locked) return { ok: false, reason: 'lock_busy' }; // босс сейчас пишет — повторим на след. tick
 
@@ -478,6 +596,18 @@ async function deliverInstruction({ channel, chatId, phone, clientName, instruct
     // Неизвестный отправитель (например удалён из реестра) → employee, без эскалации.
     const access = await isAllowedSender(channel, chatId, phone);
     const role = access.role || 'employee';
+    const scheduledSourceId = `schedule:${scheduleId || 'unknown'}:${Date.now()}`;
+    await archiveMessage({
+      channel,
+      chatId,
+      role: 'system',
+      actorName: title ? `Планировщик: ${title}` : 'Планировщик',
+      sourceMessageId: scheduledSourceId,
+      messageType: 'scheduled_instruction',
+      origin: 'scheduled',
+      content: instruction,
+      metadata: { schedule_id: scheduleId || null, title: title || null },
+    });
     const combinedMessage = `${systemTimestamp()}\n${instruction}`;
     let reply;
     try {
@@ -488,10 +618,14 @@ async function deliverInstruction({ channel, chatId, phone, clientName, instruct
         phone,
         clientName: clientName || (role === 'boss' ? 'boss' : ''),
         role,
+        sourceMessageId: scheduledSourceId,
         messageOrigin: 'scheduled',
         // Прогон по расписанию — короче интерактивного: отдельный меньший потолок итераций.
         maxIterations: config.AI_MAX_ITERATIONS_SCHEDULED,
-        emit: (text) => sendReply(channel, chatId, text),
+        emit: (text) => sendReply(channel, chatId, text, {
+          origin: 'scheduled_tool_echo',
+          metadata: { schedule_id: scheduleId || null },
+        }),
       });
     } catch (err) {
       console.error('[Deliver] Agent error:', err.message);
@@ -508,7 +642,11 @@ async function deliverInstruction({ channel, chatId, phone, clientName, instruct
     // вместо настоящей пустоты: это шум по таймеру, не отправляем (агент-цикл уже отработал).
     if (reply && !silentToOwner && !isSilentStub(reply)) {
       const clean = sanitizeReply(reply);
-      if (clean && !(await sendReply(channel, chatId, clean))) {
+      if (clean && !(await sendReply(channel, chatId, clean, {
+        rawContent: reply,
+        origin: 'scheduled',
+        metadata: { schedule_id: scheduleId || null, title: title || null },
+      }))) {
         return { ok: false, reason: 'delivery_error', reply };
       }
     }
@@ -536,9 +674,9 @@ app.get('/health', async (req, res) => {
 
   // MySQL connectivity check
   try {
-    const { dbQuery } = require('./services/mysql');
-    await dbQuery('SELECT 1 AS ok');
-    health.mysql = 'connected';
+    const utc = await verifyDatabaseUtc();
+    health.mysql = { status: 'connected', utc };
+    if (!utc.ok) health.status = 'degraded';
   } catch (err) {
     health.mysql = `error: ${err.message}`;
     health.status = 'degraded';
@@ -576,6 +714,10 @@ app.get('/health', async (req, res) => {
 async function startServer() {
   // Init MySQL tables
   await initTables();
+  cleanupExpiredMedia(1000).catch((err) => console.error('[Media] Retention cleanup:', err.message));
+  setInterval(() => {
+    cleanupExpiredMedia(1000).catch((err) => console.error('[Media] Retention cleanup:', err.message));
+  }, 24 * 60 * 60 * 1000).unref();
   require('./services/developerFeedback').start();
   require('./services/embeddingWorker').start();
 

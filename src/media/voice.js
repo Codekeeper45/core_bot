@@ -52,15 +52,35 @@ async function transcribeVoiceBuffer(buffer, mimeType = 'audio/ogg', caption = '
 }
 
 async function transcribeVoice(normalized) {
+  const result = await processVoice(normalized);
+  return result.text;
+}
+
+async function processVoice(normalized) {
   try {
     const { buffer, mimeType } = await downloadVoice(normalized);
     // caption — для TG audio с подписью; image_caption/message выставляются normalize.js
     const caption = normalized.image_caption || normalized.message || '';
-    return await transcribeVoiceBuffer(buffer, mimeType, caption);
+    const text = await transcribeVoiceBuffer(buffer, mimeType, caption);
+    return {
+      text,
+      transcript: text === FALLBACK_VOICE ? null : text,
+      processingStatus: text === FALLBACK_VOICE ? 'failed' : 'ready',
+      processingError: text === FALLBACK_VOICE ? 'stt_empty_or_failed' : null,
+      buffer,
+      mimeType,
+    };
   } catch (err) {
     console.error('[Voice] Download error:', err.message);
-    return FALLBACK_VOICE;
+    return {
+      text: FALLBACK_VOICE,
+      transcript: null,
+      processingStatus: 'failed',
+      processingError: err.message,
+      buffer: null,
+      mimeType: normalized.voice_mime_type || 'audio/ogg',
+    };
   }
 }
 
-module.exports = { transcribeVoice, downloadVoice, transcribeVoiceBuffer, FALLBACK_VOICE };
+module.exports = { transcribeVoice, processVoice, downloadVoice, transcribeVoiceBuffer, FALLBACK_VOICE };

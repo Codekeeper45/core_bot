@@ -28,6 +28,7 @@ const definition = {
         to: { type: 'string', description: 'Конец периода (вкл.). Если опущен — до настоящего момента. Опц.' },
         query: { type: 'string', description: 'Необязательно: ключевые слова, чтобы сузить внутри переписки.' },
         limit: { type: 'integer', description: 'Сколько сообщений вернуть (1–500, по умолч. 100).' },
+        after_id: { type: 'integer', description: 'Курсор из next_after_id для следующей страницы.' },
       },
       required: ['who'],
     },
@@ -67,10 +68,26 @@ async function handler(args, context = {}) {
     const tokens = queryTokens(args.query || '').slice(0, 8);
     const limit = Math.max(1, Math.min(Number(args.limit) || 100, 500));
 
-    const rows = await archiveByPerson({ person, fromUtc, toUtc, tokens, limit, viewer });
-    const messages = rows.map((r) => ({
+    const rows = await archiveByPerson({
+      person,
+      fromUtc,
+      toUtc,
+      tokens,
+      limit: limit + 1,
+      afterId: args.after_id,
+      viewer,
+    });
+    const page = rows.slice(0, limit);
+    const hasMore = rows.length > limit;
+    const messages = page.map((r) => ({
+      id: r.id,
       when: localStamp(r.created_at),
       who: r.role === 'user' ? (r.actor_name || emp.name) : 'Бот',
+      message_type: r.message_type || 'legacy',
+      origin: r.origin || 'legacy',
+      source_message_id: r.source_message_id || null,
+      media_id: r.media_id || null,
+      reply_to_message_id: r.reply_to_message_id || null,
       text: String(r.content || '').slice(0, 1500),
     }));
 
@@ -79,7 +96,13 @@ async function handler(args, context = {}) {
       person: { id: emp.id, name: emp.name, roles: emp.roles || null },
       range: { from: fromUtc ? localStamp(fromUtc) : null, to: toUtc ? localStamp(toUtc) : null },
       count: messages.length,
-      truncated: messages.length >= limit,
+      truncated: hasMore,
+      next_after_id: hasMore && page.length ? page[page.length - 1].id : null,
+      completeness: {
+        complete: !hasMore,
+        returned: messages.length,
+        next_after_id: hasMore && page.length ? page[page.length - 1].id : null,
+      },
       messages,
       note: messages.length
         ? undefined
