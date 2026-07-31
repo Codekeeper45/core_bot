@@ -25,7 +25,19 @@ async function processChat(mysql, channel, chatId, watermark) {
     if (msgs.length < size) break;
     const groups = groupsOf(msgs, size);
     const texts = groups.map(renderChunk);
-    const vectors = await embeddings.embed(texts); // батч одним запросом
+    let vectors;
+    try {
+      vectors = await embeddings.embed(texts); // батч одним запросом
+    } catch (err) {
+      console.warn(`[Embeddings] retry batch with shorter text for ${channel}:${chatId}:`, err.message);
+      try {
+        const shortTexts = texts.map((t) => String(t || '').slice(0, 1500));
+        vectors = await embeddings.embed(shortTexts);
+      } catch (err2) {
+        console.error(`[Embeddings] batch failed for ${channel}:${chatId}:`, err2.message);
+        throw err2;
+      }
+    }
     for (let i = 0; i < groups.length; i++) {
       const g = groups[i];
       const vec = vectors[i] || [];

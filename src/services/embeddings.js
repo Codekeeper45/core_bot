@@ -57,7 +57,7 @@ function isEnabled() {
 // Получить эмбеддинги для массива строк. Возвращает массив нормированных векторов
 // (длины EMBEDDING_DIMENSIONS) в том же порядке. Бросает при сбое — вызывающий решает.
 async function embed(texts) {
-  const input = (Array.isArray(texts) ? texts : [texts]).map((t) => String(t == null ? '' : t).slice(0, 8000));
+  const input = (Array.isArray(texts) ? texts : [texts]).map((t) => String(t == null ? '' : t).slice(0, 3500));
   if (!isEnabled()) throw new Error('embeddings_disabled');
   if (!input.length) return [];
   const res = await fetch('https://openrouter.ai/api/v1/embeddings', {
