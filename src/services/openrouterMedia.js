@@ -2,9 +2,27 @@
 const OpenAI = require('openai');
 const config = require('../config');
 
-// Цепочки моделей: primary → fallback. Пустые/дубли отбрасываются.
+const _mediaModelCooldowns = new Map();
+
+function isMediaModelOnCooldown(model) {
+  const expires = _mediaModelCooldowns.get(model);
+  if (!expires) return false;
+  if (Date.now() > expires) {
+    _mediaModelCooldowns.delete(model);
+    return false;
+  }
+  return true;
+}
+
+function markMediaModelCooldown(model, durationMs = 5 * 60 * 1000) {
+  _mediaModelCooldowns.set(model, Date.now() + durationMs);
+}
+
+// Цепочки моделей: primary → fallback. Пустые/дубли отбрасываются, сбойные на кулдауне пропускаются.
 function modelChain(primary, fallback) {
-  return [primary, fallback].filter((m, i, a) => m && a.indexOf(m) === i);
+  const chain = [primary, fallback].filter((m, i, a) => m && a.indexOf(m) === i);
+  const available = chain.filter((m) => !isMediaModelOnCooldown(m));
+  return available.length > 0 ? available : chain;
 }
 
 let client;
@@ -90,6 +108,9 @@ async function transcribeAudio(buffer, mimeType = 'audio/ogg') {
       return await transcribeWithModel(model, base64, format);
     } catch (err) {
       lastErr = err;
+      if (err.message && (err.message.includes('402') || err.message.includes('401') || err.message.includes('Insufficient Balance'))) {
+        markMediaModelCooldown(model, 5 * 60 * 1000);
+      }
       console.error(`[STT] модель ${model} не сработала (transcriptions): ${err.message}`);
     }
     // Для omni-моделей пробуем chat-audio путь (transcriptions им не подходит).
@@ -98,6 +119,9 @@ async function transcribeAudio(buffer, mimeType = 'audio/ogg') {
         return await transcribeWithChatAudio(model, base64, format);
       } catch (err) {
         lastErr = err;
+        if (err.message && (err.message.includes('402') || err.message.includes('401') || err.message.includes('Insufficient Balance'))) {
+          markMediaModelCooldown(model, 5 * 60 * 1000);
+        }
         console.error(`[STT] модель ${model} не сработала (chat-audio): ${err.message}`);
       }
     }
@@ -125,6 +149,9 @@ async function analyzeImageBase64(base64, mimeType = 'image/jpeg', prompt) {
       return (response.choices[0]?.message?.content || '').trim();
     } catch (err) {
       lastErr = err;
+      if (err.message && (err.message.includes('402') || err.message.includes('401') || err.message.includes('Insufficient Balance'))) {
+        markMediaModelCooldown(model, 5 * 60 * 1000);
+      }
       console.error(`[Vision] модель ${model} не сработала: ${err.message}`);
     }
   }
@@ -162,6 +189,9 @@ async function analyzeVideoBase64(base64, mimeType = 'video/mp4', prompt) {
       return (response.choices[0]?.message?.content || '').trim();
     } catch (err) {
       lastErr = err;
+      if (err.message && (err.message.includes('402') || err.message.includes('401') || err.message.includes('Insufficient Balance'))) {
+        markMediaModelCooldown(model, 5 * 60 * 1000);
+      }
       console.error(`[Video] модель ${model} не сработала: ${err.message}`);
     }
   }
