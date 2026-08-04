@@ -96,19 +96,19 @@ function markProviderCooldown(label, durationMs = 5 * 60 * 1000) {
 }
 
 // Умная цепочка провайдеров для ТЕКСТОВОГО агента (chat + tool calling):
-//   1) DeepSeek direct (если DEEPSEEK_API_KEY) — primary,
-//   2) OpenRouter primary model (DeepSeek V4 Flash) — fallback #1,
+//   1) OpenRouter primary model (OPENROUTER_MODEL) — primary,
+//   2) DeepSeek direct (если DEEPSEEK_API_KEY) — fallback #1,
 //   3) AnyModel (anymodel.org, am/glm-5.2) — fallback #2 (если задан ключ),
 //   4) openrouter/free — глобальный бесплатный последний рубеж.
 // STT/Vision НЕ здесь: DeepSeek/прямые провайдеры не умеют аудио/картинки — они
 // живут в services/openrouterMedia.js (тоже с глобальным openrouter/free-фолбэком).
 function getTextLLMChain() {
   const chain = [];
-  if (config.DEEPSEEK_API_KEY && config.DEEPSEEK_MODEL) {
-    chain.push({ client: getDeepSeekClient(), model: config.DEEPSEEK_MODEL, label: `deepseek:${config.DEEPSEEK_MODEL}` });
-  }
   if (config.OPENROUTER_API_KEY && config.OPENROUTER_MODEL) {
     chain.push({ client: getOpenRouterClient(), model: config.OPENROUTER_MODEL, label: `openrouter:${config.OPENROUTER_MODEL}` });
+  }
+  if (config.DEEPSEEK_API_KEY && config.DEEPSEEK_MODEL) {
+    chain.push({ client: getDeepSeekClient(), model: config.DEEPSEEK_MODEL, label: `deepseek:${config.DEEPSEEK_MODEL}` });
   }
   if (config.ANYMODEL_API_KEY && config.ANYMODEL_MODEL) {
     chain.push({ client: getAnymodelClient(), model: config.ANYMODEL_MODEL, label: `anymodel:${config.ANYMODEL_MODEL}` });

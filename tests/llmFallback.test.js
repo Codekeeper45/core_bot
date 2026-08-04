@@ -82,7 +82,7 @@ test('no fallback configured → primary error propagates, no second attempt', a
   config.OPENROUTER_FALLBACK_MODEL = saved;
 });
 
-test('умная цепочка главного мозга: DeepSeek → OpenRouter → AnyModel → openrouter/free', () => {
+test('умная цепочка главного мозга: OpenRouter → DeepSeek → AnyModel → openrouter/free', () => {
   const { _internals } = require('../src/agent/agent');
   const saved = {
     DEEPSEEK_API_KEY: config.DEEPSEEK_API_KEY,
@@ -103,8 +103,8 @@ test('умная цепочка главного мозга: DeepSeek → OpenRo
     config.ANYMODEL_MODEL = 'am/glm-5.2';
     const chain = _internals.getTextLLMChain();
     assert.deepStrictEqual(chain.map((x) => x.label), [
-      'deepseek:deepseek-v4-flash',
       'openrouter:deepseek/deepseek-v4-flash-0731',
+      'deepseek:deepseek-v4-flash',
       'anymodel:am/glm-5.2',
       'openrouter:openrouter/free',
     ]);
@@ -113,7 +113,7 @@ test('умная цепочка главного мозга: DeepSeek → OpenRo
   }
 });
 
-test('цепочка без AnyModel-ключа: DeepSeek → OpenRouter → openrouter/free', () => {
+test('цепочка без AnyModel-ключа: OpenRouter → DeepSeek → openrouter/free', () => {
   const { _internals } = require('../src/agent/agent');
   const saved = {
     DEEPSEEK_API_KEY: config.DEEPSEEK_API_KEY,
@@ -132,8 +132,8 @@ test('цепочка без AnyModel-ключа: DeepSeek → OpenRouter → ope
     config.OPENROUTER_FALLBACK_MODEL = 'openrouter/free';
     const chain = _internals.getTextLLMChain();
     assert.deepStrictEqual(chain.map((x) => x.label), [
-      'deepseek:deepseek-v4-flash',
       'openrouter:deepseek/deepseek-v4-flash-0731',
+      'deepseek:deepseek-v4-flash',
       'openrouter:openrouter/free',
     ]);
   } finally {
