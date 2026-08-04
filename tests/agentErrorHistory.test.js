@@ -102,9 +102,10 @@ describe('runAgent: llm_error сохраняет историю', () => {
 
     // Пустая цепочка провайдеров → llmCreateWithFallback бросает → путь llm_error.
     const config = require('../src/config');
-    const savedKeys = { ds: config.DEEPSEEK_API_KEY, or: config.OPENROUTER_API_KEY };
+    const savedKeys = { ds: config.DEEPSEEK_API_KEY, or: config.OPENROUTER_API_KEY, am: config.ANYMODEL_API_KEY };
     config.DEEPSEEK_API_KEY = '';
     config.OPENROUTER_API_KEY = '';
+    config.ANYMODEL_API_KEY = '';
     try {
       const reply = await runAgent({
         combinedMessage: 'тестовое сообщение',
@@ -121,6 +122,7 @@ describe('runAgent: llm_error сохраняет историю', () => {
     } finally {
       config.DEEPSEEK_API_KEY = savedKeys.ds;
       config.OPENROUTER_API_KEY = savedKeys.or;
+      config.ANYMODEL_API_KEY = savedKeys.am;
       delete require.cache[require.resolve('../src/agent/agent')];
     }
   });

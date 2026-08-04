@@ -51,6 +51,34 @@ async function transcribeWithModel(model, base64, format) {
   return (result.text || '').trim();
 }
 
+// Мультимодальные STT-фолбэк-модели (напр. nvidia/nemotron-3-nano-omni-*) НЕ ходят
+// через /audio/transcriptions — голосовой принимается как audio_url в chat.completions
+// (OpenRouter-совместимый путь). Нужно протестировать поддержку форматов на модели.
+function isChatAudioModel(model) {
+  return /nemotron|omni/i.test(model || '');
+}
+
+async function transcribeWithChatAudio(model, base64, format) {
+  const mime = { ogg: 'audio/ogg', webm: 'audio/webm', mp3: 'audio/mpeg', mp4: 'audio/mp4', wav: 'audio/wav', aac: 'audio/aac', flac: 'audio/flac' }[format] || 'audio/ogg';
+  const dataUrl = `data:${mime};base64,${base64}`;
+  const response = await getClient().chat.completions.create({
+    model,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'audio_url', audio_url: { url: dataUrl } },
+          { type: 'text', text: 'Распознай речь из этого аудио и верни ТОЛЬКО расшифрованный текст.' },
+        ],
+      },
+    ],
+    max_tokens: 1024,
+  });
+  const text = (response.choices?.[0]?.message?.content || '').trim();
+  if (!text) throw new Error(`STT (chat-audio) empty response for ${model}`);
+  return text;
+}
+
 async function transcribeAudio(buffer, mimeType = 'audio/ogg') {
   const base64 = buffer.toString('base64');
   const format = detectAudioFormat(mimeType);
@@ -62,7 +90,16 @@ async function transcribeAudio(buffer, mimeType = 'audio/ogg') {
       return await transcribeWithModel(model, base64, format);
     } catch (err) {
       lastErr = err;
-      console.error(`[STT] модель ${model} не сработала: ${err.message}`);
+      console.error(`[STT] модель ${model} не сработала (transcriptions): ${err.message}`);
+    }
+    // Для omni-моделей пробуем chat-audio путь (transcriptions им не подходит).
+    if (isChatAudioModel(model)) {
+      try {
+        return await transcribeWithChatAudio(model, base64, format);
+      } catch (err) {
+        lastErr = err;
+        console.error(`[STT] модель ${model} не сработала (chat-audio): ${err.message}`);
+      }
     }
   }
   throw lastErr || new Error('STT: не задана ни одна модель');

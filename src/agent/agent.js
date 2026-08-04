@@ -65,7 +65,7 @@ function onToolCall(fn) {
   return () => _toolCallHooks.delete(fn);
 }
 
-let _deepseek, _openrouter;
+let _deepseek, _openrouter, _anymodel;
 function getDeepSeekClient() {
   if (!_deepseek) _deepseek = new OpenAI({ baseURL: config.DEEPSEEK_BASE_URL, apiKey: config.DEEPSEEK_API_KEY });
   return _deepseek;
@@ -74,13 +74,18 @@ function getOpenRouterClient() {
   if (!_openrouter) _openrouter = new OpenAI({ baseURL: 'https://openrouter.ai/api/v1', apiKey: config.OPENROUTER_API_KEY });
   return _openrouter;
 }
+function getAnymodelClient() {
+  if (!_anymodel) _anymodel = new OpenAI({ baseURL: config.ANYMODEL_BASE_URL, apiKey: config.ANYMODEL_API_KEY });
+  return _anymodel;
+}
 
-// Ordered providers to try for TEXT generation (chat + tool calling):
-//   1) DeepSeek direct (if DEEPSEEK_API_KEY set) — primary,
-//   2) OpenRouter primary model — fallback,
-//   3) OpenRouter backup model — last resort.
-// STT/Vision are NOT here: DeepSeek has no audio/vision, they stay on OpenRouter
-// in services/openrouterMedia.js.
+// Умная цепочка провайдеров для ТЕКСТОВОГО агента (chat + tool calling):
+//   1) DeepSeek direct (если DEEPSEEK_API_KEY) — primary,
+//   2) OpenRouter primary model (DeepSeek V4 Flash) — fallback #1,
+//   3) AnyModel (anymodel.org, am/glm-5.2) — fallback #2 (если задан ключ),
+//   4) openrouter/free — глобальный бесплатный последний рубеж.
+// STT/Vision НЕ здесь: DeepSeek/прямые провайдеры не умеют аудио/картинки — они
+// живут в services/openrouterMedia.js (тоже с глобальным openrouter/free-фолбэком).
 function getTextLLMChain() {
   const chain = [];
   if (config.DEEPSEEK_API_KEY) {
@@ -88,9 +93,12 @@ function getTextLLMChain() {
   }
   if (config.OPENROUTER_API_KEY) {
     chain.push({ client: getOpenRouterClient(), model: config.OPENROUTER_MODEL, label: `openrouter:${config.OPENROUTER_MODEL}` });
-    if (config.OPENROUTER_FALLBACK_MODEL && config.OPENROUTER_FALLBACK_MODEL !== config.OPENROUTER_MODEL) {
-      chain.push({ client: getOpenRouterClient(), model: config.OPENROUTER_FALLBACK_MODEL, label: `openrouter:${config.OPENROUTER_FALLBACK_MODEL}` });
-    }
+  }
+  if (config.ANYMODEL_API_KEY && config.ANYMODEL_MODEL) {
+    chain.push({ client: getAnymodelClient(), model: config.ANYMODEL_MODEL, label: `anymodel:${config.ANYMODEL_MODEL}` });
+  }
+  if (config.OPENROUTER_API_KEY && config.OPENROUTER_FALLBACK_MODEL && config.OPENROUTER_FALLBACK_MODEL !== config.OPENROUTER_MODEL) {
+    chain.push({ client: getOpenRouterClient(), model: config.OPENROUTER_FALLBACK_MODEL, label: `openrouter:${config.OPENROUTER_FALLBACK_MODEL}` });
   }
   return chain;
 }
@@ -423,10 +431,23 @@ async function runAgent({
   // when oversized — adds one LLM call infrequently; failures are non-fatal.
   try {
     const { summarizeIfNeeded } = require('./contextManager');
+    // Сворачивание контекста — тоже LLM-вызов: гоняем через умную цепочку
+    // (DeepSeek → OpenRouter → AnyModel → openrouter/free), чтобы сбой primary
+    // не ронял память бота.
+    const smartClient = {
+      chat: {
+        completions: {
+          create: (params) => llmCreateWithFallback(
+            (model) => ({ ...params, model }),
+            { maxRetries: 1, baseDelay: 500 }
+          ),
+        },
+      },
+    };
     const res = await summarizeIfNeeded({
       messages,
       summary: convoSummary,
-      openai: getPrimaryTextLLM().client,
+      openai: smartClient,
       model: getPrimaryTextLLM().model,
     });
     messages = res.messages;
@@ -448,7 +469,7 @@ async function runAgent({
 module.exports = {
   runAgent, onToolCall, getAgentMetrics, llmCreateWithFallback,
   _internals: {
-    dropDanglingToolTail, persistErrorHistory, classifyLlmError, capToolCall, FALLBACK_MESSAGES,
+    getTextLLMChain, dropDanglingToolTail, persistErrorHistory, classifyLlmError, capToolCall, FALLBACK_MESSAGES,
     FALLBACK_AI, FALLBACK_BUSY, FALLBACK_NO_CREDITS, FALLBACK_MODEL_REJECTED,
     FALLBACK_RATE_LIMIT, FALLBACK_MODEL_EMPTY, FALLBACK_NETWORK, FALLBACK_NO_PROVIDER,
     FALLBACK_LLM_GENERIC, FALLBACK_INTERNAL,

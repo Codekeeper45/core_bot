@@ -16,17 +16,26 @@ module.exports = {
   // OpenRouter — остаётся для STT (голос) и Vision (картинки), которых нет у
   // DeepSeek, а также как fallback для текстового агента, если DeepSeek недоступен.
   OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY || '',
-  OPENROUTER_MODEL: process.env.OPENROUTER_MODEL || 'deepseek/deepseek-v4-pro',
-  // Backup model used only when the primary fails after all retries (provider
-  // outage / no response). Set to '' or same as primary to disable.
-  OPENROUTER_FALLBACK_MODEL: process.env.OPENROUTER_FALLBACK_MODEL || 'qwen/qwen3.6-plus',
+  // Главный мозг бота по OpenRouter: DeepSeek V4 Flash.
+  OPENROUTER_MODEL: process.env.OPENROUTER_MODEL || 'deepseek/deepseek-v4-flash-0731',
+  // ГЛОБАЛЬНЫЙ fallback для любых вызовов: openrouter/free — роутер, который сам
+  // выбирает доступную бесплатную модель под запрос (в т.ч. с поддержкой тулов и
+  // картинок). Стоит ПОСЛЕДНИМ звеном умной цепочки главного мозга и фолбэком
+  // Vision/Video. Set to '' to disable.
+  OPENROUTER_FALLBACK_MODEL: process.env.OPENROUTER_FALLBACK_MODEL || 'openrouter/free',
   // DeepSeek (прямой API) — ОСНОВНОЙ текстовый агент + AI-резюме. OpenAI-совместим.
   // Если DEEPSEEK_API_KEY пуст — текстовый агент автоматически работает через
-  // OpenRouter (обратная совместимость). DeepSeek V4 Pro поддерживает tool calling.
+  // OpenRouter (обратная совместимость). DeepSeek V4 Flash поддерживает tool calling.
   // STT/Vision DeepSeek НЕ умеет.
   DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY || '',
   DEEPSEEK_BASE_URL: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
-  DEEPSEEK_MODEL: process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro',
+  DEEPSEEK_MODEL: process.env.DEEPSEEK_MODEL || 'deepseek-v4-flash',
+  // AnyModel (anymodel.org) — дополнительный провайдер в умном фолбэке главного
+  // мозга (после DeepSeek-на-OpenRouter, перед openrouter/free). OpenAI-совместимый
+  // эндпоинт; ключ задаётся в .env (не в git).
+  ANYMODEL_API_KEY: process.env.ANYMODEL_API_KEY || '',
+  ANYMODEL_BASE_URL: process.env.ANYMODEL_BASE_URL || 'https://anymodel.org/v1',
+  ANYMODEL_MODEL: process.env.ANYMODEL_MODEL || 'am/glm-5.2',
   // Потолок длины ответа LLM (output tokens). ВАЖНО: без явного лимита OpenRouter
   // резервирует полный лимит модели (напр. 65536) и требует баланс под него → 402
   // «requires more credits». Явный потолок снимает 402 и удешевляет ответы. 32768 —
@@ -37,17 +46,19 @@ module.exports = {
 
   // STT (распознавание речи) и Vision (распознавание картинок) через OpenRouter.
   // У каждого есть primary + fallback: если primary падает после ретраев —
-  // запрос обслуживает fallback-модель.
+  // запрос обслуживает fallback-модель. STT-fallback — мультимодальный nemotron
+  // (принимает голосовые через chat.completions audio_url; протестировать).
+  // Vision/Video-fallback — глобальный бесплатный роутер openrouter/free.
   STT_MODEL: process.env.STT_MODEL || 'openai/whisper-large-v3-turbo',
-  STT_FALLBACK_MODEL: process.env.STT_FALLBACK_MODEL || 'google/chirp-3',
+  STT_FALLBACK_MODEL: process.env.STT_FALLBACK_MODEL || 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
   VISION_MODEL: process.env.VISION_MODEL || 'google/gemini-3.1-flash-lite-preview',
-  VISION_FALLBACK_MODEL: process.env.VISION_FALLBACK_MODEL || 'qwen/qwen3.5-flash-02-23',
+  VISION_FALLBACK_MODEL: process.env.VISION_FALLBACK_MODEL || 'openrouter/free',
   // Видео (обычное, кружки, гифки) смотрит Gemini через OpenRouter (content type
   // video_url, base64 data-URL — маршрутизируется в провайдера с поддержкой видео).
   // Дополнительно к описанию Gemini речь из видео транскрибируется Whisper'ом
   // (тот же STT-эндпоинт; mp4-контейнер Whisper понимает).
   VIDEO_MODEL: process.env.VIDEO_MODEL || 'google/gemini-3.1-flash-lite-preview',
-  VIDEO_FALLBACK_MODEL: process.env.VIDEO_FALLBACK_MODEL || 'google/gemini-2.5-flash',
+  VIDEO_FALLBACK_MODEL: process.env.VIDEO_FALLBACK_MODEL || 'openrouter/free',
   // Потолок размера видео для анализа, МБ. У Telegram Bot API скачивание всё
   // равно ограничено 20 МБ — держим тот же предел для всех каналов.
   VIDEO_MAX_MB: parseInt(process.env.VIDEO_MAX_MB || '20', 10),
