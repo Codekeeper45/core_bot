@@ -79,6 +79,22 @@ function getAnymodelClient() {
   return _anymodel;
 }
 
+const _providerCooldowns = new Map();
+
+function isProviderOnCooldown(label) {
+  const expires = _providerCooldowns.get(label);
+  if (!expires) return false;
+  if (Date.now() > expires) {
+    _providerCooldowns.delete(label);
+    return false;
+  }
+  return true;
+}
+
+function markProviderCooldown(label, durationMs = 5 * 60 * 1000) {
+  _providerCooldowns.set(label, Date.now() + durationMs);
+}
+
 // Умная цепочка провайдеров для ТЕКСТОВОГО агента (chat + tool calling):
 //   1) DeepSeek direct (если DEEPSEEK_API_KEY) — primary,
 //   2) OpenRouter primary model (DeepSeek V4 Flash) — fallback #1,
@@ -100,7 +116,8 @@ function getTextLLMChain() {
   if (config.OPENROUTER_API_KEY && config.OPENROUTER_FALLBACK_MODEL && config.OPENROUTER_FALLBACK_MODEL !== config.OPENROUTER_MODEL) {
     chain.push({ client: getOpenRouterClient(), model: config.OPENROUTER_FALLBACK_MODEL, label: `openrouter:${config.OPENROUTER_FALLBACK_MODEL}` });
   }
-  return chain;
+  const available = chain.filter((p) => !isProviderOnCooldown(p.label));
+  return available.length > 0 ? available : chain;
 }
 
 // Primary text {client, model} — for callers needing a single client (e.g. контекст-саммари).
@@ -147,6 +164,9 @@ async function llmCreateWithFallback(makeParams, retryOpts, client) {
       return resp;
     } catch (err) {
       lastErr = err;
+      if (err.message && (err.message.includes('402') || err.message.includes('401') || err.message.includes('Insufficient Balance'))) {
+        markProviderCooldown(label, 5 * 60 * 1000);
+      }
       const more = i < chain.length - 1;
       console.error(`[Agent] LLM ${label} failed after retries (${err.message})${more ? '; switching to next provider' : '; no more providers'}`);
       if (more) agentMetrics.fallback_model_used++;
