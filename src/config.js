@@ -16,8 +16,8 @@ module.exports = {
   // OpenRouter — остаётся для STT (голос) и Vision (картинки), которых нет у
   // DeepSeek, а также как fallback для текстового агента, если DeepSeek недоступен.
   OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY || '',
-  // Главный мозг бота по OpenRouter: openai/gpt-5.6-luna.
-  OPENROUTER_MODEL: process.env.OPENROUTER_MODEL || 'openai/gpt-5.6-luna',
+  // Главный мозг бота по OpenRouter: DeepSeek V4 Flash.
+  OPENROUTER_MODEL: process.env.OPENROUTER_MODEL || 'deepseek/deepseek-v4-flash-0731',
   // ГЛОБАЛЬНЫЙ fallback для любых вызовов: openrouter/free — роутер, который сам
   // выбирает доступную бесплатную модель под запрос (в т.ч. с поддержкой тулов и
   // картинок). Стоит ПОСЛЕДНИМ звеном умной цепочки главного мозга и фолбэком
