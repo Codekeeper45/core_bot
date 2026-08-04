@@ -207,6 +207,15 @@ async function persistErrorHistory(channel, chatId, messages, convoSummary, sent
   }
 }
 
+function sanitizeMessage(m) {
+  if (!m || typeof m !== 'object') return m;
+  const clean = { role: m.role, content: m.content };
+  if (m.name) clean.name = m.name;
+  if (m.tool_call_id) clean.tool_call_id = m.tool_call_id;
+  if (Array.isArray(m.tool_calls)) clean.tool_calls = m.tool_calls;
+  return clean;
+}
+
 // Assemble the message list sent to the LLM: main system prompt, then the
 // rolling long-term summary (if any) as a second system message, then history.
 function buildLLMMessages(systemPrompt, convoSummary, messages) {
@@ -217,7 +226,8 @@ function buildLLMMessages(systemPrompt, convoSummary, messages) {
       content: `=== СВОДКА ПРЕДЫДУЩЕГО ДИАЛОГА (долгая память, старая часть переписки сжата) ===\n${convoSummary}`,
     });
   }
-  return [...head, ...messages];
+  const sanitized = (messages || []).map(sanitizeMessage);
+  return [...head, ...sanitized];
 }
 
 // Кап вызовов инструмента за один прогон. Мутирует counts. Возвращает {capped, result?}.
