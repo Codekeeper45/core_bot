@@ -150,6 +150,33 @@ describe('tts', () => {
     assert.equal(r.ok, false);
     assert.match(r.error, /TTS не настроен/);
   });
+
+  test('FREE_AI_ONLY не вызывает OpenRouter TTS', async () => {
+    const Module = require('module');
+    const orig = Module.prototype.require;
+    const savedFetch = global.fetch;
+    let fetchCalls = 0;
+    global.fetch = async () => { fetchCalls++; throw new Error('must not be called'); };
+    Module.prototype.require = function (id) {
+      if (id === '../config') return {
+        GOOGLE_GENAI_API_KEYS: [], GOOGLE_GENAI_API_KEY: '', OPENROUTER_API_KEY: 'or-key',
+        FREE_AI_ONLY: true, TTS_VOICE: 'Kore',
+      };
+      return orig.apply(this, arguments);
+    };
+    delete require.cache[require.resolve('../src/services/tts')];
+    const { synthesizeSpeech } = require('../src/services/tts');
+    Module.prototype.require = orig;
+    try {
+      const r = await synthesizeSpeech('привет');
+      assert.equal(r.ok, false);
+      assert.match(r.error, /платный fallback отключён/);
+      assert.equal(fetchCalls, 0);
+    } finally {
+      global.fetch = savedFetch;
+      delete require.cache[require.resolve('../src/services/tts')];
+    }
+  });
 });
 
 // ── say_voice: озвучка с тегами, отделена от текста, ставит флаг ──────────────

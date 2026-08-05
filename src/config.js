@@ -282,8 +282,9 @@ module.exports = {
   // Веб-поиск (Brave Search API). Пусто → инструмент честно отказывает.
   BRAVE_API_KEY: process.env.BRAVE_API_KEY || '',
   // TTS (Google Gemini). Один ключ или несколько через запятую (ротация при 429).
-  GOOGLE_GENAI_API_KEY: process.env.GOOGLE_GENAI_API_KEY || '',
-  GOOGLE_GENAI_API_KEYS: (process.env.GOOGLE_GENAI_API_KEYS || '').split(',').map((s) => s.trim()).filter(Boolean),
+  GOOGLE_GENAI_API_KEY: process.env.GOOGLE_GENAI_API_KEY || process.env.GOOGLE_GEMINI_API_KEY || '',
+  GOOGLE_GENAI_API_KEYS: (process.env.GOOGLE_GENAI_API_KEYS || process.env.GOOGLE_GEMINI_API_KEYS || '')
+    .split(',').map((s) => s.trim()).filter(Boolean),
   TTS_MODEL: process.env.TTS_MODEL || 'gemini-3.1-flash-tts-preview',
   TTS_VOICE: process.env.TTS_VOICE || 'Leda',
   // Голосовые ОТВЕТЫ бота (TTS). По умолчанию ВЫКЛ (босс просил только текст). Когда

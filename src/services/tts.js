@@ -217,6 +217,9 @@ async function synthesizeSpeech(text, voice) {
   let r = hasGoogle ? await tryGoogle(clean, voiceName) : { ok: false, error: 'нет Google-ключей' };
   let source = 'google';
   if (!r.ok) {
+    if (config.FREE_AI_ONLY) {
+      return { ok: false, error: `Google TTS недоступен (${r.error}); платный fallback отключён.` };
+    }
     const fb = await tryOpenRouter(clean, voiceName);
     if (fb.ok) { r = fb; source = 'openrouter'; }
     else return { ok: false, error: `все TTS недоступны (google: ${r.error}; openrouter: ${fb.error})` };
