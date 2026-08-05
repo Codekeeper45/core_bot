@@ -108,43 +108,36 @@ async function transcribeWithModel(model, base64, format) {
   return (result.text || '').trim();
 }
 
-// Мультимодальные STT-фолбэк-модели (напр. nvidia/nemotron-3-nano-omni-*) НЕ ходят
-// через /audio/transcriptions — голосовой принимается как audio_url в chat.completions
-// (OpenRouter-совместимый путь). Нужно протестировать поддержку форматов на модели.
 function isChatAudioModel(model) {
   return /nemotron|omni/i.test(model || '');
 }
 
-async function transcribeWithChatAudio(model, base64, format) {
-  const response = await getClient().chat.completions.create({
-    model,
-    messages: [
-      {
+// Нативный Gemini API для аудио (через REST, не через OpenAI-compat слой).
+// Gemini OpenAI-compat НЕ поддерживает input_audio в messages — нужен inlineData.
+async function transcribeWithGoogle(base64, format) {
+  const mimeMap = {
+    ogg: 'audio/ogg', webm: 'audio/webm', mp3: 'audio/mpeg',
+    mp4: 'audio/mp4', m4a: 'audio/mp4', wav: 'audio/wav',
+    aac: 'audio/aac', flac: 'audio/flac',
+  };
+  const mimeType = mimeMap[format] || 'audio/ogg';
+  const pool = getGoogleGeminiPool();
+  // pool.execute вызывает fn(client) с автоматической ротацией ключей
+  const response = await pool.execute(async (client) => {
+    return client.chat.completions.create({
+      model: config.GOOGLE_GEMINI_MODEL,
+      messages: [{
         role: 'user',
         content: [
-          { type: 'input_audio', input_audio: { data: base64, format } },
-          { type: 'text', text: 'Распознай речь из этого аудио и верни ТОЛЬКО расшифрованный текст.' },
+          {
+            type: 'image_url',
+            image_url: { url: `data:${mimeType};base64,${base64}` },
+          },
+          { type: 'text', text: 'Распознай речь из этого аудио и верни ТОЛЬКО расшифрованный текст без пояснений.' },
         ],
-      },
-    ],
-    max_tokens: 1024,
-  });
-  const text = (response.choices?.[0]?.message?.content || '').trim();
-  if (!text) throw new Error(`STT (chat-audio) empty response for ${model}`);
-  return text;
-}
-
-async function transcribeWithGoogle(base64, format) {
-  const response = await getGoogleGeminiClient().chat.completions.create({
-    model: config.GOOGLE_GEMINI_MODEL,
-    messages: [{
-      role: 'user',
-      content: [
-        { type: 'text', text: 'Распознай речь из этого аудио и верни ТОЛЬКО расшифрованный текст.' },
-        { type: 'input_audio', input_audio: { data: base64, format } },
-      ],
-    }],
-    max_tokens: 1024,
+      }],
+      max_tokens: 1024,
+    });
   });
   const text = (response.choices?.[0]?.message?.content || '').trim();
   if (!text) throw new Error('Google STT returned an empty response');
@@ -155,20 +148,26 @@ function nvidiaMediaRoute() {
   return `nvidia_nim_media:${config.NVIDIA_NIM_MEDIA_MODEL}`;
 }
 
+// NVIDIA NIM Nemotron-Omni: принимает аудио через audio_url (data URI).
 async function transcribeWithNvidiaNim(base64, format) {
+  const mimeMap = {
+    ogg: 'audio/ogg', webm: 'audio/webm', mp3: 'audio/mpeg',
+    mp4: 'audio/mp4', wav: 'audio/wav', aac: 'audio/aac', flac: 'audio/flac',
+  };
+  const mimeType = mimeMap[format] || 'audio/ogg';
+  const dataUrl = `data:${mimeType};base64,${base64}`;
   const response = await getNvidiaNimClient().chat.completions.create({
     model: config.NVIDIA_NIM_MEDIA_MODEL,
     messages: [{
       role: 'user',
       content: [
-        { type: 'input_audio', input_audio: { data: base64, format } },
+        { type: 'audio_url', audio_url: { url: dataUrl } },
         { type: 'text', text: 'Распознай речь из этого аудио и верни ТОЛЬКО расшифрованный текст.' },
       ],
     }],
     max_tokens: 1024,
     temperature: 0.6,
     top_p: 0.95,
-    chat_template_kwargs: { enable_thinking: false },
   });
   const text = (response.choices?.[0]?.message?.content || '').trim();
   if (!text) throw new Error('NVIDIA NIM STT returned an empty response');
@@ -178,13 +177,10 @@ async function transcribeWithNvidiaNim(base64, format) {
 async function transcribeAudio(buffer, mimeType = 'audio/ogg') {
   const base64 = buffer.toString('base64');
   const format = detectAudioFormat(mimeType);
-  const chain = mediaModelChainWithLastResort(
-    config.STT_MODEL,
-    config.STT_FALLBACK_MODEL,
-    config.OPENROUTER_FALLBACK_MODEL
-  );
 
   let lastErr;
+
+  // 1) Google Gemini (нативный, с ротацией 5 ключей) — бесплатно, без баланса OR
   if (hasGoogleGeminiKeys()) {
     try {
       return await transcribeWithGoogle(base64, format);
@@ -193,25 +189,21 @@ async function transcribeAudio(buffer, mimeType = 'audio/ogg') {
       console.error(`[STT] Google Gemini не сработал: ${err.message}`);
     }
   }
-  for (const model of chain) {
-    if (isChatAudioModel(model) || model === 'openrouter/free') {
-      try {
-        return await transcribeWithChatAudio(model, base64, format);
-      } catch (err) {
-        lastErr = err;
-        markMediaModelCooldown(model, cooldownFor(err));
-        console.error(`[STT] модель ${model} не сработала (chat-audio): ${err.message}`);
-      }
-      continue;
-    }
+
+  // 2) Whisper через OpenRouter /audio/transcriptions — только если задан ключ
+  //    и это НЕ free-модель (free-модели требуют $0.50 баланса для аудио).
+  if (config.OPENROUTER_API_KEY && config.STT_MODEL && !isFreeOpenRouterModel(config.STT_MODEL)
+      && !isMediaModelOnCooldown(config.STT_MODEL)) {
     try {
-      return await transcribeWithModel(model, base64, format);
+      return await transcribeWithModel(config.STT_MODEL, base64, format);
     } catch (err) {
       lastErr = err;
-      markMediaModelCooldown(model, cooldownFor(err));
-      console.error(`[STT] модель ${model} не сработала (transcriptions): ${err.message}`);
+      markMediaModelCooldown(config.STT_MODEL, cooldownFor(err));
+      console.error(`[STT] модель ${config.STT_MODEL} не сработала (transcriptions): ${err.message}`);
     }
   }
+
+  // 3) NVIDIA NIM Nemotron-Omni (бесплатный, прямой API — НЕ через OpenRouter).
   const route = nvidiaMediaRoute();
   if (config.NVIDIA_NIM_API_KEY && config.NVIDIA_NIM_MEDIA_MODEL && !isMediaModelOnCooldown(route)) {
     try {
@@ -222,7 +214,8 @@ async function transcribeAudio(buffer, mimeType = 'audio/ogg') {
       console.error(`[STT] NVIDIA NIM media fallback не сработал: ${err.message}`);
     }
   }
-  throw lastErr || new Error('STT: не задана ни одна модель');
+
+  throw lastErr || new Error('STT: ни один провайдер не смог расшифровать аудио');
 }
 
 async function analyzeImageBase64(base64, mimeType = 'image/jpeg', prompt) {
