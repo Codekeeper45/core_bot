@@ -85,6 +85,10 @@ module.exports = {
   // Vision/Video-fallback — глобальный бесплатный роутер openrouter/free.
   STT_MODEL: process.env.STT_MODEL || 'openai/whisper-large-v3-turbo',
   STT_FALLBACK_MODEL: process.env.STT_FALLBACK_MODEL || 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
+  // Последний бесплатный резерв одновременно для STT и Vision, если Gemini
+  // и openrouter/free временно недоступны.
+  MEDIA_LAST_RESORT_MODEL: process.env.MEDIA_LAST_RESORT_MODEL
+    || 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
   VISION_MODEL: process.env.VISION_MODEL || 'google/gemini-3.1-flash-lite-preview',
   VISION_FALLBACK_MODEL: process.env.VISION_FALLBACK_MODEL || 'openrouter/free',
   // Видео (обычное, кружки, гифки) смотрит Gemini через OpenRouter (content type

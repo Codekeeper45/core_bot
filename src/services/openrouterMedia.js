@@ -41,6 +41,14 @@ function freeModelChain(...models) {
     .filter((model) => !isMediaModelOnCooldown(model));
 }
 
+// Keep the multimodal Nemotron route as the final safety net. It is also the
+// configured STT fallback, so remove duplicates before appending it at the end.
+function mediaModelChainWithLastResort(...models) {
+  const lastResort = config.MEDIA_LAST_RESORT_MODEL;
+  const primary = freeModelChain(...models.filter((model) => model !== lastResort));
+  return [...primary, ...freeModelChain(lastResort)];
+}
+
 let client;
 function getClient() {
   if (!client) {
@@ -133,7 +141,7 @@ async function transcribeWithGoogle(base64, format) {
 async function transcribeAudio(buffer, mimeType = 'audio/ogg') {
   const base64 = buffer.toString('base64');
   const format = detectAudioFormat(mimeType);
-  const chain = freeModelChain(
+  const chain = mediaModelChainWithLastResort(
     config.STT_MODEL,
     config.STT_FALLBACK_MODEL,
     config.OPENROUTER_FALLBACK_MODEL
@@ -181,7 +189,7 @@ async function analyzeImageBase64(base64, mimeType = 'image/jpeg', prompt) {
       ],
     },
   ];
-  const chain = freeModelChain(
+  const chain = mediaModelChainWithLastResort(
     config.VISION_MODEL,
     config.VISION_FALLBACK_MODEL,
     config.OPENROUTER_FALLBACK_MODEL
@@ -309,6 +317,7 @@ module.exports = {
   transcribeAudio, analyzeImageUrl, analyzeImageBase64, analyzeVideoBase64,
   _internals: {
     isMediaModelOnCooldown, markMediaModelCooldown, isFreeOpenRouterModel,
-    modelChain, freeModelChain, detectAudioFormat, isChatAudioModel, interactionText,
+    modelChain, freeModelChain, mediaModelChainWithLastResort, detectAudioFormat,
+    isChatAudioModel, interactionText,
   },
 };

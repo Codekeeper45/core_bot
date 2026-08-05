@@ -16,6 +16,18 @@ test('в media-цепочку проходят только модели с га
   ]);
 });
 
+test('Nemotron остаётся последним media fallback после OpenRouter Free', () => {
+  const chain = _internals.mediaModelChainWithLastResort(
+    'openai/whisper-large-v3-turbo',
+    'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
+    'openrouter/free'
+  );
+  assert.deepEqual(chain, [
+    'openrouter/free',
+    'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
+  ]);
+});
+
 test('платные OpenRouter media-модели не считаются бесплатными', () => {
   assert.equal(_internals.isFreeOpenRouterModel('google/gemini-3.1-flash-lite-preview'), false);
   assert.equal(_internals.isFreeOpenRouterModel('openrouter/free'), true);
