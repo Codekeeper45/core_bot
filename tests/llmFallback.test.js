@@ -282,9 +282,9 @@ test('NVIDIA NIM получает JS-совместимый reasoning payload и
     max_tokens: 32768,
     extra_body: { chat_template_kwargs: { custom_flag: true } },
   };
-  _internals.applyNvidiaNimParams(params);
+  _internals.applyNvidiaNimParams(params, 'deepseek-ai/deepseek-v4-flash');
   assert.equal(params.max_tokens, 16384);
-  assert.equal(params.temperature, 1);
+  assert.equal(params.temperature, 0.6);
   assert.equal(params.top_p, 0.95);
   assert.equal(params.extra_body, undefined);
   assert.deepEqual(params.chat_template_kwargs, {

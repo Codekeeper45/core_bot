@@ -193,10 +193,8 @@ function getTextLLMChain() {
   return llmCircuit.available(getTextLLMRoutes());
 }
 
-function applyNvidiaNimParams(params) {
+function applyNvidiaNimParams(params, model) {
   const body = params || {};
-  // Python's OpenAI client expands extra_body into the request body. The JS
-  // SDK does not, so NIM must receive chat_template_kwargs at top level.
   const suppliedTemplate = body.chat_template_kwargs
     || (body.extra_body && body.extra_body.chat_template_kwargs)
     || {};
@@ -205,13 +203,15 @@ function applyNvidiaNimParams(params) {
     Number(body.max_tokens) || config.NVIDIA_NIM_MAX_TOKENS,
     config.NVIDIA_NIM_MAX_TOKENS
   );
-  body.temperature = 1;
+  body.temperature = 0.6;
   body.top_p = 0.95;
-  body.chat_template_kwargs = {
-    ...suppliedTemplate,
-    thinking: true,
-    reasoning_effort: config.NVIDIA_NIM_REASONING_EFFORT,
-  };
+  if (/deepseek/i.test(String(model || ''))) {
+    body.chat_template_kwargs = {
+      ...suppliedTemplate,
+      thinking: true,
+      reasoning_effort: config.NVIDIA_NIM_REASONING_EFFORT,
+    };
+  }
   return body;
 }
 
@@ -308,7 +308,7 @@ async function llmCreateWithFallback(makeParams, _retryOpts, client) {
     try {
       const params = makeParams(model);
       if (route.provider === 'nvidia_nim') {
-        applyNvidiaNimParams(params);
+        applyNvidiaNimParams(params, route.model);
       }
       // Free Z.AI routes are speed fallbacks: disabling extended thinking keeps
       // tool calls inside the provider timeout instead of stalling the chain.
