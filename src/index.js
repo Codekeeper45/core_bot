@@ -50,7 +50,7 @@ const { processImage, checkDailyImageLimit, incrementDailyImageCount } = require
 const { processDocument } = require('./media/document');
 const { processVideo, processSticker } = require('./media/video');
 
-const { runAgent, _internals: agentInternals } = require('./agent/agent');
+const { runAgent, startLlmHealthChecks, _internals: agentInternals } = require('./agent/agent');
 
 // Аварийные ответы агента (любой сбой LLM / пустой ответ / внутренняя ошибка):
 // по расписанию их не доставляем (иначе босс ловит ошибку по таймеру), но в
@@ -714,6 +714,9 @@ app.get('/health', async (req, res) => {
 async function startServer() {
   // Init MySQL tables
   await initTables();
+  // Non-blocking preflight opens the primary circuit on balance/provider errors,
+  // so user requests can go straight to the configured free fallbacks.
+  startLlmHealthChecks().catch((err) => console.error('[Agent] LLM preflight error:', err.message));
   cleanupExpiredMedia(1000).catch((err) => console.error('[Media] Retention cleanup:', err.message));
   setInterval(() => {
     cleanupExpiredMedia(1000).catch((err) => console.error('[Media] Retention cleanup:', err.message));

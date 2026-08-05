@@ -19,12 +19,12 @@ async function withRetry(fn, options = {}) {
       lastError = err;
       if (attempt >= maxRetries) break;
 
-      const isFatal = err.message && (
+      const isFatal = err.retryable === false || (err.message && (
         err.message.includes('402') ||
         err.message.includes('401') ||
         err.message.includes('Insufficient Balance') ||
         err.message.includes('Invalid API Key')
-      );
+      ));
       if (isFatal) break; // Фатальная ошибка оплаты/ключа — ретраи бесполезны, выходим сразу
 
       const is429 = err.message && err.message.includes('429');

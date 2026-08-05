@@ -2704,20 +2704,23 @@ async function archiveByPerson({
 
 // ── Семантический индекс архива (bot_archive_chunks) ─────────────────────────
 // Чаты, где накопилось ≥ chunkSize ещё не заэмбедженных сообщений (есть бэклог).
-async function listChatsWithBacklog(chunkSize = 10, limit = 50) {
+async function listChatsWithBacklog(chunkSize = 10, limit = 50, model = '') {
   try {
     return await dbQuery(
       `SELECT a.channel, a.chat_id,
-              COALESCE(MAX(c.end_archive_id), 0) AS watermark,
+              COALESCE((SELECT MAX(c.end_archive_id) FROM bot_archive_chunks c
+                         WHERE c.channel = a.channel AND c.chat_id = a.chat_id
+                           AND c.model = ?), 0) AS watermark,
               SUM(a.id > COALESCE((SELECT MAX(c2.end_archive_id) FROM bot_archive_chunks c2
-                                    WHERE c2.channel = a.channel AND c2.chat_id = a.chat_id), 0)) AS backlog
+                                    WHERE c2.channel = a.channel AND c2.chat_id = a.chat_id
+                                      AND c2.model = ?), 0)) AS backlog
          FROM bot_message_archive a
-         LEFT JOIN bot_archive_chunks c ON c.channel = a.channel AND c.chat_id = a.chat_id
         GROUP BY a.channel, a.chat_id
        HAVING backlog >= ?
         ORDER BY backlog DESC
         LIMIT ?`,
-      [Number(chunkSize) || 10, Math.max(1, Math.min(Number(limit) || 50, 200))]
+      [String(model || ''), String(model || ''), Number(chunkSize) || 10,
+        Math.max(1, Math.min(Number(limit) || 50, 200))]
     );
   } catch (err) { throw dbError(err, 'listChatsWithBacklog'); }
 }

@@ -83,7 +83,7 @@ describe('classifyLlmError — честные сообщения по сути �
 
   test('сеть/таймаут → про связь; нет провайдера; иначе общий', () => {
     assert.equal(c('connect ETIMEDOUT'), _internals.FALLBACK_NETWORK);
-    assert.equal(c('No LLM provider configured (set DEEPSEEK_API_KEY or OPENROUTER_API_KEY)'), _internals.FALLBACK_NO_PROVIDER);
+    assert.equal(c('No LLM provider configured (OpenRouter, DeepSeek, AnyModel, or Google Gemini)'), _internals.FALLBACK_NO_PROVIDER);
     assert.equal(c('какая-то неведомая ошибка'), _internals.FALLBACK_LLM_GENERIC);
   });
 
@@ -102,10 +102,20 @@ describe('runAgent: llm_error сохраняет историю', () => {
 
     // Пустая цепочка провайдеров → llmCreateWithFallback бросает → путь llm_error.
     const config = require('../src/config');
-    const savedKeys = { ds: config.DEEPSEEK_API_KEY, or: config.OPENROUTER_API_KEY, am: config.ANYMODEL_API_KEY };
+    const savedKeys = {
+      ds: config.DEEPSEEK_API_KEY,
+      or: config.OPENROUTER_API_KEY,
+      am: config.ANYMODEL_API_KEY,
+      zai: config.ZAI_API_KEY,
+      google: config.GOOGLE_GEMINI_API_KEYS,
+      googleSingle: config.GOOGLE_GEMINI_API_KEY,
+    };
     config.DEEPSEEK_API_KEY = '';
     config.OPENROUTER_API_KEY = '';
     config.ANYMODEL_API_KEY = '';
+    config.ZAI_API_KEY = '';
+    config.GOOGLE_GEMINI_API_KEYS = [];
+    config.GOOGLE_GEMINI_API_KEY = '';
     try {
       const reply = await runAgent({
         combinedMessage: 'тестовое сообщение',
@@ -123,6 +133,9 @@ describe('runAgent: llm_error сохраняет историю', () => {
       config.DEEPSEEK_API_KEY = savedKeys.ds;
       config.OPENROUTER_API_KEY = savedKeys.or;
       config.ANYMODEL_API_KEY = savedKeys.am;
+      config.ZAI_API_KEY = savedKeys.zai;
+      config.GOOGLE_GEMINI_API_KEYS = savedKeys.google;
+      config.GOOGLE_GEMINI_API_KEY = savedKeys.googleSingle;
       delete require.cache[require.resolve('../src/agent/agent')];
     }
   });

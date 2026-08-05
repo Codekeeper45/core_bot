@@ -53,7 +53,7 @@ async function processChat(mysql, channel, chatId, watermark) {
         content: renderChunk(g).slice(0, 60000),
         embedding: embeddings.packFloat32(vec),
         dims: vec.length,
-        model: config.EMBEDDING_MODEL,
+        model: embeddings.modelId(),
       });
       made++;
       cursor = g[g.length - 1].id;
@@ -70,7 +70,7 @@ async function processOnce() {
   const size = config.EMBEDDING_CHUNK_SIZE;
   let chats = 0;
   let chunks = 0;
-  const backlog = await mysql.listChatsWithBacklog(size, 200);
+  const backlog = await mysql.listChatsWithBacklog(size, 200, embeddings.modelId());
   for (const c of backlog) {
     try {
       const made = await processChat(mysql, c.channel, c.chat_id, c.watermark);

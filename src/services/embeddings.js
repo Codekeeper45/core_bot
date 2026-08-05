@@ -1,10 +1,12 @@
 'use strict';
 // Эмбеддинги для семантического поиска по архиву (RAG).
-// Модель — qwen/qwen3-embedding-8b через OpenRouter (OpenAI-совместимый эндпойнт
-// /embeddings). Вектор усекаем до config.EMBEDDING_DIMENSIONS (Matryoshka) и
+// Бесплатный primary — Gemini Embedding через ротируемый пул Google-ключей.
+// OpenRouter сохраняется только как совместимый резерв для установок без Google.
+// Вектор усекаем до config.EMBEDDING_DIMENSIONS (Matryoshka) и
 // L2-нормализуем НА НАШЕЙ СТОРОНЕ — так не зависим от того, уважает ли провайдер
 // параметр dimensions, и косинус сводится к скалярному произведению.
 const config = require('../config');
+const { getGoogleGeminiClient, hasGoogleGeminiKeys } = require('./googleGeminiPool');
 
 // Усечь вектор до n измерений и L2-нормализовать. Пустой/битый вход → [].
 function truncateNormalize(vec, n) {
@@ -51,7 +53,13 @@ function dot(a, b) {
 }
 
 function isEnabled() {
-  return Boolean(config.EMBEDDING_ENABLED && config.OPENROUTER_API_KEY);
+  return Boolean(config.EMBEDDING_ENABLED && (hasGoogleGeminiKeys() || config.OPENROUTER_API_KEY));
+}
+
+function modelId() {
+  return hasGoogleGeminiKeys()
+    ? `google:${config.GOOGLE_EMBEDDING_MODEL}`
+    : `openrouter:${config.EMBEDDING_MODEL}`;
 }
 
 // Получить эмбеддинги для массива строк. Возвращает массив нормированных векторов
@@ -60,6 +68,16 @@ async function embed(texts) {
   const input = (Array.isArray(texts) ? texts : [texts]).map((t) => String(t == null ? '' : t).slice(0, 3500));
   if (!isEnabled()) throw new Error('embeddings_disabled');
   if (!input.length) return [];
+  if (hasGoogleGeminiKeys()) {
+    const response = await getGoogleGeminiClient().embeddings.create({
+      model: config.GOOGLE_EMBEDDING_MODEL,
+      input,
+    });
+    const data = Array.isArray(response && response.data) ? response.data : [];
+    if (data.length !== input.length) throw new Error(`embeddings: ожидали ${input.length}, получили ${data.length}`);
+    data.sort((a, b) => (a.index || 0) - (b.index || 0));
+    return data.map((item) => truncateNormalize(item.embedding, config.EMBEDDING_DIMENSIONS));
+  }
   const res = await fetch('https://openrouter.ai/api/v1/embeddings', {
     method: 'POST',
     headers: {
@@ -88,5 +106,5 @@ async function embedOne(text) {
 
 module.exports = {
   truncateNormalize, packFloat32, unpackFloat32, cosine, dot,
-  isEnabled, embed, embedOne,
+  isEnabled, modelId, embed, embedOne,
 };

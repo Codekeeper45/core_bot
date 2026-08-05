@@ -117,7 +117,7 @@ async function saveFile({ channel, chatId, ownerName, fileName, text, chunkSize,
     content,
     embedding: vectors ? embeddings.packFloat32(vectors[i]) : null,
     dims: vectors ? config.EMBEDDING_DIMENSIONS : null,
-    model: vectors ? config.EMBEDDING_MODEL : null,
+    model: vectors ? embeddings.modelId() : null,
   }));
 
   const saved = await mysql.replaceFile({
@@ -155,7 +155,7 @@ async function searchFiles({ channel, chatId, role, query, fileName = null, limi
       if (qVec.length) {
         const rows = await mysql.loadFileChunkVectors({
           viewer,
-          model: config.EMBEDDING_MODEL,
+          model: embeddings.modelId(),
           dims: config.EMBEDDING_DIMENSIONS,
           fileName,
           limit: config.EMBEDDING_SEARCH_CANDIDATES,

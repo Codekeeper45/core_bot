@@ -18,7 +18,7 @@ async function semanticRecall({ channel, chatId, query, scope = 'chat', limit = 
   const rows = await mysql.loadChunkVectors({
     channel, chatId, scope, viewer,
     fromUtc, toUtc,
-    model: config.EMBEDDING_MODEL,
+    model: embeddings.modelId(),
     dims: config.EMBEDDING_DIMENSIONS,
     limit: config.EMBEDDING_SEARCH_CANDIDATES,
   });

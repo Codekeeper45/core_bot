@@ -6,9 +6,10 @@ const { loadChatHistory, saveChatHistory } = require('./memory');
 const { executeToolCall, toolsForRole } = require('../tools');
 const notifier = require('../services/notifier');
 const { logToolRun } = require('../services/mysql');
-const { withRetry } = require('../utils/retry');
 const { formatToolEcho } = require('../utils/toolEcho');
 const { sanitizeReply } = require('../security/sanitizer');
+const { getGoogleGeminiClient, getGoogleGeminiPool, hasGoogleGeminiKeys } = require('../services/googleGeminiPool');
+const { LlmCircuitBreaker } = require('../services/llmCircuitBreaker');
 
 // Честные сообщения об ошибках: бот обслуживает только своих (босс/сотрудники),
 // поэтому говорим прямо, что и где сломалось и что делать, а не «системы загружены».
@@ -42,21 +43,25 @@ function classifyLlmError(message) {
   return FALLBACK_LLM_GENERIC;
 }
 
-const LLM_MAX_RETRIES = 3; // 3 retries = 4 total attempts (first retry after 20s for 429)
-
 // Observability: agent run outcomes. Every non-success outcome = a degraded
 // client experience (Insight #7: каждый баг = потерянный лид). Surfaced via /health.
 const agentMetrics = {
   total: 0,
   success: 0,
-  llm_error: 0,          // LLM API failed after retries → escalated to manager
+  llm_error: 0,          // every available LLM route failed → escalated to manager
   loop_exhausted: 0,     // 20 iterations without a text reply
   fallback_recovered: 0, // loop exhausted but final no-tool call produced a reply
   empty_reply: 0,        // even fallback produced nothing → FALLBACK_AI
   unexpected_error: 0,   // uncaught exception in the agent loop
   fallback_model_used: 0, // primary model failed → backup model served the request
 };
-function getAgentMetrics() { return { ...agentMetrics }; }
+function getAgentMetrics() {
+  return {
+    ...agentMetrics,
+    llm_routes: llmCircuit.stats(),
+    google_gemini: hasGoogleGeminiKeys() ? getGoogleGeminiPool().stats() : { keys: 0, available: 0 },
+  };
+}
 
 const _toolCallHooks = new Set();
 
@@ -65,78 +70,180 @@ function onToolCall(fn) {
   return () => _toolCallHooks.delete(fn);
 }
 
-let _deepseek, _openrouter, _anymodel;
+let _deepseek, _openrouter, _zai, _anymodel;
 function getDeepSeekClient() {
-  if (!_deepseek) _deepseek = new OpenAI({ baseURL: config.DEEPSEEK_BASE_URL, apiKey: config.DEEPSEEK_API_KEY });
+  if (!_deepseek) _deepseek = new OpenAI({
+    baseURL: config.DEEPSEEK_BASE_URL,
+    apiKey: config.DEEPSEEK_API_KEY,
+    maxRetries: 0,
+    timeout: config.LLM_PROVIDER_TIMEOUT_MS,
+  });
   return _deepseek;
 }
 function getOpenRouterClient() {
-  if (!_openrouter) _openrouter = new OpenAI({ baseURL: 'https://openrouter.ai/api/v1', apiKey: config.OPENROUTER_API_KEY });
+  if (!_openrouter) _openrouter = new OpenAI({
+    baseURL: 'https://openrouter.ai/api/v1',
+    apiKey: config.OPENROUTER_API_KEY,
+    maxRetries: 0,
+    timeout: config.LLM_PROVIDER_TIMEOUT_MS,
+  });
   return _openrouter;
 }
 function getAnymodelClient() {
-  if (!_anymodel) _anymodel = new OpenAI({ baseURL: config.ANYMODEL_BASE_URL, apiKey: config.ANYMODEL_API_KEY });
+  if (!_anymodel) _anymodel = new OpenAI({
+    baseURL: config.ANYMODEL_BASE_URL,
+    apiKey: config.ANYMODEL_API_KEY,
+    maxRetries: 0,
+    timeout: config.LLM_PROVIDER_TIMEOUT_MS,
+  });
   return _anymodel;
 }
-
-const _providerCooldowns = new Map();
-
-function isProviderOnCooldown(label) {
-  const expires = _providerCooldowns.get(label);
-  if (!expires) return false;
-  if (Date.now() > expires) {
-    _providerCooldowns.delete(label);
-    return false;
-  }
-  return true;
+function getZaiClient() {
+  if (!_zai) _zai = new OpenAI({
+    baseURL: config.ZAI_BASE_URL,
+    apiKey: config.ZAI_API_KEY,
+    maxRetries: 0,
+    timeout: config.LLM_PROVIDER_TIMEOUT_MS,
+  });
+  return _zai;
 }
 
-function markProviderCooldown(label, durationMs = 5 * 60 * 1000) {
-  _providerCooldowns.set(label, Date.now() + durationMs);
+function isKnownFreeModel(provider, model) {
+  if (provider === 'google' || provider === 'zai') return true;
+  return provider === 'openrouter'
+    && (model === 'openrouter/free' || /:free$/i.test(String(model || '')));
 }
+
+const llmCircuit = new LlmCircuitBreaker();
 
 // Умная цепочка провайдеров для ТЕКСТОВОГО агента (chat + tool calling):
 //   1) OpenRouter primary model (OPENROUTER_MODEL) — primary,
-//   2) DeepSeek direct (если DEEPSEEK_API_KEY) — fallback #1,
-//   3) AnyModel (anymodel.org, am/glm-5.2) — fallback #2 (если задан ключ),
-//   4) openrouter/free — глобальный бесплатный последний рубеж.
+//   2) Google Gemini с ротацией независимых ключей — быстрый бесплатный fallback,
+//   3) Z.AI GLM-4.7-Flash — бесплатный независимый fallback с tool calling,
+//   4) AnyModel (anymodel.org, am/glm-5.2) — сильный fallback другого провайдера,
+//   5) openrouter/free — глобальный бесплатный последний рубеж.
+// Direct DeepSeek используется как primary только если OpenRouter не настроен.
 // STT/Vision НЕ здесь: DeepSeek/прямые провайдеры не умеют аудио/картинки — они
 // живут в services/openrouterMedia.js (тоже с глобальным openrouter/free-фолбэком).
-function getTextLLMChain() {
+function getTextLLMRoutes() {
   const chain = [];
-  if (config.OPENROUTER_API_KEY && config.OPENROUTER_MODEL) {
-    chain.push({ client: getOpenRouterClient(), model: config.OPENROUTER_MODEL, label: `openrouter:${config.OPENROUTER_MODEL}` });
+  if (config.OPENROUTER_API_KEY && config.OPENROUTER_MODEL
+      && (!config.FREE_AI_ONLY || isKnownFreeModel('openrouter', config.OPENROUTER_MODEL))) {
+    chain.push({
+      client: getOpenRouterClient(), model: config.OPENROUTER_MODEL,
+      label: `openrouter:${config.OPENROUTER_MODEL}`, provider: 'openrouter', tier: 'primary',
+    });
+  } else if (!config.FREE_AI_ONLY && config.DEEPSEEK_API_KEY && config.DEEPSEEK_MODEL) {
+    chain.push({
+      client: getDeepSeekClient(), model: config.DEEPSEEK_MODEL,
+      label: `deepseek:${config.DEEPSEEK_MODEL}`, provider: 'deepseek', tier: 'primary',
+    });
   }
-  if (config.DEEPSEEK_API_KEY && config.DEEPSEEK_MODEL) {
-    chain.push({ client: getDeepSeekClient(), model: config.DEEPSEEK_MODEL, label: `deepseek:${config.DEEPSEEK_MODEL}` });
+  if (hasGoogleGeminiKeys() && config.GOOGLE_GEMINI_MODEL) {
+    chain.push({
+      client: getGoogleGeminiClient(), model: config.GOOGLE_GEMINI_MODEL,
+      label: `google:${config.GOOGLE_GEMINI_MODEL}`, provider: 'google', tier: 'free_quality',
+    });
   }
-  if (config.ANYMODEL_API_KEY && config.ANYMODEL_MODEL) {
-    chain.push({ client: getAnymodelClient(), model: config.ANYMODEL_MODEL, label: `anymodel:${config.ANYMODEL_MODEL}` });
+  if (config.ZAI_API_KEY && config.ZAI_MODEL) {
+    chain.push({
+      client: getZaiClient(), model: config.ZAI_MODEL,
+      label: `zai:${config.ZAI_MODEL}`, provider: 'zai', tier: 'free_quality',
+    });
+  }
+  if (config.ZAI_API_KEY && config.ZAI_FALLBACK_MODEL && config.ZAI_FALLBACK_MODEL !== config.ZAI_MODEL) {
+    chain.push({
+      client: getZaiClient(), model: config.ZAI_FALLBACK_MODEL,
+      label: `zai:${config.ZAI_FALLBACK_MODEL}`, provider: 'zai', tier: 'free_backup',
+    });
+  }
+  if (!config.FREE_AI_ONLY && config.ANYMODEL_API_KEY && config.ANYMODEL_MODEL) {
+    chain.push({
+      client: getAnymodelClient(), model: config.ANYMODEL_MODEL,
+      label: `anymodel:${config.ANYMODEL_MODEL}`, provider: 'anymodel', tier: 'quality_fallback',
+    });
   }
   if (config.OPENROUTER_API_KEY && config.OPENROUTER_FALLBACK_MODEL && config.OPENROUTER_FALLBACK_MODEL !== config.OPENROUTER_MODEL) {
-    chain.push({ client: getOpenRouterClient(), model: config.OPENROUTER_FALLBACK_MODEL, label: `openrouter:${config.OPENROUTER_FALLBACK_MODEL}` });
+    if (config.FREE_AI_ONLY && !isKnownFreeModel('openrouter', config.OPENROUTER_FALLBACK_MODEL)) return chain;
+    chain.push({
+      client: getOpenRouterClient(), model: config.OPENROUTER_FALLBACK_MODEL,
+      label: `openrouter:${config.OPENROUTER_FALLBACK_MODEL}`, provider: 'openrouter', tier: 'last_resort',
+    });
   }
-  const available = chain.filter((p) => !isProviderOnCooldown(p.label));
-  return available.length > 0 ? available : chain;
+  return chain;
+}
+
+function getTextLLMChain() {
+  return llmCircuit.available(getTextLLMRoutes());
 }
 
 // Primary text {client, model} — for callers needing a single client (e.g. контекст-саммари).
 function getPrimaryTextLLM() {
   const chain = getTextLLMChain();
-  if (chain.length === 0) throw new Error('No LLM provider configured (set DEEPSEEK_API_KEY or OPENROUTER_API_KEY)');
+  if (chain.length === 0) throw new Error('No LLM provider configured (OpenRouter, DeepSeek, Google Gemini, Z.AI, or AnyModel)');
   return chain[0];
 }
 // Back-compat alias: returns the primary text client.
 function getOpenAI() { return getPrimaryTextLLM().client; }
 
-// Run a chat completion through the provider chain: each provider gets `retryOpts`
-// retries; if it still fails (outage / no response), fall through to the next.
+// Run a chat completion through the provider chain. Every route gets one attempt:
+// failures open its circuit immediately, so this and later requests skip it.
 // `makeParams(model)` builds the request body for a given model.
 // An optional `client` pins every attempt to that one client (used by tests and
 // any caller that wants a fixed provider) while STILL iterating the configured
 // models for fallback — primary model, then OPENROUTER_FALLBACK_MODEL.
-async function llmCreateWithFallback(makeParams, retryOpts, client) {
+function validateLlmResponse(resp) {
+  if (!resp || !Array.isArray(resp.choices) || resp.choices.length === 0) {
+    const reason = resp && resp.error && resp.error.message ? resp.error.message : 'ответ без choices';
+    const error = new Error(`провайдер вернул некорректный ответ (${reason})`);
+    error.retryable = false;
+    throw error;
+  }
+  return resp;
+}
+
+async function probeTextRoute(route) {
+  const params = {
+    model: route.model,
+    messages: [{ role: 'user', content: 'Reply only: OK' }],
+    max_tokens: 8,
+  };
+  if (route.provider === 'zai') params.thinking = { type: 'disabled' };
+  const response = await route.client.chat.completions.create(
+    params,
+    { timeout: Math.min(config.LLM_PROVIDER_TIMEOUT_MS, 5000) }
+  );
+  validateLlmResponse(response);
+}
+
+let healthWarmupPromise = null;
+function startLlmHealthChecks() {
+  if (healthWarmupPromise) return healthWarmupPromise;
+  const primary = getTextLLMRoutes()[0];
+  if (!primary) return Promise.resolve([]);
+
+  // Probe only the effective primary route during startup. A failed provider is
+  // removed before normal traffic, while later fallbacks spend quota only when used.
+  healthWarmupPromise = (async () => {
+    const started = Date.now();
+    llmCircuit.recordAttempt(primary);
+    try {
+      await probeTextRoute(primary);
+      llmCircuit.recordSuccess(primary, Date.now() - started);
+      console.log(`[Agent] LLM preflight ready: ${primary.label}`);
+      return [{ route: primary.label, available: true }];
+    } catch (error) {
+      const failure = llmCircuit.recordFailure(primary, error, probeTextRoute);
+      console.warn(`[Agent] LLM preflight skipped ${primary.label}: ${failure.type}; using fallback routes`);
+      return [{ route: primary.label, available: false, reason: failure.type }];
+    }
+  })();
+  return healthWarmupPromise;
+}
+
+async function llmCreateWithFallback(makeParams, _retryOpts, client) {
   let chain;
+  let configuredRoutes = [];
   if (client) {
     chain = [];
     if (config.OPENROUTER_MODEL) chain.push({ client, model: config.OPENROUTER_MODEL, label: `pinned:${config.OPENROUTER_MODEL}` });
@@ -145,30 +252,40 @@ async function llmCreateWithFallback(makeParams, retryOpts, client) {
     }
     if (chain.length === 0) chain.push({ client, model: getPrimaryTextLLM().model, label: 'pinned' });
   } else {
+    configuredRoutes = getTextLLMRoutes();
     chain = getTextLLMChain();
   }
-  if (chain.length === 0) throw new Error('No LLM provider configured (set DEEPSEEK_API_KEY or OPENROUTER_API_KEY)');
+  if (chain.length === 0) {
+    if (configuredRoutes.length > 0) {
+      const error = new Error('All LLM providers are temporarily cooling down');
+      error.retryable = false;
+      throw error;
+    }
+    throw new Error('No LLM provider configured (OpenRouter, DeepSeek, Google Gemini, Z.AI, or AnyModel)');
+  }
   let lastErr;
   for (let i = 0; i < chain.length; i++) {
-    const { client: oa, model, label } = chain[i];
+    const route = chain[i];
+    const { client: oa, model, label } = route;
+    const started = Date.now();
+    if (!client) llmCircuit.recordAttempt(route);
     try {
-      const resp = await withRetry(() => oa.chat.completions.create(makeParams(model)), retryOpts);
-      // Некоторые провайдеры (особенно бесплатные модели OpenRouter) на ошибку/лимит
-      // отдают HTTP 200 с телом без choices (часто { error: {...} }). SDK это не бросает,
-      // и дальше `resp.choices[0]` падал бы в unexpected_error. Считаем такой ответ сбоем
-      // провайдера → ретрай/переход к следующему, как при обычной ошибке API.
-      if (!resp || !Array.isArray(resp.choices) || resp.choices.length === 0) {
-        const reason = resp && resp.error && resp.error.message ? resp.error.message : 'ответ без choices';
-        throw new Error(`провайдер вернул некорректный ответ (${reason})`);
-      }
+      const params = makeParams(model);
+      // Free Z.AI routes are speed fallbacks: disabling extended thinking keeps
+      // tool calls inside the provider timeout instead of stalling the chain.
+      if (route.provider === 'zai') params.thinking = { type: 'disabled' };
+      const options = route.provider === 'zai'
+        ? { timeout: Math.min(config.LLM_PROVIDER_TIMEOUT_MS, 12000) }
+        : undefined;
+      const resp = validateLlmResponse(await oa.chat.completions.create(params, options));
+      if (!client) llmCircuit.recordSuccess(route, Date.now() - started);
       return resp;
     } catch (err) {
       lastErr = err;
-      if (err.message && (err.message.includes('402') || err.message.includes('401') || err.message.includes('Insufficient Balance'))) {
-        markProviderCooldown(label, 5 * 60 * 1000);
-      }
+      const failure = client ? null : llmCircuit.recordFailure(route, err, probeTextRoute);
       const more = i < chain.length - 1;
-      console.error(`[Agent] LLM ${label} failed after retries (${err.message})${more ? '; switching to next provider' : '; no more providers'}`);
+      const circuit = failure ? `; circuit=${failure.type}, cooldown=${failure.cooldownMs}ms` : '';
+      console.error(`[Agent] LLM ${label} failed (${err.message})${circuit}${more ? '; switching to next provider' : '; no more providers'}`);
       if (more) agentMetrics.fallback_model_used++;
     }
   }
@@ -291,8 +408,7 @@ async function runAgent({
             tools: activeTools,
             tool_choice: 'auto',
             max_tokens: config.LLM_MAX_TOKENS,
-          }),
-          { maxRetries: LLM_MAX_RETRIES, baseDelay: 2000 }
+          })
         );
       } catch (llmErr) {
         agentMetrics.llm_error++;
@@ -422,8 +538,7 @@ async function runAgent({
           messages: buildLLMMessages(systemPrompt, convoSummary, messages),
           tool_choice: 'none',
           max_tokens: config.LLM_MAX_TOKENS,
-        }),
-        { maxRetries: 2, baseDelay: 1000 }
+        })
       );
       replyText = fallbackResp?.choices?.[0]?.message?.content || '';
     } catch (fbErr) { replyText = ''; _emptyReplyErr = fbErr; }
@@ -462,14 +577,13 @@ async function runAgent({
   try {
     const { summarizeIfNeeded } = require('./contextManager');
     // Сворачивание контекста — тоже LLM-вызов: гоняем через умную цепочку
-    // (DeepSeek → OpenRouter → AnyModel → openrouter/free), чтобы сбой primary
+    // (primary → Gemini → Z.AI → AnyModel → openrouter/free), чтобы сбой primary
     // не ронял память бота.
     const smartClient = {
       chat: {
         completions: {
           create: (params) => llmCreateWithFallback(
-            (model) => ({ ...params, model }),
-            { maxRetries: 1, baseDelay: 500 }
+            (model) => ({ ...params, model })
           ),
         },
       },
@@ -497,9 +611,10 @@ async function runAgent({
 }
 
 module.exports = {
-  runAgent, onToolCall, getAgentMetrics, llmCreateWithFallback,
+  runAgent, onToolCall, getAgentMetrics, llmCreateWithFallback, startLlmHealthChecks,
   _internals: {
-    getTextLLMChain, dropDanglingToolTail, persistErrorHistory, classifyLlmError, capToolCall, FALLBACK_MESSAGES,
+    getTextLLMChain, getTextLLMRoutes, isKnownFreeModel, llmCircuit, validateLlmResponse, probeTextRoute,
+    dropDanglingToolTail, persistErrorHistory, classifyLlmError, capToolCall, FALLBACK_MESSAGES,
     FALLBACK_AI, FALLBACK_BUSY, FALLBACK_NO_CREDITS, FALLBACK_MODEL_REJECTED,
     FALLBACK_RATE_LIMIT, FALLBACK_MODEL_EMPTY, FALLBACK_NETWORK, FALLBACK_NO_PROVIDER,
     FALLBACK_LLM_GENERIC, FALLBACK_INTERNAL,

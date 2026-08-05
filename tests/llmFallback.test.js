@@ -82,29 +82,45 @@ test('no fallback configured → primary error propagates, no second attempt', a
   config.OPENROUTER_FALLBACK_MODEL = saved;
 });
 
-test('умная цепочка главного мозга: OpenRouter → DeepSeek → AnyModel → openrouter/free', () => {
+test('умная цепочка главного мозга: OpenRouter primary → Google → Z.AI → AnyModel → openrouter/free', () => {
   const { _internals } = require('../src/agent/agent');
   const saved = {
+    FREE_AI_ONLY: config.FREE_AI_ONLY,
     DEEPSEEK_API_KEY: config.DEEPSEEK_API_KEY,
     OPENROUTER_API_KEY: config.OPENROUTER_API_KEY,
     ANYMODEL_API_KEY: config.ANYMODEL_API_KEY,
+    ZAI_API_KEY: config.ZAI_API_KEY,
     DEEPSEEK_MODEL: config.DEEPSEEK_MODEL,
     OPENROUTER_MODEL: config.OPENROUTER_MODEL,
     OPENROUTER_FALLBACK_MODEL: config.OPENROUTER_FALLBACK_MODEL,
     ANYMODEL_MODEL: config.ANYMODEL_MODEL,
+    ZAI_MODEL: config.ZAI_MODEL,
+    ZAI_FALLBACK_MODEL: config.ZAI_FALLBACK_MODEL,
+    GOOGLE_GEMINI_API_KEYS: config.GOOGLE_GEMINI_API_KEYS,
+    GOOGLE_GEMINI_API_KEY: config.GOOGLE_GEMINI_API_KEY,
+    GOOGLE_GEMINI_MODEL: config.GOOGLE_GEMINI_MODEL,
   };
   try {
+    config.FREE_AI_ONLY = false;
     config.DEEPSEEK_API_KEY = 'ds';
     config.OPENROUTER_API_KEY = 'or';
     config.ANYMODEL_API_KEY = 'am';
+    config.ZAI_API_KEY = 'zai';
     config.DEEPSEEK_MODEL = 'deepseek-v4-flash';
     config.OPENROUTER_MODEL = 'deepseek/deepseek-v4-flash-0731';
     config.OPENROUTER_FALLBACK_MODEL = 'openrouter/free';
     config.ANYMODEL_MODEL = 'am/glm-5.2';
+    config.ZAI_MODEL = 'glm-4.7-flash';
+    config.ZAI_FALLBACK_MODEL = 'glm-4.5-flash';
+    config.GOOGLE_GEMINI_API_KEYS = ['g1', 'g2'];
+    config.GOOGLE_GEMINI_API_KEY = '';
+    config.GOOGLE_GEMINI_MODEL = 'gemini-3.5-flash-lite';
     const chain = _internals.getTextLLMChain();
     assert.deepStrictEqual(chain.map((x) => x.label), [
       'openrouter:deepseek/deepseek-v4-flash-0731',
-      'deepseek:deepseek-v4-flash',
+      'google:gemini-3.5-flash-lite',
+      'zai:glm-4.7-flash',
+      'zai:glm-4.5-flash',
       'anymodel:am/glm-5.2',
       'openrouter:openrouter/free',
     ]);
@@ -113,27 +129,41 @@ test('умная цепочка главного мозга: OpenRouter → Deep
   }
 });
 
-test('цепочка без AnyModel-ключа: OpenRouter → DeepSeek → openrouter/free', () => {
+test('цепочка без AnyModel-ключа: OpenRouter primary → Google → Z.AI → openrouter/free', () => {
   const { _internals } = require('../src/agent/agent');
   const saved = {
+    FREE_AI_ONLY: config.FREE_AI_ONLY,
     DEEPSEEK_API_KEY: config.DEEPSEEK_API_KEY,
     OPENROUTER_API_KEY: config.OPENROUTER_API_KEY,
     ANYMODEL_API_KEY: config.ANYMODEL_API_KEY,
+    ZAI_API_KEY: config.ZAI_API_KEY,
+    ZAI_FALLBACK_MODEL: config.ZAI_FALLBACK_MODEL,
     DEEPSEEK_MODEL: config.DEEPSEEK_MODEL,
     OPENROUTER_MODEL: config.OPENROUTER_MODEL,
     OPENROUTER_FALLBACK_MODEL: config.OPENROUTER_FALLBACK_MODEL,
+    GOOGLE_GEMINI_API_KEYS: config.GOOGLE_GEMINI_API_KEYS,
+    GOOGLE_GEMINI_API_KEY: config.GOOGLE_GEMINI_API_KEY,
+    GOOGLE_GEMINI_MODEL: config.GOOGLE_GEMINI_MODEL,
   };
   try {
+    config.FREE_AI_ONLY = false;
     config.DEEPSEEK_API_KEY = 'ds';
     config.OPENROUTER_API_KEY = 'or';
     config.ANYMODEL_API_KEY = '';
+    config.ZAI_API_KEY = 'zai';
+    config.ZAI_FALLBACK_MODEL = 'glm-4.5-flash';
     config.DEEPSEEK_MODEL = 'deepseek-v4-flash';
     config.OPENROUTER_MODEL = 'deepseek/deepseek-v4-flash-0731';
     config.OPENROUTER_FALLBACK_MODEL = 'openrouter/free';
+    config.GOOGLE_GEMINI_API_KEYS = ['g1'];
+    config.GOOGLE_GEMINI_API_KEY = '';
+    config.GOOGLE_GEMINI_MODEL = 'gemini-3.5-flash-lite';
     const chain = _internals.getTextLLMChain();
     assert.deepStrictEqual(chain.map((x) => x.label), [
       'openrouter:deepseek/deepseek-v4-flash-0731',
-      'deepseek:deepseek-v4-flash',
+      'google:gemini-3.5-flash-lite',
+      'zai:glm-4.7-flash',
+      'zai:glm-4.5-flash',
       'openrouter:openrouter/free',
     ]);
   } finally {
@@ -141,25 +171,83 @@ test('цепочка без AnyModel-ключа: OpenRouter → DeepSeek → ope
   }
 });
 
-test('цепочка с AnyModel без OpenRouter-ключа: DeepSeek → AnyModel', () => {
+test('без OpenRouter primary используется direct DeepSeek → Google → Z.AI → AnyModel', () => {
   const { _internals } = require('../src/agent/agent');
   const saved = {
+    FREE_AI_ONLY: config.FREE_AI_ONLY,
     DEEPSEEK_API_KEY: config.DEEPSEEK_API_KEY,
     OPENROUTER_API_KEY: config.OPENROUTER_API_KEY,
     ANYMODEL_API_KEY: config.ANYMODEL_API_KEY,
+    ZAI_API_KEY: config.ZAI_API_KEY,
     DEEPSEEK_MODEL: config.DEEPSEEK_MODEL,
     ANYMODEL_MODEL: config.ANYMODEL_MODEL,
+    ZAI_MODEL: config.ZAI_MODEL,
+    ZAI_FALLBACK_MODEL: config.ZAI_FALLBACK_MODEL,
+    GOOGLE_GEMINI_API_KEYS: config.GOOGLE_GEMINI_API_KEYS,
+    GOOGLE_GEMINI_API_KEY: config.GOOGLE_GEMINI_API_KEY,
+    GOOGLE_GEMINI_MODEL: config.GOOGLE_GEMINI_MODEL,
   };
   try {
+    config.FREE_AI_ONLY = false;
     config.DEEPSEEK_API_KEY = 'ds';
     config.OPENROUTER_API_KEY = '';
     config.ANYMODEL_API_KEY = 'am';
+    config.ZAI_API_KEY = 'zai';
     config.DEEPSEEK_MODEL = 'deepseek-v4-flash';
     config.ANYMODEL_MODEL = 'am/glm-5.2';
+    config.ZAI_MODEL = 'glm-4.7-flash';
+    config.ZAI_FALLBACK_MODEL = 'glm-4.5-flash';
+    config.GOOGLE_GEMINI_API_KEYS = ['g1'];
+    config.GOOGLE_GEMINI_API_KEY = '';
+    config.GOOGLE_GEMINI_MODEL = 'gemini-3.5-flash-lite';
     const chain = _internals.getTextLLMChain();
     assert.deepStrictEqual(chain.map((x) => x.label), [
       'deepseek:deepseek-v4-flash',
+      'google:gemini-3.5-flash-lite',
+      'zai:glm-4.7-flash',
+      'zai:glm-4.5-flash',
       'anymodel:am/glm-5.2',
+    ]);
+  } finally {
+    Object.assign(config, saved);
+  }
+});
+
+test('FREE_AI_ONLY исключает DeepSeek и AnyModel, оставляя только бесплатную цепочку', () => {
+  const { _internals } = require('../src/agent/agent');
+  const saved = {
+    FREE_AI_ONLY: config.FREE_AI_ONLY,
+    DEEPSEEK_API_KEY: config.DEEPSEEK_API_KEY,
+    OPENROUTER_API_KEY: config.OPENROUTER_API_KEY,
+    OPENROUTER_MODEL: config.OPENROUTER_MODEL,
+    OPENROUTER_FALLBACK_MODEL: config.OPENROUTER_FALLBACK_MODEL,
+    ANYMODEL_API_KEY: config.ANYMODEL_API_KEY,
+    ZAI_API_KEY: config.ZAI_API_KEY,
+    ZAI_MODEL: config.ZAI_MODEL,
+    ZAI_FALLBACK_MODEL: config.ZAI_FALLBACK_MODEL,
+    GOOGLE_GEMINI_API_KEYS: config.GOOGLE_GEMINI_API_KEYS,
+    GOOGLE_GEMINI_API_KEY: config.GOOGLE_GEMINI_API_KEY,
+    GOOGLE_GEMINI_MODEL: config.GOOGLE_GEMINI_MODEL,
+  };
+  try {
+    config.FREE_AI_ONLY = true;
+    config.DEEPSEEK_API_KEY = 'ds';
+    config.OPENROUTER_API_KEY = 'or';
+    config.OPENROUTER_MODEL = 'deepseek/deepseek-v4-flash-0731';
+    config.OPENROUTER_FALLBACK_MODEL = 'openrouter/free';
+    config.ANYMODEL_API_KEY = 'am';
+    config.ZAI_API_KEY = 'zai';
+    config.ZAI_MODEL = 'glm-4.7-flash';
+    config.ZAI_FALLBACK_MODEL = 'glm-4.5-flash';
+    config.GOOGLE_GEMINI_API_KEYS = ['g1'];
+    config.GOOGLE_GEMINI_API_KEY = '';
+    config.GOOGLE_GEMINI_MODEL = 'gemini-3.5-flash-lite';
+
+    assert.deepEqual(_internals.getTextLLMRoutes().map((route) => route.label), [
+      'google:gemini-3.5-flash-lite',
+      'zai:glm-4.7-flash',
+      'zai:glm-4.5-flash',
+      'openrouter:openrouter/free',
     ]);
   } finally {
     Object.assign(config, saved);

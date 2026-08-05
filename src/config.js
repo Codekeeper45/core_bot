@@ -13,6 +13,10 @@ module.exports = {
   // Server
   PORT: parseInt(process.env.PORT || '3000', 10),
 
+  // Безопасный режим этого развёртывания: маршруты с потенциальной оплатой
+  // исключаются полностью, а не проверяются балансом на каждом запросе.
+  FREE_AI_ONLY: process.env.FREE_AI_ONLY !== '0' && process.env.FREE_AI_ONLY !== 'false',
+
   // OpenRouter — остаётся для STT (голос) и Vision (картинки), которых нет у
   // DeepSeek, а также как fallback для текстового агента, если DeepSeek недоступен.
   OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY || '',
@@ -23,19 +27,37 @@ module.exports = {
   // картинок). Стоит ПОСЛЕДНИМ звеном умной цепочки главного мозга и фолбэком
   // Vision/Video. Set to '' to disable.
   OPENROUTER_FALLBACK_MODEL: process.env.OPENROUTER_FALLBACK_MODEL || 'openrouter/free',
-  // DeepSeek (прямой API) — ОСНОВНОЙ текстовый агент + AI-резюме. OpenAI-совместим.
-  // Если DEEPSEEK_API_KEY пуст — текстовый агент автоматически работает через
-  // OpenRouter (обратная совместимость). DeepSeek V4 Flash поддерживает tool calling.
+  // DeepSeek (прямой API) — первый fallback после основной модели OpenRouter.
+  // Если OPENROUTER_API_KEY пуст, становится основным текстовым провайдером.
+  // DeepSeek V4 Flash поддерживает tool calling.
   // STT/Vision DeepSeek НЕ умеет.
   DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY || '',
   DEEPSEEK_BASE_URL: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
   DEEPSEEK_MODEL: process.env.DEEPSEEK_MODEL || 'deepseek-v4-flash',
   // AnyModel (anymodel.org) — дополнительный провайдер в умном фолбэке главного
-  // мозга (после DeepSeek-на-OpenRouter, перед openrouter/free). OpenAI-совместимый
+  // мозга (после Gemini, перед openrouter/free). OpenAI-совместимый
   // эндпоинт; ключ задаётся в .env (не в git).
   ANYMODEL_API_KEY: process.env.ANYMODEL_API_KEY || '',
   ANYMODEL_BASE_URL: process.env.ANYMODEL_BASE_URL || 'https://anymodel.org/v1',
   ANYMODEL_MODEL: process.env.ANYMODEL_MODEL || 'am/glm-5.2',
+  // Прямой Gemini fallback с независимой квотой на каждом ключе. Ключи
+  // распределяются round-robin; исчерпавший квоту ключ временно уходит на cooldown.
+  GOOGLE_GEMINI_API_KEY: process.env.GOOGLE_GEMINI_API_KEY || '',
+  GOOGLE_GEMINI_API_KEYS: (process.env.GOOGLE_GEMINI_API_KEYS || '').split(',').map((s) => s.trim()).filter(Boolean),
+  GOOGLE_GEMINI_BASE_URL: process.env.GOOGLE_GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai/',
+  GOOGLE_GEMINI_NATIVE_BASE_URL: process.env.GOOGLE_GEMINI_NATIVE_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta',
+  GOOGLE_GEMINI_MODEL: process.env.GOOGLE_GEMINI_MODEL || 'gemini-3.5-flash-lite',
+  GOOGLE_EMBEDDING_MODEL: process.env.GOOGLE_EMBEDDING_MODEL || 'gemini-embedding-2',
+  GOOGLE_GEMINI_QUOTA_COOLDOWN_MS: Math.max(1000,
+    parseInt(process.env.GOOGLE_GEMINI_QUOTA_COOLDOWN_MS || '60000', 10) || 60000),
+  GOOGLE_GEMINI_TIMEOUT_MS: Math.max(1000,
+    parseInt(process.env.GOOGLE_GEMINI_TIMEOUT_MS || '60000', 10) || 60000),
+  // Бесплатный GLM через официальный Z.AI API. В текстовой цепочке идёт сразу
+  // после Gemini и до AnyModel/OpenRouter Free.
+  ZAI_API_KEY: process.env.ZAI_API_KEY || '',
+  ZAI_BASE_URL: process.env.ZAI_BASE_URL || 'https://api.z.ai/api/paas/v4/',
+  ZAI_MODEL: process.env.ZAI_MODEL || 'glm-4.7-flash',
+  ZAI_FALLBACK_MODEL: process.env.ZAI_FALLBACK_MODEL || 'glm-4.5-flash',
   // Потолок длины ответа LLM (output tokens). ВАЖНО: без явного лимита OpenRouter
   // резервирует полный лимит модели (напр. 65536) и требует баланс под него → 402
   // «requires more credits». Явный потолок снимает 402 и удешевляет ответы. 32768 —
@@ -43,6 +65,10 @@ module.exports = {
   // ПРИМЕЧАНИЕ: при почти пустом балансе OpenRouter даже этот лимит может дать 402 —
   // тогда нужно пополнить баланс, а не уменьшать лимит.
   LLM_MAX_TOKENS: parseInt(process.env.LLM_MAX_TOKENS || '32768', 10),
+  // Один провайдер не должен подвешивать всю цепочку. Скрытые SDK-ретраи отключены;
+  // после этого таймаута circuit открывается и запрос сразу идёт следующему маршруту.
+  LLM_PROVIDER_TIMEOUT_MS: Math.max(5000,
+    parseInt(process.env.LLM_PROVIDER_TIMEOUT_MS || '30000', 10) || 30000),
 
   // STT (распознавание речи) и Vision (распознавание картинок) через OpenRouter.
   // У каждого есть primary + fallback: если primary падает после ретраев —
@@ -195,13 +221,14 @@ module.exports = {
   CONTEXT_SUMMARY_HARD_CHAR_LIMIT: parseInt(process.env.CONTEXT_SUMMARY_HARD_CHAR_LIMIT || '160000', 10),
   CONTEXT_KEEP_RECENT_MSGS: 20,
 
-  // Семантический поиск по архиву (RAG). Эмбеддим чанки по EMBEDDING_CHUNK_SIZE
-  // сообщений моделью EMBEDDING_MODEL через OpenRouter, усекаем вектор до
+  // Семантический поиск по архиву (RAG). При наличии Google-ключей используем
+  // бесплатный GOOGLE_EMBEDDING_MODEL; иначе — EMBEDDING_MODEL через OpenRouter.
+  // Вектор усекаем до
   // EMBEDDING_DIMENSIONS (Matryoshka) и нормализуем. Включается при наличии
-  // OPENROUTER_API_KEY; EMBEDDING_ENABLED=0 принудительно выключает (тогда recall
+  // ключа выбранного провайдера; EMBEDDING_ENABLED=0 выключает (тогда recall
   // работает по ключевым словам, как раньше).
   EMBEDDING_ENABLED: process.env.EMBEDDING_ENABLED !== '0' && process.env.EMBEDDING_ENABLED !== 'false',
-  EMBEDDING_MODEL: process.env.EMBEDDING_MODEL || 'qwen/qwen3-embedding-8b',
+  EMBEDDING_MODEL: process.env.EMBEDDING_MODEL || 'nvidia/llama-nemotron-embed-vl-1b-v2:free',
   EMBEDDING_DIMENSIONS: parseInt(process.env.EMBEDDING_DIMENSIONS || '1024', 10),
   EMBEDDING_CHUNK_SIZE: parseInt(process.env.EMBEDDING_CHUNK_SIZE || '10', 10),
   EMBEDDING_WORKER_INTERVAL_MS: parseInt(process.env.EMBEDDING_WORKER_INTERVAL_MS || '60000', 10),

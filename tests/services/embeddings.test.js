@@ -43,9 +43,13 @@ describe('embeddings: чистые хелперы', () => {
 describe('embeddings: embed() через замоканный fetch', () => {
   test('возвращает нормированные векторы длины EMBEDDING_DIMENSIONS, в порядке input', async () => {
     const savedKey = config.OPENROUTER_API_KEY;
+    const savedGoogle = config.GOOGLE_GEMINI_API_KEYS;
+    const savedGoogleSingle = config.GOOGLE_GEMINI_API_KEY;
     const savedDims = config.EMBEDDING_DIMENSIONS;
     const savedFetch = global.fetch;
     config.OPENROUTER_API_KEY = 'test-key';
+    config.GOOGLE_GEMINI_API_KEYS = [];
+    config.GOOGLE_GEMINI_API_KEY = '';
     config.EMBEDDING_DIMENSIONS = 3;
     let seenBody = null;
     global.fetch = async (url, opts) => {
@@ -71,6 +75,8 @@ describe('embeddings: embed() через замоканный fetch', () => {
       assert.deepEqual(seenBody.input, ['первый', 'второй']);
     } finally {
       config.OPENROUTER_API_KEY = savedKey;
+      config.GOOGLE_GEMINI_API_KEYS = savedGoogle;
+      config.GOOGLE_GEMINI_API_KEY = savedGoogleSingle;
       config.EMBEDDING_DIMENSIONS = savedDims;
       global.fetch = savedFetch;
     }
@@ -78,11 +84,17 @@ describe('embeddings: embed() через замоканный fetch', () => {
 
   test('embed бросает при выключенных эмбеддингах', async () => {
     const savedKey = config.OPENROUTER_API_KEY;
+    const savedGoogle = config.GOOGLE_GEMINI_API_KEYS;
+    const savedGoogleSingle = config.GOOGLE_GEMINI_API_KEY;
     config.OPENROUTER_API_KEY = '';
+    config.GOOGLE_GEMINI_API_KEYS = [];
+    config.GOOGLE_GEMINI_API_KEY = '';
     try {
       await assert.rejects(() => emb.embed(['x']), /embeddings_disabled/);
     } finally {
       config.OPENROUTER_API_KEY = savedKey;
+      config.GOOGLE_GEMINI_API_KEYS = savedGoogle;
+      config.GOOGLE_GEMINI_API_KEY = savedGoogleSingle;
     }
   });
 });

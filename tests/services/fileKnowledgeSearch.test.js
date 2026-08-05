@@ -7,6 +7,7 @@ const Module = require('module');
 let enabled = true;
 const embeddingsMock = {
   isEnabled: () => enabled,
+  modelId: () => 'test:embedding',
   embedOne: async () => [1, 0],
   embed: async (texts) => texts.map(() => [1, 0]),
   packFloat32: (v) => v,
@@ -101,6 +102,6 @@ describe('fileKnowledge.saveFile', () => {
     assert.equal(r.embedded, true);
     assert.ok(capturedChunks.length >= 1);
     assert.equal(capturedChunks[0].dims, config.EMBEDDING_DIMENSIONS);
-    assert.equal(capturedChunks[0].model, config.EMBEDDING_MODEL);
+    assert.equal(capturedChunks[0].model, 'test:embedding');
   });
 });

@@ -6,6 +6,7 @@ const Module = require('module');
 // Моки: эмбеддинги детерминированные, mysql отдаёт чанки с готовыми векторами.
 const embeddingsMock = {
   isEnabled: () => true,
+  modelId: () => 'test:embedding',
   embedOne: async () => [1, 0], // вектор запроса
   unpackFloat32: (v) => v,       // в тесте embedding хранится массивом
   dot: (a, b) => a.reduce((s, x, i) => s + x * (b[i] || 0), 0),

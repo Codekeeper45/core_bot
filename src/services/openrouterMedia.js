@@ -1,6 +1,10 @@
 'use strict';
 const OpenAI = require('openai');
 const config = require('../config');
+const {
+  getGoogleGeminiClient, getGoogleGeminiPool, hasGoogleGeminiKeys,
+} = require('./googleGeminiPool');
+const { _internals: circuitInternals } = require('./llmCircuitBreaker');
 
 const _mediaModelCooldowns = new Map();
 
@@ -18,11 +22,23 @@ function markMediaModelCooldown(model, durationMs = 5 * 60 * 1000) {
   _mediaModelCooldowns.set(model, Date.now() + durationMs);
 }
 
+function cooldownFor(error) {
+  return circuitInternals.classifyCircuitError(error).cooldownMs;
+}
+
+function isFreeOpenRouterModel(model) {
+  return model === 'openrouter/free' || /:free$/i.test(String(model || ''));
+}
+
 // Цепочки моделей: primary → fallback. Пустые/дубли отбрасываются, сбойные на кулдауне пропускаются.
 function modelChain(primary, fallback) {
   const chain = [primary, fallback].filter((m, i, a) => m && a.indexOf(m) === i);
-  const available = chain.filter((m) => !isMediaModelOnCooldown(m));
-  return available.length > 0 ? available : chain;
+  return chain.filter((m) => !isMediaModelOnCooldown(m));
+}
+
+function freeModelChain(...models) {
+  return [...new Set(models.filter(isFreeOpenRouterModel))]
+    .filter((model) => !isMediaModelOnCooldown(model));
 }
 
 let client;
@@ -31,6 +47,8 @@ function getClient() {
     client = new OpenAI({
       baseURL: 'https://openrouter.ai/api/v1',
       apiKey: config.OPENROUTER_API_KEY,
+      maxRetries: 0,
+      timeout: config.LLM_PROVIDER_TIMEOUT_MS,
     });
   }
   return client;
@@ -77,15 +95,13 @@ function isChatAudioModel(model) {
 }
 
 async function transcribeWithChatAudio(model, base64, format) {
-  const mime = { ogg: 'audio/ogg', webm: 'audio/webm', mp3: 'audio/mpeg', mp4: 'audio/mp4', wav: 'audio/wav', aac: 'audio/aac', flac: 'audio/flac' }[format] || 'audio/ogg';
-  const dataUrl = `data:${mime};base64,${base64}`;
   const response = await getClient().chat.completions.create({
     model,
     messages: [
       {
         role: 'user',
         content: [
-          { type: 'audio_url', audio_url: { url: dataUrl } },
+          { type: 'input_audio', input_audio: { data: base64, format } },
           { type: 'text', text: 'Распознай речь из этого аудио и верни ТОЛЬКО расшифрованный текст.' },
         ],
       },
@@ -97,33 +113,58 @@ async function transcribeWithChatAudio(model, base64, format) {
   return text;
 }
 
+async function transcribeWithGoogle(base64, format) {
+  const response = await getGoogleGeminiClient().chat.completions.create({
+    model: config.GOOGLE_GEMINI_MODEL,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Распознай речь из этого аудио и верни ТОЛЬКО расшифрованный текст.' },
+        { type: 'input_audio', input_audio: { data: base64, format } },
+      ],
+    }],
+    max_tokens: 1024,
+  });
+  const text = (response.choices?.[0]?.message?.content || '').trim();
+  if (!text) throw new Error('Google STT returned an empty response');
+  return text;
+}
+
 async function transcribeAudio(buffer, mimeType = 'audio/ogg') {
   const base64 = buffer.toString('base64');
   const format = detectAudioFormat(mimeType);
-  const chain = modelChain(config.STT_MODEL, config.STT_FALLBACK_MODEL);
+  const chain = freeModelChain(
+    config.STT_MODEL,
+    config.STT_FALLBACK_MODEL,
+    config.OPENROUTER_FALLBACK_MODEL
+  );
 
   let lastErr;
-  for (const model of chain) {
+  if (hasGoogleGeminiKeys()) {
     try {
-      return await transcribeWithModel(model, base64, format);
+      return await transcribeWithGoogle(base64, format);
     } catch (err) {
       lastErr = err;
-      if (err.message && (err.message.includes('402') || err.message.includes('401') || err.message.includes('Insufficient Balance'))) {
-        markMediaModelCooldown(model, 5 * 60 * 1000);
-      }
-      console.error(`[STT] модель ${model} не сработала (transcriptions): ${err.message}`);
+      console.error(`[STT] Google Gemini не сработал: ${err.message}`);
     }
-    // Для omni-моделей пробуем chat-audio путь (transcriptions им не подходит).
-    if (isChatAudioModel(model)) {
+  }
+  for (const model of chain) {
+    if (isChatAudioModel(model) || model === 'openrouter/free') {
       try {
         return await transcribeWithChatAudio(model, base64, format);
       } catch (err) {
         lastErr = err;
-        if (err.message && (err.message.includes('402') || err.message.includes('401') || err.message.includes('Insufficient Balance'))) {
-          markMediaModelCooldown(model, 5 * 60 * 1000);
-        }
+        markMediaModelCooldown(model, cooldownFor(err));
         console.error(`[STT] модель ${model} не сработала (chat-audio): ${err.message}`);
       }
+      continue;
+    }
+    try {
+      return await transcribeWithModel(model, base64, format);
+    } catch (err) {
+      lastErr = err;
+      markMediaModelCooldown(model, cooldownFor(err));
+      console.error(`[STT] модель ${model} не сработала (transcriptions): ${err.message}`);
     }
   }
   throw lastErr || new Error('STT: не задана ни одна модель');
@@ -140,18 +181,34 @@ async function analyzeImageBase64(base64, mimeType = 'image/jpeg', prompt) {
       ],
     },
   ];
-  const chain = modelChain(config.VISION_MODEL, config.VISION_FALLBACK_MODEL);
+  const chain = freeModelChain(
+    config.VISION_MODEL,
+    config.VISION_FALLBACK_MODEL,
+    config.OPENROUTER_FALLBACK_MODEL
+  );
 
   let lastErr;
+  if (hasGoogleGeminiKeys()) {
+    try {
+      const response = await getGoogleGeminiClient().chat.completions.create({
+        model: config.GOOGLE_GEMINI_MODEL,
+        messages,
+      });
+      const text = (response.choices?.[0]?.message?.content || '').trim();
+      if (!text) throw new Error('Google Vision returned an empty response');
+      return text;
+    } catch (err) {
+      lastErr = err;
+      console.error(`[Vision] Google Gemini не сработал: ${err.message}`);
+    }
+  }
   for (const model of chain) {
     try {
       const response = await getClient().chat.completions.create({ model, messages });
       return (response.choices[0]?.message?.content || '').trim();
     } catch (err) {
       lastErr = err;
-      if (err.message && (err.message.includes('402') || err.message.includes('401') || err.message.includes('Insufficient Balance'))) {
-        markMediaModelCooldown(model, 5 * 60 * 1000);
-      }
+      markMediaModelCooldown(model, cooldownFor(err));
       console.error(`[Vision] модель ${model} не сработала: ${err.message}`);
     }
   }
@@ -166,9 +223,51 @@ async function analyzeImageUrl(imageUrl, prompt) {
   return analyzeImageBase64(buffer.toString('base64'), mimeType, prompt);
 }
 
-// Видео (обычное, кружок, гифка) — Gemini смотрит его целиком через OpenRouter
-// content type video_url с base64 data-URL (OpenRouter маршрутизирует в провайдера
-// с поддержкой видео; форматы mp4/mpeg/mov/webm).
+function interactionText(json) {
+  if (json && typeof json.output_text === 'string') return json.output_text.trim();
+  const parts = [];
+  for (const step of (json && Array.isArray(json.steps) ? json.steps : [])) {
+    if (step.type !== 'model_output' || !Array.isArray(step.content)) continue;
+    for (const item of step.content) {
+      if (item && item.type === 'text' && item.text) parts.push(String(item.text));
+    }
+  }
+  return parts.join('\n').trim();
+}
+
+async function analyzeVideoWithGoogle(base64, mimeType, prompt) {
+  return getGoogleGeminiPool().execute(async (_client, key) => {
+    const response = await fetch(`${config.GOOGLE_GEMINI_NATIVE_BASE_URL}/interactions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': key,
+      },
+      body: JSON.stringify({
+        model: config.GOOGLE_GEMINI_MODEL,
+        input: [
+          { type: 'video', data: base64, mime_type: mimeType },
+          { type: 'text', text: prompt },
+        ],
+      }),
+      signal: AbortSignal.timeout(config.GOOGLE_GEMINI_TIMEOUT_MS),
+    });
+    const json = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(`Google Video ${response.status}: ${json.error?.message || 'request failed'}`);
+      error.status = response.status;
+      error.headers = response.headers;
+      throw error;
+    }
+    const text = interactionText(json);
+    if (!text) throw new Error('Google Video returned an empty response');
+    return text;
+  });
+}
+
+// Видео (обычное, кружок, гифка) сначала смотрит прямой бесплатный Gemini.
+// OpenRouter остаётся резервом только вне FREE_AI_ONLY: даже free-router требует
+// положительный баланс аккаунта для video input.
 async function analyzeVideoBase64(base64, mimeType = 'video/mp4', prompt) {
   const dataUrl = `data:${mimeType};base64,${base64}`;
   const messages = [
@@ -180,22 +279,36 @@ async function analyzeVideoBase64(base64, mimeType = 'video/mp4', prompt) {
       ],
     },
   ];
-  const chain = modelChain(config.VIDEO_MODEL, config.VIDEO_FALLBACK_MODEL);
+  const chain = config.FREE_AI_ONLY ? [] : freeModelChain(
+    config.VIDEO_MODEL, config.VIDEO_FALLBACK_MODEL, config.OPENROUTER_FALLBACK_MODEL
+  );
 
   let lastErr;
+  if (hasGoogleGeminiKeys()) {
+    try {
+      return await analyzeVideoWithGoogle(base64, mimeType, prompt);
+    } catch (err) {
+      lastErr = err;
+      console.error(`[Video] Google Gemini не сработал: ${err.message}`);
+    }
+  }
   for (const model of chain) {
     try {
       const response = await getClient().chat.completions.create({ model, messages });
       return (response.choices[0]?.message?.content || '').trim();
     } catch (err) {
       lastErr = err;
-      if (err.message && (err.message.includes('402') || err.message.includes('401') || err.message.includes('Insufficient Balance'))) {
-        markMediaModelCooldown(model, 5 * 60 * 1000);
-      }
+      markMediaModelCooldown(model, cooldownFor(err));
       console.error(`[Video] модель ${model} не сработала: ${err.message}`);
     }
   }
   throw lastErr || new Error('Video: не задана ни одна модель');
 }
 
-module.exports = { transcribeAudio, analyzeImageUrl, analyzeImageBase64, analyzeVideoBase64 };
+module.exports = {
+  transcribeAudio, analyzeImageUrl, analyzeImageBase64, analyzeVideoBase64,
+  _internals: {
+    isMediaModelOnCooldown, markMediaModelCooldown, isFreeOpenRouterModel,
+    modelChain, freeModelChain, detectAudioFormat, isChatAudioModel, interactionText,
+  },
+};
