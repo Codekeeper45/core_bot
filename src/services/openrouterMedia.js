@@ -112,8 +112,8 @@ function isChatAudioModel(model) {
   return /nemotron|omni/i.test(model || '');
 }
 
-// Нативный Gemini API для аудио (через REST, не через OpenAI-compat слой).
-// Gemini OpenAI-compat НЕ поддерживает input_audio в messages — нужен inlineData.
+// Нативный Gemini REST API для аудио (inlineData) — единственный способ
+// передать аудио в Gemini. OpenAI-compat слой аудио НЕ поддерживает.
 async function transcribeWithGoogle(base64, format) {
   const mimeMap = {
     ogg: 'audio/ogg', webm: 'audio/webm', mp3: 'audio/mpeg',
@@ -121,27 +121,38 @@ async function transcribeWithGoogle(base64, format) {
     aac: 'audio/aac', flac: 'audio/flac',
   };
   const mimeType = mimeMap[format] || 'audio/ogg';
+  const model = config.GOOGLE_GEMINI_MODEL;
+  const nativeBase = (config.GOOGLE_GEMINI_NATIVE_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/$/, '');
   const pool = getGoogleGeminiPool();
-  // pool.execute вызывает fn(client) с автоматической ротацией ключей
-  const response = await pool.execute(async (client) => {
-    return client.chat.completions.create({
-      model: config.GOOGLE_GEMINI_MODEL,
-      messages: [{
-        role: 'user',
-        content: [
-          {
-            type: 'image_url',
-            image_url: { url: `data:${mimeType};base64,${base64}` },
-          },
-          { type: 'text', text: 'Распознай речь из этого аудио и верни ТОЛЬКО расшифрованный текст без пояснений.' },
+
+  // pool.execute передаёт (client, key) — берём key для нативного REST запроса
+  return pool.execute(async (_client, key) => {
+    const url = `${nativeBase}/models/${model}:generateContent?key=${key}`;
+    const body = {
+      contents: [{
+        parts: [
+          { inline_data: { mime_type: mimeType, data: base64 } },
+          { text: 'Распознай речь из этого аудио и верни ТОЛЬКО расшифрованный текст без пояснений.' },
         ],
       }],
-      max_tokens: 1024,
+      generationConfig: { maxOutputTokens: 1024 },
+    };
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
     });
+    if (!resp.ok) {
+      const errBody = await resp.text();
+      const err = new Error(`Google STT ${resp.status}: ${errBody}`);
+      err.status = resp.status;
+      throw err;
+    }
+    const data = await resp.json();
+    const text = (data?.candidates?.[0]?.content?.parts?.[0]?.text || '').trim();
+    if (!text) throw new Error('Google STT returned an empty response');
+    return text;
   });
-  const text = (response.choices?.[0]?.message?.content || '').trim();
-  if (!text) throw new Error('Google STT returned an empty response');
-  return text;
 }
 
 function nvidiaMediaRoute() {
