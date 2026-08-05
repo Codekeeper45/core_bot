@@ -56,7 +56,7 @@ module.exports = {
   // separate from direct DeepSeek because the billing/quota owner is NVIDIA.
   NVIDIA_NIM_API_KEY: process.env.NVIDIA_NIM_API_KEY || '',
   NVIDIA_NIM_BASE_URL: process.env.NVIDIA_NIM_BASE_URL || 'https://integrate.api.nvidia.com/v1',
-  NVIDIA_NIM_MODEL: process.env.NVIDIA_NIM_MODEL || 'meta/llama-3.1-70b-instruct',
+  NVIDIA_NIM_MODEL: process.env.NVIDIA_NIM_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b',
   NVIDIA_NIM_MEDIA_MODEL: process.env.NVIDIA_NIM_MEDIA_MODEL
     || 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning',
   NVIDIA_NIM_MAX_TOKENS: Math.max(256,

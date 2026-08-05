@@ -118,12 +118,12 @@ test('умная цепочка главного мозга: OpenRouter primary 
     config.GOOGLE_GEMINI_API_KEY = '';
     config.GOOGLE_GEMINI_MODEL = 'gemini-3.5-flash-lite';
     config.NVIDIA_NIM_API_KEY = 'nv';
-    config.NVIDIA_NIM_MODEL = 'deepseek-ai/deepseek-v4-flash';
+    config.NVIDIA_NIM_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b';
     const chain = _internals.getTextLLMChain();
     assert.deepStrictEqual(chain.map((x) => x.label), [
       'openrouter:deepseek/deepseek-v4-flash-0731',
+      'nvidia_nim:nvidia/nemotron-3-ultra-550b-a55b',
       'google:gemini-3.5-flash-lite',
-      'nvidia_nim:deepseek-ai/deepseek-v4-flash',
       'zai:glm-4.7-flash',
       'zai:glm-4.5-flash',
       'anymodel:am/glm-5.2',
@@ -166,12 +166,12 @@ test('цепочка без AnyModel-ключа: OpenRouter primary → Google �
     config.GOOGLE_GEMINI_API_KEY = '';
     config.GOOGLE_GEMINI_MODEL = 'gemini-3.5-flash-lite';
     config.NVIDIA_NIM_API_KEY = 'nv';
-    config.NVIDIA_NIM_MODEL = 'deepseek-ai/deepseek-v4-flash';
+    config.NVIDIA_NIM_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b';
     const chain = _internals.getTextLLMChain();
     assert.deepStrictEqual(chain.map((x) => x.label), [
       'openrouter:deepseek/deepseek-v4-flash-0731',
+      'nvidia_nim:nvidia/nemotron-3-ultra-550b-a55b',
       'google:gemini-3.5-flash-lite',
-      'nvidia_nim:deepseek-ai/deepseek-v4-flash',
       'zai:glm-4.7-flash',
       'zai:glm-4.5-flash',
       'openrouter:openrouter/free',
@@ -181,7 +181,7 @@ test('цепочка без AnyModel-ключа: OpenRouter primary → Google �
   }
 });
 
-test('без OpenRouter primary используется direct DeepSeek → Google → NVIDIA NIM → Z.AI → AnyModel', () => {
+test('без OpenRouter primary используется direct DeepSeek → NVIDIA NIM → Google → Z.AI → AnyModel', () => {
   const { _internals } = require('../src/agent/agent');
   const saved = {
     FREE_AI_ONLY: config.FREE_AI_ONLY,
@@ -213,12 +213,12 @@ test('без OpenRouter primary используется direct DeepSeek → Goo
     config.GOOGLE_GEMINI_API_KEY = '';
     config.GOOGLE_GEMINI_MODEL = 'gemini-3.5-flash-lite';
     config.NVIDIA_NIM_API_KEY = 'nv';
-    config.NVIDIA_NIM_MODEL = 'deepseek-ai/deepseek-v4-flash';
+    config.NVIDIA_NIM_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b';
     const chain = _internals.getTextLLMChain();
     assert.deepStrictEqual(chain.map((x) => x.label), [
       'deepseek:deepseek-v4-flash',
+      'nvidia_nim:nvidia/nemotron-3-ultra-550b-a55b',
       'google:gemini-3.5-flash-lite',
-      'nvidia_nim:deepseek-ai/deepseek-v4-flash',
       'zai:glm-4.7-flash',
       'zai:glm-4.5-flash',
       'anymodel:am/glm-5.2',
@@ -260,11 +260,11 @@ test('FREE_AI_ONLY исключает DeepSeek и AnyModel, оставляя т�
     config.GOOGLE_GEMINI_API_KEY = '';
     config.GOOGLE_GEMINI_MODEL = 'gemini-3.5-flash-lite';
     config.NVIDIA_NIM_API_KEY = 'nv';
-    config.NVIDIA_NIM_MODEL = 'deepseek-ai/deepseek-v4-flash';
+    config.NVIDIA_NIM_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b';
 
     assert.deepEqual(_internals.getTextLLMRoutes().map((route) => route.label), [
+      'nvidia_nim:nvidia/nemotron-3-ultra-550b-a55b',
       'google:gemini-3.5-flash-lite',
-      'nvidia_nim:deepseek-ai/deepseek-v4-flash',
       'zai:glm-4.7-flash',
       'zai:glm-4.5-flash',
       'openrouter:openrouter/free',
