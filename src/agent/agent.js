@@ -221,8 +221,6 @@ function getPrimaryTextLLM() {
   if (chain.length === 0) throw new Error('No LLM provider configured (OpenRouter, DeepSeek, Google Gemini, NVIDIA NIM, Z.AI, or AnyModel)');
   return chain[0];
 }
-// Back-compat alias: returns the primary text client.
-function getOpenAI() { return getPrimaryTextLLM().client; }
 
 // Run a chat completion through the provider chain. Every route gets one attempt:
 // failures open its circuit immediately, so this and later requests skip it.

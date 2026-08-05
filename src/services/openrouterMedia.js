@@ -108,9 +108,6 @@ async function transcribeWithModel(model, base64, format) {
   return (result.text || '').trim();
 }
 
-function isChatAudioModel(model) {
-  return /nemotron|omni/i.test(model || '');
-}
 
 // Нативный Gemini REST API для аудио (inlineData) — единственный способ
 // передать аудио в Gemini. OpenAI-compat слой аудио НЕ поддерживает.
@@ -389,6 +386,6 @@ module.exports = {
   _internals: {
     isMediaModelOnCooldown, markMediaModelCooldown, isFreeOpenRouterModel,
     modelChain, freeModelChain, mediaModelChainWithLastResort, detectAudioFormat,
-    isChatAudioModel, interactionText, nvidiaMediaRoute,
+    interactionText, nvidiaMediaRoute,
   },
 };
