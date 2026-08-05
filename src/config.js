@@ -52,6 +52,14 @@ module.exports = {
     parseInt(process.env.GOOGLE_GEMINI_QUOTA_COOLDOWN_MS || '60000', 10) || 60000),
   GOOGLE_GEMINI_TIMEOUT_MS: Math.max(1000,
     parseInt(process.env.GOOGLE_GEMINI_TIMEOUT_MS || '60000', 10) || 60000),
+  // NVIDIA NIM — OpenAI-compatible free DeepSeek V4 Flash route. It is kept
+  // separate from direct DeepSeek because the billing/quota owner is NVIDIA.
+  NVIDIA_NIM_API_KEY: process.env.NVIDIA_NIM_API_KEY || '',
+  NVIDIA_NIM_BASE_URL: process.env.NVIDIA_NIM_BASE_URL || 'https://integrate.api.nvidia.com/v1',
+  NVIDIA_NIM_MODEL: process.env.NVIDIA_NIM_MODEL || 'deepseek-ai/deepseek-v4-flash',
+  NVIDIA_NIM_MAX_TOKENS: Math.max(256,
+    parseInt(process.env.NVIDIA_NIM_MAX_TOKENS || '16384', 10) || 16384),
+  NVIDIA_NIM_REASONING_EFFORT: process.env.NVIDIA_NIM_REASONING_EFFORT || 'high',
   // Бесплатный GLM через официальный Z.AI API. В текстовой цепочке идёт сразу
   // после Gemini и до AnyModel/OpenRouter Free.
   ZAI_API_KEY: process.env.ZAI_API_KEY || '',

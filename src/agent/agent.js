@@ -70,7 +70,7 @@ function onToolCall(fn) {
   return () => _toolCallHooks.delete(fn);
 }
 
-let _deepseek, _openrouter, _zai, _anymodel;
+let _deepseek, _openrouter, _zai, _anymodel, _nvidiaNim;
 function getDeepSeekClient() {
   if (!_deepseek) _deepseek = new OpenAI({
     baseURL: config.DEEPSEEK_BASE_URL,
@@ -107,6 +107,15 @@ function getZaiClient() {
   });
   return _zai;
 }
+function getNvidiaNimClient() {
+  if (!_nvidiaNim) _nvidiaNim = new OpenAI({
+    baseURL: config.NVIDIA_NIM_BASE_URL,
+    apiKey: config.NVIDIA_NIM_API_KEY,
+    maxRetries: 0,
+    timeout: config.LLM_PROVIDER_TIMEOUT_MS,
+  });
+  return _nvidiaNim;
+}
 
 function isKnownFreeModel(provider, model) {
   if (provider === 'google' || provider === 'zai') return true;
@@ -119,9 +128,10 @@ const llmCircuit = new LlmCircuitBreaker();
 // Умная цепочка провайдеров для ТЕКСТОВОГО агента (chat + tool calling):
 //   1) OpenRouter primary model (OPENROUTER_MODEL) — primary,
 //   2) Google Gemini с ротацией независимых ключей — быстрый бесплатный fallback,
-//   3) Z.AI GLM-4.7-Flash — бесплатный независимый fallback с tool calling,
-//   4) AnyModel (anymodel.org, am/glm-5.2) — сильный fallback другого провайдера,
-//   5) openrouter/free — глобальный бесплатный последний рубеж.
+//   3) NVIDIA NIM DeepSeek V4 Flash — бесплатный reasoning/tool-calling route,
+//   4) Z.AI GLM-4.7-Flash — бесплатный независимый fallback с tool calling,
+//   5) AnyModel (anymodel.org, am/glm-5.2) — сильный fallback другого провайдера,
+//   6) openrouter/free — глобальный бесплатный последний рубеж.
 // Direct DeepSeek используется как primary только если OpenRouter не настроен.
 // STT/Vision НЕ здесь: DeepSeek/прямые провайдеры не умеют аудио/картинки — они
 // живут в services/openrouterMedia.js (тоже с глобальным openrouter/free-фолбэком).
@@ -143,6 +153,12 @@ function getTextLLMRoutes() {
     chain.push({
       client: getGoogleGeminiClient(), model: config.GOOGLE_GEMINI_MODEL,
       label: `google:${config.GOOGLE_GEMINI_MODEL}`, provider: 'google', tier: 'free_quality',
+    });
+  }
+  if (config.NVIDIA_NIM_API_KEY && config.NVIDIA_NIM_MODEL) {
+    chain.push({
+      client: getNvidiaNimClient(), model: config.NVIDIA_NIM_MODEL,
+      label: `nvidia_nim:${config.NVIDIA_NIM_MODEL}`, provider: 'nvidia_nim', tier: 'free_quality',
     });
   }
   if (config.ZAI_API_KEY && config.ZAI_MODEL) {
@@ -175,6 +191,28 @@ function getTextLLMRoutes() {
 
 function getTextLLMChain() {
   return llmCircuit.available(getTextLLMRoutes());
+}
+
+function applyNvidiaNimParams(params) {
+  const body = params || {};
+  // Python's OpenAI client expands extra_body into the request body. The JS
+  // SDK does not, so NIM must receive chat_template_kwargs at top level.
+  const suppliedTemplate = body.chat_template_kwargs
+    || (body.extra_body && body.extra_body.chat_template_kwargs)
+    || {};
+  delete body.extra_body;
+  body.max_tokens = Math.min(
+    Number(body.max_tokens) || config.NVIDIA_NIM_MAX_TOKENS,
+    config.NVIDIA_NIM_MAX_TOKENS
+  );
+  body.temperature = 1;
+  body.top_p = 0.95;
+  body.chat_template_kwargs = {
+    ...suppliedTemplate,
+    thinking: true,
+    reasoning_effort: config.NVIDIA_NIM_REASONING_EFFORT,
+  };
+  return body;
 }
 
 // Primary text {client, model} — for callers needing a single client (e.g. контекст-саммари).
@@ -271,6 +309,9 @@ async function llmCreateWithFallback(makeParams, _retryOpts, client) {
     if (!client) llmCircuit.recordAttempt(route);
     try {
       const params = makeParams(model);
+      if (route.provider === 'nvidia_nim') {
+        applyNvidiaNimParams(params);
+      }
       // Free Z.AI routes are speed fallbacks: disabling extended thinking keeps
       // tool calls inside the provider timeout instead of stalling the chain.
       if (route.provider === 'zai') params.thinking = { type: 'disabled' };
@@ -613,7 +654,8 @@ async function runAgent({
 module.exports = {
   runAgent, onToolCall, getAgentMetrics, llmCreateWithFallback, startLlmHealthChecks,
   _internals: {
-    getTextLLMChain, getTextLLMRoutes, isKnownFreeModel, llmCircuit, validateLlmResponse, probeTextRoute,
+    getTextLLMChain, getTextLLMRoutes, isKnownFreeModel, applyNvidiaNimParams,
+    llmCircuit, validateLlmResponse, probeTextRoute,
     dropDanglingToolTail, persistErrorHistory, classifyLlmError, capToolCall, FALLBACK_MESSAGES,
     FALLBACK_AI, FALLBACK_BUSY, FALLBACK_NO_CREDITS, FALLBACK_MODEL_REJECTED,
     FALLBACK_RATE_LIMIT, FALLBACK_MODEL_EMPTY, FALLBACK_NETWORK, FALLBACK_NO_PROVIDER,

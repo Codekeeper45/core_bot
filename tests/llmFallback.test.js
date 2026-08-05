@@ -82,7 +82,7 @@ test('no fallback configured → primary error propagates, no second attempt', a
   config.OPENROUTER_FALLBACK_MODEL = saved;
 });
 
-test('умная цепочка главного мозга: OpenRouter primary → Google → Z.AI → AnyModel → openrouter/free', () => {
+test('умная цепочка главного мозга: OpenRouter primary → Google → NVIDIA NIM → Z.AI → AnyModel → openrouter/free', () => {
   const { _internals } = require('../src/agent/agent');
   const saved = {
     FREE_AI_ONLY: config.FREE_AI_ONLY,
@@ -99,6 +99,8 @@ test('умная цепочка главного мозга: OpenRouter primary 
     GOOGLE_GEMINI_API_KEYS: config.GOOGLE_GEMINI_API_KEYS,
     GOOGLE_GEMINI_API_KEY: config.GOOGLE_GEMINI_API_KEY,
     GOOGLE_GEMINI_MODEL: config.GOOGLE_GEMINI_MODEL,
+    NVIDIA_NIM_API_KEY: config.NVIDIA_NIM_API_KEY,
+    NVIDIA_NIM_MODEL: config.NVIDIA_NIM_MODEL,
   };
   try {
     config.FREE_AI_ONLY = false;
@@ -115,10 +117,13 @@ test('умная цепочка главного мозга: OpenRouter primary 
     config.GOOGLE_GEMINI_API_KEYS = ['g1', 'g2'];
     config.GOOGLE_GEMINI_API_KEY = '';
     config.GOOGLE_GEMINI_MODEL = 'gemini-3.5-flash-lite';
+    config.NVIDIA_NIM_API_KEY = 'nv';
+    config.NVIDIA_NIM_MODEL = 'deepseek-ai/deepseek-v4-flash';
     const chain = _internals.getTextLLMChain();
     assert.deepStrictEqual(chain.map((x) => x.label), [
       'openrouter:deepseek/deepseek-v4-flash-0731',
       'google:gemini-3.5-flash-lite',
+      'nvidia_nim:deepseek-ai/deepseek-v4-flash',
       'zai:glm-4.7-flash',
       'zai:glm-4.5-flash',
       'anymodel:am/glm-5.2',
@@ -129,7 +134,7 @@ test('умная цепочка главного мозга: OpenRouter primary 
   }
 });
 
-test('цепочка без AnyModel-ключа: OpenRouter primary → Google → Z.AI → openrouter/free', () => {
+test('цепочка без AnyModel-ключа: OpenRouter primary → Google → NVIDIA NIM → Z.AI → openrouter/free', () => {
   const { _internals } = require('../src/agent/agent');
   const saved = {
     FREE_AI_ONLY: config.FREE_AI_ONLY,
@@ -144,6 +149,8 @@ test('цепочка без AnyModel-ключа: OpenRouter primary → Google �
     GOOGLE_GEMINI_API_KEYS: config.GOOGLE_GEMINI_API_KEYS,
     GOOGLE_GEMINI_API_KEY: config.GOOGLE_GEMINI_API_KEY,
     GOOGLE_GEMINI_MODEL: config.GOOGLE_GEMINI_MODEL,
+    NVIDIA_NIM_API_KEY: config.NVIDIA_NIM_API_KEY,
+    NVIDIA_NIM_MODEL: config.NVIDIA_NIM_MODEL,
   };
   try {
     config.FREE_AI_ONLY = false;
@@ -158,10 +165,13 @@ test('цепочка без AnyModel-ключа: OpenRouter primary → Google �
     config.GOOGLE_GEMINI_API_KEYS = ['g1'];
     config.GOOGLE_GEMINI_API_KEY = '';
     config.GOOGLE_GEMINI_MODEL = 'gemini-3.5-flash-lite';
+    config.NVIDIA_NIM_API_KEY = 'nv';
+    config.NVIDIA_NIM_MODEL = 'deepseek-ai/deepseek-v4-flash';
     const chain = _internals.getTextLLMChain();
     assert.deepStrictEqual(chain.map((x) => x.label), [
       'openrouter:deepseek/deepseek-v4-flash-0731',
       'google:gemini-3.5-flash-lite',
+      'nvidia_nim:deepseek-ai/deepseek-v4-flash',
       'zai:glm-4.7-flash',
       'zai:glm-4.5-flash',
       'openrouter:openrouter/free',
@@ -171,7 +181,7 @@ test('цепочка без AnyModel-ключа: OpenRouter primary → Google �
   }
 });
 
-test('без OpenRouter primary используется direct DeepSeek → Google → Z.AI → AnyModel', () => {
+test('без OpenRouter primary используется direct DeepSeek → Google → NVIDIA NIM → Z.AI → AnyModel', () => {
   const { _internals } = require('../src/agent/agent');
   const saved = {
     FREE_AI_ONLY: config.FREE_AI_ONLY,
@@ -186,6 +196,8 @@ test('без OpenRouter primary используется direct DeepSeek → Goo
     GOOGLE_GEMINI_API_KEYS: config.GOOGLE_GEMINI_API_KEYS,
     GOOGLE_GEMINI_API_KEY: config.GOOGLE_GEMINI_API_KEY,
     GOOGLE_GEMINI_MODEL: config.GOOGLE_GEMINI_MODEL,
+    NVIDIA_NIM_API_KEY: config.NVIDIA_NIM_API_KEY,
+    NVIDIA_NIM_MODEL: config.NVIDIA_NIM_MODEL,
   };
   try {
     config.FREE_AI_ONLY = false;
@@ -200,10 +212,13 @@ test('без OpenRouter primary используется direct DeepSeek → Goo
     config.GOOGLE_GEMINI_API_KEYS = ['g1'];
     config.GOOGLE_GEMINI_API_KEY = '';
     config.GOOGLE_GEMINI_MODEL = 'gemini-3.5-flash-lite';
+    config.NVIDIA_NIM_API_KEY = 'nv';
+    config.NVIDIA_NIM_MODEL = 'deepseek-ai/deepseek-v4-flash';
     const chain = _internals.getTextLLMChain();
     assert.deepStrictEqual(chain.map((x) => x.label), [
       'deepseek:deepseek-v4-flash',
       'google:gemini-3.5-flash-lite',
+      'nvidia_nim:deepseek-ai/deepseek-v4-flash',
       'zai:glm-4.7-flash',
       'zai:glm-4.5-flash',
       'anymodel:am/glm-5.2',
@@ -228,6 +243,8 @@ test('FREE_AI_ONLY исключает DeepSeek и AnyModel, оставляя т�
     GOOGLE_GEMINI_API_KEYS: config.GOOGLE_GEMINI_API_KEYS,
     GOOGLE_GEMINI_API_KEY: config.GOOGLE_GEMINI_API_KEY,
     GOOGLE_GEMINI_MODEL: config.GOOGLE_GEMINI_MODEL,
+    NVIDIA_NIM_API_KEY: config.NVIDIA_NIM_API_KEY,
+    NVIDIA_NIM_MODEL: config.NVIDIA_NIM_MODEL,
   };
   try {
     config.FREE_AI_ONLY = true;
@@ -242,9 +259,12 @@ test('FREE_AI_ONLY исключает DeepSeek и AnyModel, оставляя т�
     config.GOOGLE_GEMINI_API_KEYS = ['g1'];
     config.GOOGLE_GEMINI_API_KEY = '';
     config.GOOGLE_GEMINI_MODEL = 'gemini-3.5-flash-lite';
+    config.NVIDIA_NIM_API_KEY = 'nv';
+    config.NVIDIA_NIM_MODEL = 'deepseek-ai/deepseek-v4-flash';
 
     assert.deepEqual(_internals.getTextLLMRoutes().map((route) => route.label), [
       'google:gemini-3.5-flash-lite',
+      'nvidia_nim:deepseek-ai/deepseek-v4-flash',
       'zai:glm-4.7-flash',
       'zai:glm-4.5-flash',
       'openrouter:openrouter/free',
@@ -252,4 +272,24 @@ test('FREE_AI_ONLY исключает DeepSeek и AnyModel, оставляя т�
   } finally {
     Object.assign(config, saved);
   }
+});
+
+test('NVIDIA NIM получает JS-совместимый reasoning payload и ограничение 16k', () => {
+  const { _internals } = require('../src/agent/agent');
+  const params = {
+    model: 'deepseek-ai/deepseek-v4-flash',
+    messages: [],
+    max_tokens: 32768,
+    extra_body: { chat_template_kwargs: { custom_flag: true } },
+  };
+  _internals.applyNvidiaNimParams(params);
+  assert.equal(params.max_tokens, 16384);
+  assert.equal(params.temperature, 1);
+  assert.equal(params.top_p, 0.95);
+  assert.equal(params.extra_body, undefined);
+  assert.deepEqual(params.chat_template_kwargs, {
+    custom_flag: true,
+    thinking: true,
+    reasoning_effort: 'high',
+  });
 });
