@@ -218,7 +218,7 @@ function applyNvidiaNimParams(params) {
 // Primary text {client, model} — for callers needing a single client (e.g. контекст-саммари).
 function getPrimaryTextLLM() {
   const chain = getTextLLMChain();
-  if (chain.length === 0) throw new Error('No LLM provider configured (OpenRouter, DeepSeek, Google Gemini, Z.AI, or AnyModel)');
+  if (chain.length === 0) throw new Error('No LLM provider configured (OpenRouter, DeepSeek, Google Gemini, NVIDIA NIM, Z.AI, or AnyModel)');
   return chain[0];
 }
 // Back-compat alias: returns the primary text client.
@@ -299,7 +299,7 @@ async function llmCreateWithFallback(makeParams, _retryOpts, client) {
       error.retryable = false;
       throw error;
     }
-    throw new Error('No LLM provider configured (OpenRouter, DeepSeek, Google Gemini, Z.AI, or AnyModel)');
+    throw new Error('No LLM provider configured (OpenRouter, DeepSeek, Google Gemini, NVIDIA NIM, Z.AI, or AnyModel)');
   }
   let lastErr;
   for (let i = 0; i < chain.length; i++) {
@@ -618,7 +618,7 @@ async function runAgent({
   try {
     const { summarizeIfNeeded } = require('./contextManager');
     // Сворачивание контекста — тоже LLM-вызов: гоняем через умную цепочку
-    // (primary → Gemini → Z.AI → AnyModel → openrouter/free), чтобы сбой primary
+    // (primary → Gemini → NVIDIA NIM → Z.AI → AnyModel → openrouter/free), чтобы сбой primary
     // не ронял память бота.
     const smartClient = {
       chat: {
