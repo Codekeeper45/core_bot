@@ -149,16 +149,16 @@ function getTextLLMRoutes() {
       label: `deepseek:${config.DEEPSEEK_MODEL}`, provider: 'deepseek', tier: 'primary',
     });
   }
-  if (config.NVIDIA_NIM_API_KEY && config.NVIDIA_NIM_MODEL) {
-    chain.push({
-      client: getNvidiaNimClient(), model: config.NVIDIA_NIM_MODEL,
-      label: `nvidia_nim:${config.NVIDIA_NIM_MODEL}`, provider: 'nvidia_nim', tier: 'free_quality',
-    });
-  }
   if (hasGoogleGeminiKeys() && config.GOOGLE_GEMINI_MODEL) {
     chain.push({
       client: getGoogleGeminiClient(), model: config.GOOGLE_GEMINI_MODEL,
       label: `google:${config.GOOGLE_GEMINI_MODEL}`, provider: 'google', tier: 'free_quality',
+    });
+  }
+  if (config.NVIDIA_NIM_API_KEY && config.NVIDIA_NIM_MODEL) {
+    chain.push({
+      client: getNvidiaNimClient(), model: config.NVIDIA_NIM_MODEL,
+      label: `nvidia_nim:${config.NVIDIA_NIM_MODEL}`, provider: 'nvidia_nim', tier: 'free_quality',
     });
   }
   if (config.ZAI_API_KEY && config.ZAI_MODEL) {
