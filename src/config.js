@@ -57,6 +57,8 @@ module.exports = {
   NVIDIA_NIM_API_KEY: process.env.NVIDIA_NIM_API_KEY || '',
   NVIDIA_NIM_BASE_URL: process.env.NVIDIA_NIM_BASE_URL || 'https://integrate.api.nvidia.com/v1',
   NVIDIA_NIM_MODEL: process.env.NVIDIA_NIM_MODEL || 'deepseek-ai/deepseek-v4-flash',
+  NVIDIA_NIM_MEDIA_MODEL: process.env.NVIDIA_NIM_MEDIA_MODEL
+    || 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning',
   NVIDIA_NIM_MAX_TOKENS: Math.max(256,
     parseInt(process.env.NVIDIA_NIM_MAX_TOKENS || '16384', 10) || 16384),
   NVIDIA_NIM_REASONING_EFFORT: process.env.NVIDIA_NIM_REASONING_EFFORT || 'high',

@@ -50,6 +50,7 @@ function mediaModelChainWithLastResort(...models) {
 }
 
 let client;
+let nvidiaNimClient;
 function getClient() {
   if (!client) {
     client = new OpenAI({
@@ -60,6 +61,18 @@ function getClient() {
     });
   }
   return client;
+}
+
+function getNvidiaNimClient() {
+  if (!nvidiaNimClient) {
+    nvidiaNimClient = new OpenAI({
+      baseURL: config.NVIDIA_NIM_BASE_URL,
+      apiKey: config.NVIDIA_NIM_API_KEY,
+      maxRetries: 0,
+      timeout: config.LLM_PROVIDER_TIMEOUT_MS,
+    });
+  }
+  return nvidiaNimClient;
 }
 
 function detectAudioFormat(mimeType) {
@@ -138,6 +151,30 @@ async function transcribeWithGoogle(base64, format) {
   return text;
 }
 
+function nvidiaMediaRoute() {
+  return `nvidia_nim_media:${config.NVIDIA_NIM_MEDIA_MODEL}`;
+}
+
+async function transcribeWithNvidiaNim(base64, format) {
+  const response = await getNvidiaNimClient().chat.completions.create({
+    model: config.NVIDIA_NIM_MEDIA_MODEL,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'input_audio', input_audio: { data: base64, format } },
+        { type: 'text', text: 'Распознай речь из этого аудио и верни ТОЛЬКО расшифрованный текст.' },
+      ],
+    }],
+    max_tokens: 1024,
+    temperature: 0.6,
+    top_p: 0.95,
+    chat_template_kwargs: { enable_thinking: false },
+  });
+  const text = (response.choices?.[0]?.message?.content || '').trim();
+  if (!text) throw new Error('NVIDIA NIM STT returned an empty response');
+  return text;
+}
+
 async function transcribeAudio(buffer, mimeType = 'audio/ogg') {
   const base64 = buffer.toString('base64');
   const format = detectAudioFormat(mimeType);
@@ -173,6 +210,16 @@ async function transcribeAudio(buffer, mimeType = 'audio/ogg') {
       lastErr = err;
       markMediaModelCooldown(model, cooldownFor(err));
       console.error(`[STT] модель ${model} не сработала (transcriptions): ${err.message}`);
+    }
+  }
+  const route = nvidiaMediaRoute();
+  if (config.NVIDIA_NIM_API_KEY && config.NVIDIA_NIM_MEDIA_MODEL && !isMediaModelOnCooldown(route)) {
+    try {
+      return await transcribeWithNvidiaNim(base64, format);
+    } catch (err) {
+      lastErr = err;
+      markMediaModelCooldown(route, cooldownFor(err));
+      console.error(`[STT] NVIDIA NIM media fallback не сработал: ${err.message}`);
     }
   }
   throw lastErr || new Error('STT: не задана ни одна модель');
@@ -218,6 +265,26 @@ async function analyzeImageBase64(base64, mimeType = 'image/jpeg', prompt) {
       lastErr = err;
       markMediaModelCooldown(model, cooldownFor(err));
       console.error(`[Vision] модель ${model} не сработала: ${err.message}`);
+    }
+  }
+  const route = nvidiaMediaRoute();
+  if (config.NVIDIA_NIM_API_KEY && config.NVIDIA_NIM_MEDIA_MODEL && !isMediaModelOnCooldown(route)) {
+    try {
+      const response = await getNvidiaNimClient().chat.completions.create({
+        model: config.NVIDIA_NIM_MEDIA_MODEL,
+        messages,
+        max_tokens: 1024,
+        temperature: 0.6,
+        top_p: 0.95,
+        chat_template_kwargs: { enable_thinking: false },
+      });
+      const text = (response.choices?.[0]?.message?.content || '').trim();
+      if (!text) throw new Error('NVIDIA NIM Vision returned an empty response');
+      return text;
+    } catch (err) {
+      lastErr = err;
+      markMediaModelCooldown(route, cooldownFor(err));
+      console.error(`[Vision] NVIDIA NIM media fallback не сработал: ${err.message}`);
     }
   }
   throw lastErr || new Error('Vision: не задана ни одна модель');
@@ -318,6 +385,6 @@ module.exports = {
   _internals: {
     isMediaModelOnCooldown, markMediaModelCooldown, isFreeOpenRouterModel,
     modelChain, freeModelChain, mediaModelChainWithLastResort, detectAudioFormat,
-    isChatAudioModel, interactionText,
+    isChatAudioModel, interactionText, nvidiaMediaRoute,
   },
 };

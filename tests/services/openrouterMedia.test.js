@@ -28,6 +28,10 @@ test('Nemotron остаётся последним media fallback после Ope
   ]);
 });
 
+test('прямой NVIDIA NIM media route отделён от OpenRouter slug', () => {
+  assert.equal(_internals.nvidiaMediaRoute(), 'nvidia_nim_media:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning');
+});
+
 test('платные OpenRouter media-модели не считаются бесплатными', () => {
   assert.equal(_internals.isFreeOpenRouterModel('google/gemini-3.1-flash-lite-preview'), false);
   assert.equal(_internals.isFreeOpenRouterModel('openrouter/free'), true);
